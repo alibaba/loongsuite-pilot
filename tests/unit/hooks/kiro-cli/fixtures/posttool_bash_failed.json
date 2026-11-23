@@ -1,0 +1,15 @@
+{
+  "_source": "tester pilot-probe 实测真实 postToolUse payload（comment 3e69f850, kiro-cli v2.8.0）。execute_bash 执行 `cat /nonexistent-xxx-file-12345` 失败：kiro 仍报 success=true，退出码在 result[].exit_status。",
+  "tool_name": "execute_bash",
+  "tool_input": { "command": "cat /nonexistent-xxx-file-12345" },
+  "tool_response": {
+    "success": true,
+    "result": [
+      {
+        "exit_status": "1",
+        "stdout": "",
+        "stderr": "cat: /nonexistent-xxx-file-12345: No such file or directory"
+      }
+    ]
+  }
+}

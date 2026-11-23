@@ -1,150 +1,301 @@
 #!/usr/bin/env node
 /**
- * Qoder / Qoder-CLI hook transcript processor.
- *
- * Parses the full transcript (including progress events) to determine
- * precise LLM call boundaries, merges thinking+text+tool_use into
- * unified multi-part responses, and uses progress timestamps for
- * accurate LLM span timing.
+ * Qoder/QoderCN Hook: publish bounded metadata only. The collector imports
+ * the exported semantic parser below and supplies bounded native Turn ranges.
  */
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import {
   parseArgs,
-  parseStdinPayload,
-  logDebug,
-  getLineRange,
-  getTranscriptLineCount,
-  readTranscriptLines,
-  appendRowsToHistory,
-  updateLineRecord,
-  loadHookRuntimeConfig,
   getErrorLogFile,
-  HOOKS_DIR,
-  LOONGSUITE_PILOT_LOGS_BASE_DIR,
+  LOONGSUITE_PILOT_DATA_DIR,
 } from './shared/hook-processor-base.mjs';
 import {
   buildQoderHookRecord,
   inferProviderName,
+  toJsonValue,
 } from './agent-event-normalizer.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
+  parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
+import { publishQoderWakeup, readQoderHookPayload } from './qoder/hook-wakeup.mjs';
+import { applyQoderProductIdentity } from './qoder/product-identity.mjs';
+
+export { applyQoderProductIdentity };
 
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: 'qoder' });
-const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
-const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
-  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
-  : {};
+// Caller-supplied span attributes (e.g. multica.*) stamped as top-level record
+// fields so the trace flusher can pass matching keys through to span attributes.
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
+  agentId: 'qoder',
+  allowInvocationIdentity: true,
+});
 
-// --- Retry lockfile (qoder-cn only) -----------------------------------------
-// QoderCN fires Stop hook multiple times per turn AND incomplete transcript
-// causes background retries — without coordination these can stack up and
-// produce duplicate records. We guard at two points:
-//   1. parent process: skip spawn if a live lock exists
-//   2. retry subprocess: refuse to enter processTranscript if a peer holds it
-// The lock file lives at <HOOKS_DIR>/.retry-locks/<sha1>.lock and contains
-// JSON `{ pid, sessionId, startedAt }`.
+const MAX_USER_IDENTITY_VALUE_LENGTH = 512;
+const QODER_HOME = path.join(os.homedir(), '.qoder');
+const QODER_CN_HOME = path.join(os.homedir(), '.qoder-cn');
+const QODER_CLI_STATUS_TIMEOUT_MS = 3000;
+const QODER_CLI_STATUS_FAILURE_TTL_MS = 60_000;
+const QODER_CLI_IDENTITY = {
+  home: QODER_HOME,
+  cliDirName: 'qodercli',
+  executablePrefix: 'qodercli',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cli-user-identity.json'),
+};
+const QODER_CN_CLI_IDENTITY = {
+  home: QODER_CN_HOME,
+  cliDirName: 'qoderclicn',
+  executablePrefix: 'qoderclicn',
+  cacheFile: path.join(LOONGSUITE_PILOT_DATA_DIR, 'state', 'hooks', 'qoder-cn-cli-user-identity.json'),
+};
 
-export const RETRY_LOCK_DIR = path.join(HOOKS_DIR, '.retry-locks');
-export const RETRY_LOCK_MAX_AGE_MS = 60_000;
-
-export function retryLockPath(transcriptPath, dir = RETRY_LOCK_DIR) {
-  const hash = crypto.createHash('sha1').update(transcriptPath).digest('hex');
-  return path.join(dir, `${hash}.lock`);
-}
-
-export function pidAlive(pid) {
-  if (!pid || typeof pid !== 'number') return false;
+function smallText(file, limit = 16 * 1024) {
+  const fd = fs.openSync(file, 'r');
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e && e.code === 'EPERM';
-  }
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) throw new Error('metadata-byte-limit');
+    const buffer = Buffer.alloc(limit + 1);
+    const bytes = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (bytes > limit) throw new Error('metadata-byte-limit');
+    return buffer.toString('utf8', 0, bytes);
+  } finally { fs.closeSync(fd); }
 }
 
-export function readRetryLock(lockPath) {
+function nonEmptyIdentityValue(value) {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed && trimmed.length <= MAX_USER_IDENTITY_VALUE_LENGTH ? trimmed : undefined;
+}
+
+export function extractUserIdentity(extra) {
+  if (!extra || typeof extra !== 'object' || Array.isArray(extra)) return undefined;
+  const user = extra.user;
+  if (!user || typeof user !== 'object' || Array.isArray(user)) return undefined;
+  const name = nonEmptyIdentityValue(user.name);
+  const email = accountEmail(user.email);
+  return userIdentityFields(name, email);
+}
+
+// Phone-only Alibaba Cloud accounts may have a name without an email.
+// Never treat a login name, phone, or account ID as email.
+function accountEmail(value) {
+  const email = nonEmptyIdentityValue(value);
+  return email && /^[^\s@]+@[^\s@]+$/.test(email) ? email : undefined;
+}
+
+function userIdentityFields(name, email) {
+  if (!name && !email) return undefined;
+  return { name: name || '', email: email || '' };
+}
+
+function readQoderAppUserIdentity(agentId) {
+  const product = { qoder: 'qoder', 'qoder-cn': 'qodercn' }[agentId];
+  if (!product) return undefined;
+  // This is the Desktop's public account projection, not its credential store.
+  // It is rewritten on account changes (including logout), not on a heartbeat.
+  // Read per Stop and carry that snapshot through retries, rather than caching
+  // it by session or mixing the Desktop account into an IDE invocation.
+  const statusPath = path.join(os.homedir(), `.${agentId}`, '.qoder-app-status.json');
+  const limit = 16 * 1024;
+  let fd;
   try {
-    const raw = fs.readFileSync(lockPath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object') return parsed;
-  } catch { /* fall through */ }
-  return null;
-}
-
-export function isRetryLockStale(lock) {
-  if (!lock) return true;
-  const age = Date.now() - (Number(lock.startedAt) || 0);
-  if (age > RETRY_LOCK_MAX_AGE_MS) return true;
-  return !pidAlive(lock.pid);
-}
-
-export function tryAcquireRetryLock(transcriptPath, sessionId, dir = RETRY_LOCK_DIR) {
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const payload = JSON.stringify({ pid: process.pid, sessionId, startedAt: Date.now() });
-    try {
-      const handle = fs.openSync(lockPath, 'wx');
-      fs.writeSync(handle, payload);
-      fs.closeSync(handle);
-      return true;
-    } catch (err) {
-      if (err && err.code === 'EEXIST') {
-        const existing = readRetryLock(lockPath);
-        if (isRetryLockStale(existing)) {
-          try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
-          try {
-            const handle = fs.openSync(lockPath, 'wx');
-            fs.writeSync(handle, payload);
-            fs.closeSync(handle);
-            return true;
-          } catch { return false; }
-        }
-        return false;
-      }
-      return false;
-    }
+    fd = fs.openSync(statusPath, 'r');
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) return undefined;
+    const buffer = Buffer.alloc(limit + 1);
+    const length = fs.readSync(fd, buffer, 0, buffer.length, 0);
+    if (length > limit) return undefined;
+    const status = JSON.parse(buffer.toString('utf8', 0, length));
+    if (status?.schema_version !== 1 || status.product !== product
+      || status.writer !== 'main' || status.logged_in !== true) return undefined;
+    const snapshotAt = typeof status.snapshot_at === 'string' ? Date.parse(status.snapshot_at) : NaN;
+    if (!Number.isFinite(snapshotAt) || snapshotAt > Date.now() + 5 * 60_000) return undefined;
+    const name = nonEmptyIdentityValue(status.name);
+    const email = accountEmail(status.email);
+    return userIdentityFields(name, email);
   } catch {
-    return false;
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch { /* best effort */ }
+    }
   }
 }
 
-export function releaseRetryLock(transcriptPath, dir = RETRY_LOCK_DIR) {
+function resolveQoderCliExecutable(home, cliDirName, executablePrefix, version) {
+  const normalized = typeof version === 'string' ? version.trim() : '';
+  if (!/^\d+(?:\.\d+)*$/.test(normalized)) return undefined;
   try {
-    const lockPath = retryLockPath(transcriptPath, dir);
-    const existing = readRetryLock(lockPath);
-    // Only release if we own the lock (avoid wiping a peer's lock on crash recovery)
-    if (existing && existing.pid === process.pid) {
-      fs.unlinkSync(lockPath);
+    const executable = path.join(
+      home,
+      'bin',
+      cliDirName,
+      `${executablePrefix}-${normalized}${process.platform === 'win32' ? '.exe' : ''}`,
+    );
+    fs.accessSync(executable, fs.constants.X_OK);
+    if (!fs.statSync(executable).isFile()) return undefined;
+    return executable;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveQoderCliUserIdentity({ home, cliDirName, executablePrefix, cacheFile }, version) {
+  const executable = resolveQoderCliExecutable(home, cliDirName, executablePrefix, version);
+  if (!executable) return undefined;
+
+  const authPath = path.join(home, '.auth', 'user');
+  let authStat;
+  try {
+    authStat = fs.statSync(authPath);
+    if (!authStat.isFile()) return undefined;
+  } catch {
+    return undefined;
+  }
+
+  let cached;
+  try {
+    cached = JSON.parse(smallText(cacheFile));
+  } catch {
+    cached = undefined;
+  }
+  if (
+    cached?.schemaVersion === 1
+    && cached.authPath === authPath
+    && cached.mtimeMs === authStat.mtimeMs
+    && cached.size === authStat.size
+  ) {
+    if (Number.isFinite(cached.failedUntil)) {
+      if (Date.now() < cached.failedUntil) return undefined;
+    } else if (cached.loggedIn === false) {
+      return undefined;
+    } else {
+      const name = nonEmptyIdentityValue(cached.name);
+      const email = accountEmail(cached.email);
+      return userIdentityFields(name, email);
     }
-  } catch { /* best-effort */ }
+  }
+
+  const timedOut = Symbol();
+  const child = spawn(executable, ['status', '--output', 'json'], {
+    windowsHide: true,
+    detached: process.platform !== 'win32',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  let stdout = '';
+  let timer;
+  const output = new Promise(resolve => {
+    child.stdout?.setEncoding('utf8');
+    child.stdout?.on('error', () => {});
+    child.stdout?.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.length <= 64 * 1024) return;
+      try { child.stdout?.destroy(); } catch { /* ignore */ }
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+      resolve(undefined);
+    });
+    child.on('error', () => resolve(undefined));
+    child.on('close', (code) => {
+      if (code !== 0) return resolve(undefined);
+      try {
+        const parsed = JSON.parse(String(stdout || '').trim());
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return resolve(undefined);
+        if (parsed.logged_in === false) return resolve({ loggedIn: false });
+        if (parsed.logged_in !== true) return resolve(undefined);
+        const name = nonEmptyIdentityValue(parsed.username);
+        const email = accountEmail(parsed.email);
+        resolve(name || email
+          ? { loggedIn: true, ...(name ? { name } : {}), ...(email ? { email } : {}) }
+          : undefined);
+      } catch {
+        resolve(undefined);
+      }
+    });
+  });
+  const status = await Promise.race([
+    output,
+    new Promise(resolve => {
+      timer = setTimeout(() => resolve(timedOut), QODER_CLI_STATUS_TIMEOUT_MS);
+    }),
+  ]).finally(() => clearTimeout(timer));
+  if (status === timedOut) {
+    try { child.stdout?.destroy(); } catch { /* ignore */ }
+    if (child.pid && process.platform !== 'win32') {
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+    } else {
+      try { child.kill('SIGKILL'); } catch { /* already exited */ }
+    }
+  }
+
+  const temporary = `${cacheFile}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.mkdirSync(path.dirname(cacheFile), { recursive: true });
+    fs.writeFileSync(temporary, JSON.stringify(status && status !== timedOut ? {
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      loggedIn: status.loggedIn,
+      ...(status.name ? { name: status.name } : {}),
+      ...(status.email ? { email: status.email } : {}),
+    } : {
+      schemaVersion: 1,
+      authPath,
+      mtimeMs: authStat.mtimeMs,
+      size: authStat.size,
+      failedUntil: Date.now() + QODER_CLI_STATUS_FAILURE_TTL_MS,
+    }), { encoding: 'utf-8', mode: 0o600 });
+    fs.renameSync(temporary, cacheFile);
+  } catch {
+    try { fs.unlinkSync(temporary); } catch { /* best-effort */ }
+  }
+  if (!status || status === timedOut || !status.loggedIn) return undefined;
+  return userIdentityFields(status.name, status.email);
 }
 
 // --- Timestamp helpers -------------------------------------------------------
 
 function isoToUnixNanos(isoString) {
-  if (!isoString) return '';
-  const ms = Date.parse(isoString);
-  if (Number.isNaN(ms)) return '';
-  return String(BigInt(ms) * 1_000_000n);
+  const nanos = timestampOrderNanos(isoString);
+  return nanos === null ? '' : String(nanos);
 }
 
 function timestampToUnixNanos(value) {
   if (!value) return String(BigInt(Date.now()) * 1_000_000n);
   if (typeof value === 'number') return String(BigInt(Math.round(value)) * 1_000_000n);
   if (typeof value === 'string') {
-    const ms = Date.parse(value);
-    if (!Number.isNaN(ms)) return String(BigInt(ms) * 1_000_000n);
     if (/^\d+$/.test(value)) return value;
+    const nanos = timestampOrderNanos(value);
+    if (nanos !== null) return String(nanos);
   }
   return String(BigInt(Date.now()) * 1_000_000n);
+}
+
+function timestampOrderNanos(value) {
+  if (typeof value !== 'string' || !value) return null;
+
+  // Date.parse() truncates ISO fractions to milliseconds. Qoder emits
+  // microsecond timestamps, so two ordered events such as .999176 and .999890
+  // otherwise compare as equal and can collapse adjacent LLM boundaries.
+  const match = value.match(/^(.*?)(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/);
+  if (match) {
+    const [, wholeSeconds, fraction = '', zone] = match;
+    const wholeSecondsMs = Date.parse(`${wholeSeconds}${zone}`);
+    if (!Number.isNaN(wholeSecondsMs)) {
+      const fractionNanos = BigInt((fraction + '000000000').slice(0, 9));
+      return BigInt(wholeSecondsMs) * 1_000_000n + fractionNanos;
+    }
+  }
+
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? null : BigInt(ms) * 1_000_000n;
 }
 
 function computeDurationMs(startNanos, endNanos) {
@@ -161,463 +312,518 @@ function computeDurationMs(startNanos, endNanos) {
 // --- Main --------------------------------------------------------------------
 
 async function main() {
-  const args = process.argv.slice(2);
-  const isRetry = args.includes('--retry');
-
-  // Retry mode: called by background subprocess after delay, reads transcript directly
-  if (isRetry) {
-    const transcriptIdx = args.indexOf('--transcript');
-    const sessionIdx = args.indexOf('--session');
-    const cwdIdx = args.indexOf('--cwd');
-    const transcriptPath = transcriptIdx >= 0 ? args[transcriptIdx + 1] : '';
-    const sessionId = sessionIdx >= 0 ? args[sessionIdx + 1] : '';
-    const cwd = cwdIdx >= 0 ? args[cwdIdx + 1] : undefined;
-    const { agentId, logPrefix } = parseArgs();
-    if (!transcriptPath || !sessionId) return;
-    logDebug(agentId, `Retry: processing ${transcriptPath} for session ${sessionId}`);
-    const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-
-    // qoder-cn only: serialize concurrent retries on the same transcript.
-    // We wait the HOOK_RETRY_DELAY first (so all queued Stop hooks have
-    // already advanced the offset via updateLineRecord), then acquire the
-    // lock. The losers see currentCount==lastCount in getLineRange and exit.
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-    if (retryDelay > 0) {
-      await new Promise(r => setTimeout(r, retryDelay));
+  const parsed = parseArgs();
+  const agentId = parsed.agentId === 'qoder-cli' ? 'qoder' : parsed.agentId;
+  try {
+    let payload = await readQoderHookPayload();
+    const args = process.argv.slice(2);
+    if (args.includes('--retry')) {
+      const argument = name => args[args.indexOf(name) + 1];
+      payload = {
+        session_id: argument('--session'), transcript_path: argument('--transcript'),
+        hook_event_name: 'Stop', cwd: args.includes('--cwd') ? argument('--cwd') : undefined,
+        legacy_trigger_line: Number(argument('--trigger-end-line')),
+        extra: payload ? { user: payload } : undefined,
+      };
     }
-
-    if (agentId === 'qoder-cn') {
-      if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-        logDebug(agentId, `Retry skipped: lock held by peer for ${transcriptPath}`);
-        return;
-      }
-    }
-    try {
-      const range = getLineRange(agentId, transcriptPath, sessionId);
-      if (!range) return;
-      await processTranscript(
-        agentId, logPrefix, transcriptPath, sessionId,
-        range[0], range[1], runtimeConfig, cwd, { delayApplied: true },
-      );
-    } finally {
-      if (agentId === 'qoder-cn') releaseRetryLock(transcriptPath);
-    }
-    return;
-  }
-
-  // Normal mode: called from Stop hook via stdin
-  const { agentId, logPrefix } = parseArgs();
-  const payload = await parseStdinPayload(agentId);
-  if (!payload) return;
-
-  const { transcriptPath, sessionId, cwd } = payload;
-  const runtimeConfig = loadHookRuntimeConfig(path.join(HOOKS_DIR, '..'));
-
-  const range = getLineRange(agentId, transcriptPath, sessionId);
-  if (!range) return;
-
-  const [startLine] = range;
-  const endLine = range[1];
-  const lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Read ${lines.length} lines (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  // Detect incomplete transcript (race condition in print/non-interactive mode:
-  // Stop hook fires BEFORE transcript is fully written, and writes happen AFTER hook returns).
-  // Solution: spawn a background retry that runs after 5s delay.
-  let parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-
-  // last-prompt is the authoritative end-of-transcript marker written by qodercli on exit.
-  // If absent, the file is still being flushed (race: Stop hook fires before transcript flush).
-  const hasLastPrompt = parsed.some(p => p.type === 'last-prompt');
-  if (parsed.length > 0 && !hasLastPrompt) {
-    logDebug(agentId, `Transcript incomplete (${parsed.length} lines, no last-prompt marker). Spawning background retry in 5s.`);
-    if (agentId === 'qoder-cn') {
-      // qoder-cn: QoderCN fires Stop multiple times per turn. The retry's
-      // child-side lock serializes actual processing, but skipping needless
-      // spawn calls here keeps process churn down.
-      const lockPath = retryLockPath(transcriptPath);
-      const existing = readRetryLock(lockPath);
-      if (existing && !isRetryLockStale(existing)) {
-        logDebug(agentId, `Skip spawn: live retry lock held by pid ${existing.pid}`);
+    if (!payload) return;
+    const business = payload.parent_business_info;
+    const parentBusinessInfo = business && typeof business === 'object' && !Array.isArray(business)
+      ? business : undefined;
+    const product = parentBusinessInfo?.product;
+    let userIdentity;
+    if (agentId === 'qoder' || agentId === 'qoder-cn') {
+      const cliIdentity = agentId === 'qoder-cn' ? QODER_CN_CLI_IDENTITY : QODER_CLI_IDENTITY;
+      if (product === 'cli') {
+        userIdentity = await resolveQoderCliUserIdentity(cliIdentity, parentBusinessInfo?.version)
+          ?? readQoderAppUserIdentity(agentId);
+      } else if (product === 'app') {
+        userIdentity = readQoderAppUserIdentity(agentId);
       } else {
-        if (existing) { try { fs.unlinkSync(lockPath); } catch { /* ignore */ } }
-        spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
+        userIdentity = extractUserIdentity(payload.extra);
       }
-    } else {
-      spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd);
     }
-    return;
+    publishQoderWakeup(payload, {
+      agentId, dataDir: LOONGSUITE_PILOT_DATA_DIR, userIdentity,
+    });
+  } finally {
+    process.stdout.write('{}\n');
   }
-
-  if (agentId === 'qoder-cn') {
-    if (!tryAcquireRetryLock(transcriptPath, sessionId)) {
-      logDebug(agentId, `Stop skipped: peer retry/handler holds lock for ${transcriptPath}`);
-      return;
-    }
-    try {
-      await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
-    } finally {
-      releaseRetryLock(transcriptPath);
-    }
-    return;
-  }
-
-  await processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, endLine, runtimeConfig, cwd);
 }
 
-// NOTE: Retry subprocess won't race with normal hook because non-interactive mode (--print)
-// only fires Stop once per session (process exits after hook returns). The offset check in
-// getLineRange prevents double-processing if another hook invocation somehow occurs.
-function spawnDelayedRetry(agentId, transcriptPath, sessionId, logPrefix, cwd) {
-  const nodebin = process.argv[0];
-  const script = fileURLToPath(import.meta.url);
-  const spawnArgs = [
-    script,
-    '--agent-id', agentId,
-    '--log-prefix', logPrefix,
-    '--retry',
-    '--transcript', transcriptPath,
-    '--session', sessionId,
-    ...(cwd ? ['--cwd', cwd] : []),
-  ];
-  const child = spawn(nodebin, spawnArgs, {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env, HOOK_RETRY_DELAY: '5000' },
+
+
+export function selectTurnSegmentsForCollection(turnSegments, rangeReason, agentId) {
+  // QoderCN can inspect a complete snapshot to rebuild its ReAct chain. Other
+  // variants do that only during cursor recovery. Only latest may be emitted.
+  if (rangeReason !== 'incremental' || agentId === 'qoder-cn') {
+    return turnSegments.slice(-1);
+  }
+  return turnSegments;
+}
+
+export function assessStableEofCandidate(previousKey, targetWindow, snapshot) {
+  if (targetWindow?.reason !== 'stop-at-eof' || !snapshot?.contentHash) {
+    return { candidateKey: null, targetWindow };
+  }
+
+  const candidateKey = [
+    targetWindow.startLine,
+    targetWindow.stopLine,
+    targetWindow.endLine,
+    snapshot.contentHash,
+  ].join(':');
+  if (candidateKey !== previousKey) {
+    return { candidateKey, targetWindow };
+  }
+
+  return {
+    candidateKey,
+    targetWindow: {
+      ...targetWindow,
+      status: 'complete',
+      reason: 'stable-stop-eof',
+    },
+  };
+}
+
+export function findIncrementalTurnEndLine(snapshot, startLine, scanEndLine) {
+  const rows = snapshot?.rows || [];
+  let sawStop = false;
+
+  for (let i = startLine; i < scanEndLine && i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    const hookEvent = hookEventOf(row);
+    if (hookEvent === 'Stop') {
+      sawStop = true;
+    } else if (sawStop && (
+      hookEvent === 'UserPromptSubmit' ||
+      isRealUserPrompt(row)
+    )) {
+      // `last_line_count` is the next unread zero-based line index. Returning
+      // the prompt line itself consumes the prior Stop/session metadata while
+      // preserving the queued turn's timing marker and user content.
+      return i;
+    }
+  }
+  return scanEndLine;
+}
+
+// Anthropic's stop_reason mixes turn-terminal values with mid-turn ones.
+// `tool_use` and `pause_turn` both mean the assistant resumes after a tool
+// result or a server-side pause, so neither ends the turn. Treating every
+// stop_reason as a boundary makes a mid-flight snapshot look finished, and
+// assessStableEofCandidate can then promote that prefix to a commit.
+// `stop_sequence` and `refusal` are terminal and must stay in this set: on real
+// transcripts stop_sequence is sometimes the turn's only terminal row, so
+// dropping it would turn an early commit into no commit at all.
+const TERMINAL_STOP_REASONS = new Set([
+  'end_turn',
+  'max_tokens',
+  'stop_sequence',
+  'refusal',
+  // Generic spellings, in case a future Qoder build normalizes before writing.
+  'stop',
+  'cancelled',
+  'error',
+]);
+
+function isTerminalStopReason(reason) {
+  return typeof reason === 'string' && TERMINAL_STOP_REASONS.has(reason);
+}
+
+export function hasQoderCnTerminalMarker(progressEvents, rows) {
+  return progressEvents.some(event => event?.hookEvent === 'Stop')
+    || rows.some(row => row?.type === 'last-prompt')
+    || rows.some(row => (
+      row?.type === 'assistant'
+      && isTerminalStopReason(row?.message?.stop_reason)
+    ));
+}
+
+export function findTriggeredTurnWindow(snapshot, triggerEndLine) {
+  const waiting = (reason, details = {}) => ({
+    status: 'waiting',
+    reason,
+    startLine: null,
+    stopLine: null,
+    endLine: null,
+    ...details,
   });
-  child.unref();
-  logDebug(agentId, `Spawned retry subprocess (PID ${child.pid})`);
+
+  try {
+    if (snapshot?.reason !== 'ok') return waiting(snapshot?.reason || 'read-failed');
+    const rows = snapshot.rows;
+    const limit = snapshot.lineCount;
+
+    // The trigger snapshot can end immediately before Qoder appends its Stop
+    // progress rows. Its last visible prompt identifies the active turn; the
+    // first Stop after that prompt is the Stop that launched this retry.
+    let triggerPromptLine = -1;
+    const triggerLimit = Math.min(Math.max(triggerEndLine, 0), limit);
+    for (let i = triggerLimit - 1; i >= 0; i--) {
+      if (hookEventOf(rows[i]) === 'UserPromptSubmit') {
+        triggerPromptLine = i;
+        break;
+      }
+    }
+    if (triggerPromptLine < 0) {
+      for (let i = triggerLimit - 1; i >= 0; i--) {
+        if (isRealUserPrompt(rows[i])) {
+          triggerPromptLine = i;
+          break;
+        }
+      }
+    }
+    if (triggerPromptLine < 0) return waiting('prompt-not-found');
+
+    let stopLine = -1;
+    let stopSource = null;
+    let assistantStopLine = -1;
+    for (let i = triggerPromptLine + 1; i < limit; i++) {
+      const hookEvent = hookEventOf(rows[i]);
+      if (hookEvent === 'Stop') {
+        stopLine = i;
+        stopSource = 'progress-stop';
+        break;
+      }
+      if (
+        assistantStopLine < 0
+        && rows[i]?.type === 'assistant'
+        && isTerminalStopReason(rows[i]?.message?.stop_reason)
+      ) {
+        // Remember it but keep scanning: when a turn carries both signals the
+        // progress Stop is the boundary the pre-B3 path used, and it sits after
+        // the final assistant row.
+        assistantStopLine = i;
+        continue;
+      }
+      if (i >= triggerLimit && (
+        hookEvent === 'UserPromptSubmit' ||
+        isRealUserPrompt(rows[i])
+      )) {
+        // The next prompt ends this turn, so the search for a progress Stop must
+        // not cross it — otherwise it would adopt the *next* turn's Stop. The
+        // triggerLimit guard is what keeps this turn's own user row from reading
+        // as that next prompt: it sits just after the UserPromptSubmit progress
+        // row, inside the trigger snapshot. A terminal assistant row already seen
+        // is still a valid Stop; without one there is nothing to commit yet.
+        if (assistantStopLine < 0) return waiting('next-prompt-before-stop');
+        break;
+      }
+    }
+    if (stopLine < 0 && assistantStopLine >= 0) {
+      stopLine = assistantStopLine;
+      stopSource = 'assistant-stop-reason';
+    }
+    if (stopLine < 0) return waiting('stop-not-found');
+
+    // Resolve the start from the actual Stop instead of trusting a global
+    // cursor that may have been reset by redeployment. A UserPromptSubmit
+    // progress row can also arrive after the user row in the same turn.
+    let startLine = -1;
+    for (let i = stopLine - 1; i >= 0; i--) {
+      if (hookEventOf(rows[i]) === 'UserPromptSubmit') {
+        startLine = i;
+        break;
+      }
+    }
+    if (startLine >= 0) {
+      let hasCurrentUser = false;
+      for (let i = startLine; i < stopLine; i++) {
+        if (isRealUserPrompt(rows[i])) {
+          hasCurrentUser = true;
+          break;
+        }
+      }
+      if (!hasCurrentUser) {
+        for (let i = startLine - 1; i >= 0; i--) {
+          const event = hookEventOf(rows[i]);
+          if (rows[i]?.type === 'assistant' || rows[i]?.type === 'last-prompt'
+            || event === 'Stop' || event === 'SessionEnd') break;
+          if (isRealUserPrompt(rows[i])) {
+            startLine = i;
+            break;
+          }
+        }
+      }
+    }
+    if (startLine < 0) {
+      for (let i = stopLine - 1; i >= 0; i--) {
+        if (isRealUserPrompt(rows[i])) {
+          startLine = i;
+          break;
+        }
+      }
+    }
+    if (startLine < 0) return waiting('turn-start-not-found');
+
+    for (let i = stopLine + 1; i < limit; i++) {
+      const hookEvent = hookEventOf(rows[i]);
+      if (hookEvent === 'SessionEnd') {
+        return {
+          status: 'complete',
+          reason: 'session-end',
+          startLine,
+          stopLine,
+          endLine: i + 1,
+        };
+      }
+      if (rows[i]?.type === 'last-prompt') {
+        return {
+          status: 'complete',
+          reason: 'last-prompt',
+          startLine,
+          stopLine,
+          endLine: i + 1,
+        };
+      }
+      if (
+        hookEvent === 'UserPromptSubmit' ||
+        isRealUserPrompt(rows[i])
+      ) {
+        // The next real prompt is itself an unambiguous right boundary for the
+        // completed Stop turn. Exclude it from this fixed window so its own Stop
+        // callback can consume it later.
+        return {
+          status: 'complete',
+          reason: 'next-prompt',
+          startLine,
+          stopLine,
+          endLine: i,
+        };
+      }
+    }
+    // Desktop/JetBrains sessions may remain open after every Stop and therefore
+    // emit neither SessionEnd nor qodercli's last-prompt marker. The retry caller
+    // promotes this candidate only after two byte-identical snapshots, proving
+    // the transcript has stopped growing before the fixed EOF window is used.
+    return waiting('stop-at-eof', {
+      startLine,
+      stopLine,
+      endLine: limit,
+    });
+  } catch {
+    return waiting('read-failed');
+  }
 }
 
-async function processTranscript(agentId, logPrefix, transcriptPath, sessionId, startLine, initialEndLine, runtimeConfig, cwd, opts) {
-  // Handle retry delay
-  const delayApplied = !!(opts && opts.delayApplied);
-  if (!delayApplied) {
-    const retryDelay = parseInt(process.env.HOOK_RETRY_DELAY || '0', 10);
-    if (retryDelay > 0) {
-      await new Promise(r => setTimeout(r, retryDelay));
-    }
-  }
-
-  // Re-read transcript (may have grown since initial read)
-  let endLine = initialEndLine;
-  const currentCount = getTranscriptLineCount(transcriptPath);
-  if (currentCount > endLine) {
-    endLine = currentCount;
-  }
-
-  let lines = readTranscriptLines(transcriptPath, startLine, endLine);
-  logDebug(agentId, `Processing ${lines.length} lines (range: ${startLine}-${endLine})`);
-  if (!lines.length) {
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-    return;
-  }
-
-  // --- Phase 1: Parse all transcript lines ---
-  let parsed = [];
-  for (const line of lines) {
-    try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-  }
-
-  // --- Phase 2: Extract progress timing + content events ---
-  const progressEvents = [];
-  const contentEvents = [];
-
-  let lastProgressHookEvent = '';
-  for (const row of parsed) {
-    const rowType = row.type;
-    if (rowType === 'progress') {
-      const data = row.data || {};
-      const hookEvent = data.hookEvent || '';
-      // Deduplicate: each hookEvent fires multiple progress lines (one per registered command).
-      // Only take the first of each consecutive same-hookEvent group.
-      if (hookEvent && hookEvent !== lastProgressHookEvent) {
-        progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
-      }
-      if (hookEvent) lastProgressHookEvent = hookEvent;
-    } else if (rowType === 'user' || rowType === 'assistant') {
-      contentEvents.push(row);
-    }
-    // session_meta, other types: ignored
-  }
-
-  // --- Phase 2.5 (qoder-cn only): Skip processing if transcript hasn't reached Stop ---
-  // For qoder-cn, only process the transcript when the Stop progress event has been
-  // written. A PostToolUse retry (which runs before Stop is written) would see an
-  // incomplete ReAct chain and produce partial events. The Stop retry (fired after
-  // the final assistant text is written) sees the complete chain and can correctly
-  // generate all llm.request events with proper input.messages_delta (including
-  // tool_result as input delta for step 2).
-  if (agentId === 'qoder-cn') {
-    const hasStop = progressEvents.some(pe => pe.hookEvent === 'Stop');
-    if (!hasStop) {
-      logDebug(agentId, `Transcript not yet complete (no Stop event in progress). Skipping processing.`);
-      return;
-    }
-    // Stop detected — reprocess the entire transcript from the beginning so
-    // splitContentEventsIntoTurns sees the complete ReAct chain (user →
-    // assistant(text+tool_use) → user(tool_result) → assistant(text)) and
-    // generates one turn with all LLM calls and correct input.messages_delta.
-    startLine = 0;
-    lines = readTranscriptLines(transcriptPath, startLine, endLine);
-    logDebug(agentId, `Reprocessing full transcript from 0-${endLine} (${lines.length} lines)`);
-    // Re-parse since we reset startLine
-    parsed = [];
-    for (const line of lines) {
-      try { parsed.push(JSON.parse(line)); } catch { /* skip */ }
-    }
-    // Re-extract progress + content events from the full transcript
-    progressEvents.length = 0;
-    contentEvents.length = 0;
-    lastProgressHookEvent = '';
-    for (const row of parsed) {
-      const rowType = row.type;
-      if (rowType === 'progress') {
-        const data = row.data || {};
-        const hookEvent = data.hookEvent || '';
-        if (hookEvent && hookEvent !== lastProgressHookEvent) {
-          progressEvents.push({ hookEvent, ts: row.timestamp, hookName: data.hookName || '' });
-        }
-        if (hookEvent) lastProgressHookEvent = hookEvent;
-      } else if (rowType === 'user' || rowType === 'assistant') {
-        contentEvents.push(row);
-      }
-    }
-  }
-
-  // --- Phase 3: Split content events into turns by real user prompts ---
-  // Each real user prompt starts a new turn. Tool results stay attached to the
-  // preceding turn. This ensures each turn gets its own user input instead of
-  // inheriting the first prompt of the whole transcript segment.
-  const turnSegments = splitContentEventsIntoTurns(contentEvents);
-  logDebug(agentId, `Split transcript segment into ${turnSegments.length} turn(s)`);
-
-  // --- Phase 4: Build events per turn ---
-  const records = [];
-  for (let turnIdx = 0; turnIdx < turnSegments.length; turnIdx++) {
-    const turnContentEvents = turnSegments[turnIdx];
-    const turnId = crypto.randomUUID();
-
-    // Determine LLM call boundaries within this turn.
-    const llmBoundaries = buildLlmBoundaries(progressEvents, turnContentEvents);
-    logDebug(agentId, `Turn ${turnIdx + 1}: detected ${llmBoundaries.length} LLM call(s)`);
-
-    const turnRecords = buildEventsFromBoundaries(
-      llmBoundaries, turnContentEvents, parsed, turnId, sessionId, agentId, runtimeConfig, cwd,
-    );
-    records.push(...turnRecords);
-
-    logDebug(agentId, `Turn ${turnIdx + 1}: produced ${turnRecords.length} events, turn_id=${turnId}`);
-  }
-
-  // --- Phase 5: Write to history ---
-  const rowsToAppend = records.map(r => JSON.stringify(r));
-  const success = appendRowsToHistory(agentId, logPrefix, rowsToAppend);
-  if (success) {
-    logDebug(agentId, `Appended ${rowsToAppend.length} rows`);
-    updateLineRecord(agentId, transcriptPath, sessionId, endLine);
-  }
+function hookEventOf(row) {
+  return row?.type === 'progress' ? row.data?.hookEvent || '' : '';
 }
 
 // --- LLM Boundary Detection --------------------------------------------------
 
-function buildLlmBoundaries(progressEvents, contentEvents) {
-  // Step 1: Group assistant blocks into LLM calls.
-  // Priority: use message.id (CLI variant has it) > progress window (IDE variant)
-  // > fallback to timestamp proximity when progress events are absent.
+export function buildLlmBoundaries(_progressEvents, contentEvents) {
+  // Step 1: Group assistant blocks into LLM calls. Qoder transcript assistant
+  // rows do not consistently carry message.id, and progress windows are hook
+  // timing signals, not reliable provider-call boundaries.
+  //
+  // IDE transcript rows are content blocks, not one row per provider call. A
+  // complete response may therefore be spread over thinking, text and multiple
+  // tool_use rows, and parallel tool execution may even place an early
+  // tool_result between later tool_use rows. The deterministic boundary is:
+  // a non-empty stop_reason marks the current provider response complete. The
+  // actual split is delayed until the next assistant row so any intervening
+  // tool_result remains in the completed response's transcript range. For old
+  // rows without stop_reason, matching every tool_use to a tool_result remains
+  // the structural fallback.
   const assistantGroups = [];
   let currentGroup = [];
-  let lastTs = null;
-  let currentKey = null;
-  const hasProgressWindows = progressEvents.some(pe =>
-    pe.hookEvent === 'UserPromptSubmit' || pe.hookEvent === 'PostToolUse' ||
-    pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop'
-  );
+  let currentGroupStartIndex = -1;
+  let currentToolIds = new Set();
+  let resolvedToolIds = new Set();
+  let currentResponseComplete = false;
 
-  function flushGroup() {
-    if (currentGroup.length > 0) assistantGroups.push(currentGroup);
+  function flushGroup(contentEndIndex) {
+    if (currentGroup.length > 0) {
+      assistantGroups.push({
+        rows: currentGroup,
+        contentStartIndex: currentGroupStartIndex,
+        contentEndIndex,
+      });
+    }
     currentGroup = [];
-    lastTs = null;
-    currentKey = null;
+    currentGroupStartIndex = -1;
+    currentToolIds = new Set();
+    resolvedToolIds = new Set();
+    currentResponseComplete = false;
   }
 
-  for (const row of contentEvents) {
+  for (let rowIndex = 0; rowIndex < contentEvents.length; rowIndex++) {
+    const row = contentEvents[rowIndex];
     if (row.type !== 'assistant') {
-      flushGroup();
+      if (isToolResult(row)) {
+        for (const block of row.message?.content || []) {
+          if (block?.type === 'tool_result' && block.tool_use_id) {
+            resolvedToolIds.add(block.tool_use_id);
+          }
+        }
+      }
       continue;
     }
-    const ts = row.timestamp ? Date.parse(row.timestamp) : 0;
-    if (!ts) continue;
+    const ts = timestampOrderNanos(row.timestamp);
+    if (ts === null) continue;
 
-    const messageId = row.message?.id || null;
-    const key = messageId
-      ? `message:${messageId}`
-      : hasProgressWindows
-        ? progressWindowKey(progressEvents, ts)
-        : null;
+    const toolCycleComplete = currentGroup.length > 0 &&
+      currentToolIds.size > 0 &&
+      [...currentToolIds].every(id => resolvedToolIds.has(id));
+    // Progress hooks carry no tool id and third-party hooks share the same
+    // transcript, so they cannot safely close an LLM group. stop_reason belongs
+    // to the provider response itself and preserves a following terminal
+    // response even when a cancelled/interrupted tool omitted tool_result.
+    if (currentResponseComplete || toolCycleComplete) flushGroup(rowIndex);
 
-    // Determine if this row starts a new LLM call
-    let isNewCall = false;
-    if (currentGroup.length > 0 && key && currentKey) {
-      isNewCall = key !== currentKey;
-    } else if (currentGroup.length > 0 && !key && !currentKey) {
-      isNewCall = lastTs !== null && (ts - lastTs) > 200;
-    } else if (currentGroup.length > 0 && key !== currentKey) {
-      // Mixed keyed/unkeyed rows are unusual; keep the old time-gap fallback.
-      isNewCall = lastTs !== null && (ts - lastTs) > 200;
-    }
-
-    if (isNewCall) flushGroup();
-
+    if (currentGroup.length === 0) currentGroupStartIndex = rowIndex;
     currentGroup.push(row);
-    currentKey = key;
-    lastTs = ts;
+    for (const block of row.message?.content || []) {
+      if (block?.type === 'tool_use' && block.id) {
+        currentToolIds.add(block.id);
+      }
+    }
+    if (typeof row.message?.stop_reason === 'string' && row.message.stop_reason.length > 0) {
+      currentResponseComplete = true;
+    }
   }
-  flushGroup();
+  flushGroup(contentEvents.length);
 
-  // Step 2: For each assistant group (= one LLM call), find timing from progress
+  // Step 2: Keep each group's exact transcript range. Timing is only fallback
+  // metadata and must never be used to reconstruct content ownership.
   const boundaries = [];
   for (let i = 0; i < assistantGroups.length; i++) {
     const group = assistantGroups[i];
-    const groupStartMs = Date.parse(group[0].timestamp) || 0;
-    const groupEndMs = Date.parse(group[group.length - 1].timestamp) || groupStartMs;
-
-    // Find start time: last PostToolUse or UserPromptSubmit BEFORE this group
-    let startTs = null;
-    for (const pe of progressEvents) {
-      const peMs = Date.parse(pe.ts) || 0;
-      if (peMs >= groupStartMs) break;
-      if (pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'UserPromptSubmit') {
-        startTs = pe.ts;
-      }
-    }
-
-    // Find end time: first PreToolUse or Stop AFTER this group
-    let endTs = null;
-    for (const pe of progressEvents) {
-      const peMs = Date.parse(pe.ts) || 0;
-      if (peMs <= groupEndMs) continue;
-      if (pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop') {
-        endTs = pe.ts;
-        break;
-      }
-    }
+    const firstAssistant = group.rows[0];
+    const lastAssistant = group.rows[group.rows.length - 1];
+    const groupStartNanos = timestampOrderNanos(firstAssistant.timestamp);
+    const groupEndNanos = timestampOrderNanos(lastAssistant.timestamp) ?? groupStartNanos;
+    if (groupStartNanos === null || groupEndNanos === null) continue;
 
     boundaries.push({
-      startTs: startTs || group[0].timestamp,
-      endTs: endTs || group[group.length - 1].timestamp,
+      startTs: firstAssistant.timestamp,
+      endTs: lastAssistant.timestamp,
+      contentStartIndex: group.contentStartIndex,
+      contentEndIndex: group.contentEndIndex,
     });
   }
 
   return boundaries;
 }
 
-function progressWindowKey(progressEvents, rowMs) {
-  let startTs = null;
-  for (const pe of progressEvents) {
-    const peMs = Date.parse(pe.ts) || 0;
-    if (peMs >= rowMs) break;
-    if (pe.hookEvent === 'PostToolUse' || pe.hookEvent === 'UserPromptSubmit') {
-      startTs = pe.ts;
-    }
-  }
-
-  // If no start boundary found, this row appears before any progress event.
-  // Return null to let the caller fall back to time-gap grouping, avoiding
-  // incorrect merging of distinct LLM calls that precede the first progress event.
-  if (!startTs) return null;
-
-  let endTs = null;
-  for (const pe of progressEvents) {
-    const peMs = Date.parse(pe.ts) || 0;
-    if (peMs <= rowMs) continue;
-    if (pe.hookEvent === 'PreToolUse' || pe.hookEvent === 'Stop') {
-      endTs = pe.ts;
-      break;
-    }
-  }
-
-  return `progress:${startTs}->${endTs || ''}`;
-}
-
 // --- Event Builder -----------------------------------------------------------
 
-function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig, cwd) {
+export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig, cwd) {
   const records = [];
   const observedTs = timestampToUnixNanos(Date.now());
 
   // Find user prompt
-  const userRow = contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const userRow = contentEvents.find(isRealUserPrompt)
+    || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const userText = userRow ? (extractUserTexts(userRow)[0] ?? '') : '';
+  // humanInput is the submitted prompt before the host adds context text blocks.
+  const submittedPrompt = typeof userRow?.humanInput?.text === 'string' && userRow.humanInput.text.length > 0
+    ? userRow.humanInput.text : (userRow ? extractUserTexts(userRow).join('') : '');
+  const promptRequestId = typeof userRow?.requestSetId === 'string'
+    && userRow.requestSetId.length > 0 && userRow.requestSetId.length <= 512 ? userRow.requestSetId : undefined;
   const userId = resolveUserId(userRow || contentEvents[0], runtimeConfig);
   const agentType = inferVariant(userRow || contentEvents[0], agentId);
   const providerName = inferProviderName({ 'gen_ai.agent.type': agentType });
 
   // User-hook event (ENTRY input)
-  if (userRow) {
-    const userText = extractUserText(userRow);
-    if (userText) {
-      const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
-      records.push({
-        'event.id': crypto.randomUUID(),
-        'event.name': 'other',
-        'gen_ai.turn.id': turnId,
-        'gen_ai.session.id': sessionId,
-        'gen_ai.agent.type': agentType,
-        'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': userHookModel,
-        'user.id': userId,
-        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: userText }] }],
-        'agent.source': 'qoder-transcript-hook',
-        'agent.qoder.raw_type': 'user',
-        'agent.qoder.content_type': 'text',
-        time_unix_nano: timestampToUnixNanos(userRow.timestamp),
-        observed_time_unix_nano: observedTs,
-      });
-    }
+  if (userRow && userText) {
+    const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
+    records.push({
+      'event.id': crypto.randomUUID(),
+      'event.name': 'other',
+      'gen_ai.turn.id': turnId,
+      'gen_ai.session.id': sessionId,
+      'gen_ai.agent.type': agentType,
+      'gen_ai.provider.name': providerName,
+      'gen_ai.request.model': userHookModel,
+      'user.id': userId,
+      'gen_ai.input.messages_delta': [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }],
+      'agent.source': 'qoder-transcript-hook',
+      'agent.qoder.raw_type': 'user',
+      'agent.qoder.content_type': 'text',
+      time_unix_nano: timestampToUnixNanos(userRow.timestamp),
+      observed_time_unix_nano: observedTs,
+      ...cliAttachmentFields(agentType, userRow, allParsed),
+    });
   }
 
-  // If no progress boundaries detected, fall back to legacy behavior
+  // If no assistant boundaries were detected, fall back to legacy behavior. The turn
+  // entry `other` is already in `records`, so hand the legacy path only the rows
+  // it still owns. Qoder encodes tool results as type=user, so they must survive.
   if (boundaries.length === 0) {
-    const legacyRecords = buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
-    return finalizeRecords(legacyRecords, cwd);
+    const residualEvents = contentEvents.filter(
+      row => row.type === 'assistant' || isToolResult(row),
+    );
+    const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
+    return finalizeRecords(legacyRecords, cwd, runtimeConfig);
   }
-
-  // Assign content events to boundaries.
-  // Use extended ranges: each boundary "owns" content from its startTs up to the NEXT boundary's startTs.
-  // This ensures tool_result events (which occur between boundaries) are assigned to the preceding boundary.
-  const assignedContent = assignContentToBoundaries(boundaries, contentEvents);
 
   // For each LLM call boundary, produce events
+  let toolCallsForNextStep = [];
   let toolResultsForNextStep = [];
+  let previousResponseNanos = '';
   for (let i = 0; i < boundaries.length; i++) {
     const boundary = boundaries[i];
     const stepId = `${turnId}:s${i + 1}`;
-    const content = assignedContent[i] || [];
-    const startNanos = isoToUnixNanos(boundary.startTs);
-    const endNanos = boundary.endTs ? isoToUnixNanos(boundary.endTs) : startNanos;
+    const content = contentEvents.slice(boundary.contentStartIndex, boundary.contentEndIndex);
+    const candidateResponseEndNanos = isoToUnixNanos(boundary.endTs) || isoToUnixNanos(boundary.startTs);
+    const precedingNanos = [];
+    if (i === 0 && userRow?.timestamp) {
+      precedingNanos.push(isoToUnixNanos(userRow.timestamp));
+    } else {
+      precedingNanos.push(previousResponseNanos);
+      for (const result of toolResultsForNextStep) {
+        if (result.resultTs) precedingNanos.push(isoToUnixNanos(result.resultTs));
+      }
+    }
+    const { startNanos, endNanos: responseEndNanos } = orderedLlmInterval(
+      precedingNanos,
+      candidateResponseEndNanos,
+      isoToUnixNanos(boundary.startTs),
+    );
+    const previousToolCallIds = new Set(toolCallsForNextStep.map(tc => tc.id).filter(Boolean));
+    const currentContentToolResults = extractToolResults(content);
+    const inputToolResultsById = new Map();
+    for (const result of [...toolResultsForNextStep, ...currentContentToolResults]) {
+      if (result.toolId && previousToolCallIds.has(result.toolId)) {
+        inputToolResultsById.set(result.toolId, result);
+      }
+    }
+    const inputToolResults = [...inputToolResultsById.values()];
 
     // Pre-scan: extract model name from this step's assistant rows (CLI has message.model)
     const stepModel = content.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'auto';
 
     // llm.request for this step
     let inputDelta;
+    let emitRequest = i > 0;
     if (i === 0 && userRow) {
-      inputDelta = [{ role: 'user', parts: [{ type: 'text', content: extractUserText(userRow) }] }];
-    } else if (toolResultsForNextStep.length > 0) {
-      inputDelta = toolResultsForNextStep.map(tr => ({
+      inputDelta = [{ role: 'user', parts: buildUserMessageParts(userText, contentEvents, agentType) }];
+      emitRequest = true;
+    } else if (inputToolResults.length > 0) {
+      inputDelta = [];
+      if (toolCallsForNextStep.length > 0) {
+        inputDelta.push({
+          role: 'assistant',
+          parts: toolCallsForNextStep.map(tc => ({
+            type: 'tool_call',
+            id: tc.id,
+            name: tc.name,
+            arguments: tc.input,
+          })),
+        });
+      }
+      inputDelta.push(...inputToolResults.map(tr => ({
         role: 'tool',
         parts: [{ type: 'tool_call_response', id: tr.toolId, response: tr.result }],
-      }));
+      })));
     }
 
-    if (inputDelta) {
+    if (emitRequest) {
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.request',
@@ -628,19 +834,28 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.provider.name': providerName,
         'gen_ai.request.model': stepModel,
         'user.id': userId,
-        'gen_ai.input.messages_delta': inputDelta,
+        ...(inputDelta ? { 'gen_ai.input.messages_delta': inputDelta } : {}),
+        // Private join metadata survives content opt-out; InputManager removes it before output.
+        // Keep this field name in sync with src/interceptor/prompt-verdict.ts.
+        ...(i === 0 && submittedPrompt && userRow?.timestamp ? {
+          'agent.pilot.interceptor.correlation': {
+            hash: crypto.createHash('sha256').update(submittedPrompt).digest('hex'), at: Date.parse(userRow.timestamp),
+            // Transport only a cache key digest, never the native requestSetId.
+            ...(promptRequestId ? { requestId: crypto.createHash('sha256').update(promptRequestId).digest('hex') } : {}),
+          },
+        } : {}),
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: startNanos,
         observed_time_unix_nano: observedTs,
+        ...(i === 0 ? cliAttachmentFields(agentType, userRow, allParsed) : {}),
       });
     }
 
     // Build merged llm.response (multi-parts)
     const outputParts = [];
     const toolCalls = [];
-    toolResultsForNextStep = [];
     let responseId = undefined;
-    let lastAssistantTs = null;
+    let clientRequestId = undefined;
     let firstAssistantTs = null;
 
     for (const row of content) {
@@ -648,7 +863,13 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         const msg = row.message || {};
         const blocks = Array.isArray(msg.content) ? msg.content : [];
         if (msg.id && !responseId) responseId = msg.id;
-        if (row.timestamp) lastAssistantTs = row.timestamp;
+        // The CLI's own request id, carried on the usage object of the row that
+        // closes a streamed response (msg.id lands on the first row instead, so
+        // the two cannot be read from the same row).
+        if (!clientRequestId && msg.usage && typeof msg.usage === 'object' &&
+            typeof msg.usage.request_id === 'string' && msg.usage.request_id) {
+          clientRequestId = msg.usage.request_id;
+        }
         if (row.timestamp && !firstAssistantTs) firstAssistantTs = row.timestamp;
         for (const block of blocks) {
           if (block.type === 'thinking') {
@@ -659,25 +880,24 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
             outputParts.push({ type: 'text', content: block.text || '' });
           } else if (block.type === 'tool_use') {
             outputParts.push({ type: 'tool_call', id: block.id, name: block.name, arguments: block.input });
-            toolCalls.push({ id: block.id, name: block.name, input: block.input, preToolTs: endNanos });
-          }
-        }
-      } else if (row.type === 'user' && isToolResult(row)) {
-        const blocks = Array.isArray(row.message?.content) ? row.message.content : [];
-        for (const block of blocks) {
-          if (block.type === 'tool_result') {
-            const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
-            toolResultsForNextStep.push({ toolId: block.tool_use_id, result: resultText });
+            toolCalls.push({
+              id: block.id,
+              name: block.name,
+              input: block.input,
+              callTs: row.timestamp,
+            });
           }
         }
       }
     }
-
-    // When startTs == endTs (no distinguishable progress boundary), use assistant timestamp as end
-    let responseEndNanos = endNanos;
-    if (startNanos === endNanos && lastAssistantTs) {
-      responseEndNanos = isoToUnixNanos(lastAssistantTs) || endNanos;
-    }
+    const currentToolCallIds = new Set(toolCalls.map(tc => tc.id).filter(Boolean));
+    toolResultsForNextStep = currentContentToolResults
+      .filter(result => result.toolId && currentToolCallIds.has(result.toolId));
+    toolCallsForNextStep = toolCalls.map(tc => ({
+      id: tc.id,
+      name: tc.name,
+      input: tc.input,
+    }));
 
     // Determine finish reason from the last assistant row's stop_reason (authoritative),
     // falling back to inference when not available.
@@ -691,12 +911,25 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
     } else if (lastStopReason === 'end_turn' || (i === boundaries.length - 1)) {
       finishReason = 'end_turn';
     } else if (lastStopReason) {
-      finishReason = lastStopReason;
+      finishReason = normalizeFinishReason(lastStopReason);
     } else {
       finishReason = 'stop';
     }
 
     if (outputParts.length > 0) {
+      // SDK/CLI native transcripts can carry per-response usage, including
+      // sidechains absent from the parent's token database. One closing usage
+      // belongs to one model boundary; never add repeated streaming snapshots.
+      const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
+        && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
+      const usageFields = {};
+      for (const [source, target] of [
+        ['input_tokens', 'gen_ai.usage.input_tokens'], ['output_tokens', 'gen_ai.usage.output_tokens'],
+        ['cache_read_input_tokens', 'gen_ai.usage.cache_read.input_tokens'],
+        ['cache_creation_input_tokens', 'gen_ai.usage.cache_creation.input_tokens'],
+      ]) {
+        if (Number.isFinite(nativeUsage?.[source]) && nativeUsage[source] >= 0) usageFields[target] = nativeUsage[source];
+      }
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.response',
@@ -708,10 +941,29 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.request.model': stepModel,
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
-        'gen_ai.response.finish_reasons': [finishReason],
+        ...usageFields,
+        ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
-        'gen_ai.output.messages': [{ role: 'assistant', parts: outputParts, finish_reason: finishReason }],
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: outputParts,
+          ...(finishReason ? { finish_reason: finishReason } : {}),
+        }],
         'agent.source': 'qoder-transcript-hook',
+        // Raw vendor stop_reason, kept because normalizeFinishReason may map it
+        // onto a different enum value or drop it. Deliberately a single segment
+        // after `agent.`: AGENT_SCOPED_FIELD_RE in entry-builder.ts is
+        // /^agent\.[^.]+\..+$/ and both sls-flusher and jsonl-flusher serialise
+        // with dropAgentScopedFields: true, so an `agent.qoder.stop_reason`
+        // spelling would reach neither sink.
+        'agent.stop_reason': lastStopReason,
+        // The CLI's own request id for this response, taken from the transcript's
+        // usage object. It shares a namespace with a segment record's request_id
+        // (gen_ai.response.id does not: that one is the provider's id), so the
+        // token-enricher joins segments on this field and only falls back to
+        // timestamp proximity when it is absent. Single segment after `agent.`
+        // on purpose, same reason as agent.stop_reason above.
+        'agent.client_request_id': clientRequestId,
         // Accurate per-response timestamp from the transcript's first assistant record
         // (≈ SQLite gmt_create). Used only for token-enricher matching; dropped from
         // SLS/JSONL output as an agent-scoped field. Absent for CLI (no firstAssistantTs).
@@ -720,12 +972,21 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         observed_time_unix_nano: observedTs,
       });
     }
+    previousResponseNanos = responseEndNanos;
 
-    // tool.call + tool.result events
+    // tool.call + tool.result events. Parallel tools may finish out of order,
+    // so array position is not a valid association key.
+    const toolResultsById = new Map(
+      toolResultsForNextStep
+        .filter(result => result.toolId)
+        .map(result => [result.toolId, result]),
+    );
     for (let ti = 0; ti < toolCalls.length; ti++) {
       const tc = toolCalls[ti];
-      const tr = toolResultsForNextStep[ti];
-      const toolCallTs = endNanos;
+      const tr = toolResultsById.get(tc.id);
+      const toolCallTs = tc.callTs
+        ? isoToUnixNanos(tc.callTs) || responseEndNanos
+        : responseEndNanos;
 
       records.push({
         'event.id': crypto.randomUUID(),
@@ -737,7 +998,7 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
         'gen_ai.tool.name': tc.name,
         'gen_ai.tool.call.id': tc.id,
         'gen_ai.tool.call.exec.id': tc.id,
-        'gen_ai.tool.call.arguments': typeof tc.input === 'string' ? tc.input : JSON.stringify(tc.input),
+        'gen_ai.tool.call.arguments': toJsonValue(tc.input),
         'user.id': userId,
         'agent.source': 'qoder-transcript-hook',
         time_unix_nano: toolCallTs,
@@ -745,10 +1006,14 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
       });
 
       if (tr) {
-        // Find PostToolUse timestamp for this tool
-        const postToolTs = findPostToolUseTs(boundaries, i)
-          || (BigInt(toolCallTs) + 1_000_000n).toString(); // +1ms fallback → tool span duration ≥ 1ms
-        const toolDurationMs = computeDurationMs(toolCallTs, postToolTs);
+        // tool_result carries both the tool ID and its actual completion
+        // timestamp. PostToolUse progress rows have no tool ID and may arrive
+        // out of order, so they cannot safely determine per-tool timing.
+        const toolResultTs = ensureEndAfterStart(
+          toolCallTs,
+          tr.resultTs ? isoToUnixNanos(tr.resultTs) : '',
+        );
+        const toolDurationMs = computeDurationMs(toolCallTs, toolResultTs);
         records.push({
           'event.id': crypto.randomUUID(),
           'event.name': 'tool.result',
@@ -760,74 +1025,84 @@ function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId,
           'gen_ai.tool.call.id': tc.id,
           'gen_ai.tool.call.exec.id': tc.id,
           'gen_ai.tool.call.result': tr.result,
-          'tool.result.status': 'success',
+          'tool.result.status': tr.isError ? 'error' : 'success',
           ...(toolDurationMs > 0 ? { 'gen_ai.tool.call.duration': toolDurationMs } : {}),
           'user.id': userId,
           'agent.source': 'qoder-transcript-hook',
-          time_unix_nano: postToolTs,
+          time_unix_nano: toolResultTs,
           observed_time_unix_nano: observedTs,
         });
       }
     }
   }
 
-  return finalizeRecords(records, cwd);
+  return finalizeRecords(records, cwd, runtimeConfig);
 }
 
-function finalizeRecords(records, cwd) {
+function finalizeRecords(records, cwd, runtimeConfig) {
+  const userIdentity = runtimeConfig?.userIdentity;
+  const attributes = runtimeConfig?.resourceAttributes ?? RESOURCE_ATTRIBUTES;
+  const spanAttributes = runtimeConfig?.spanAttributes ?? SPAN_ATTRIBUTES;
+  markTurnBoundaries(records);
   for (const record of records) {
     if (cwd) record['agent.qoder.cwd'] = cwd;
-    Object.assign(record, RESOURCE_BASE_FIELD_PATCH, RESOURCE_ATTRIBUTE_FIELDS);
+    record['user.name'] = userIdentity?.name || '';
+    record['user.email'] = userIdentity?.email || '';
+    Object.assign(record, spanAttributes, agentBaseFieldPatch(attributes),
+      Object.keys(attributes).length > 0 ? { resourceAttributes: attributes } : {});
   }
-  return records;
+  return applyQoderProductIdentity(records, runtimeConfig?.hostProduct);
 }
 
-// --- Content assignment to boundaries ----------------------------------------
+// Variants whose records are committed one complete turn at a time, so the
+// batch boundaries coincide with the turn boundaries. qoder-cli is excluded:
+// its transcript may commit several turns in one batch.
+const TURN_BOUNDARY_VARIANTS = new Set(['qoder', 'qoder-cn']);
 
-function assignContentToBoundaries(boundaries, contentEvents) {
-  const assigned = boundaries.map(() => []);
+/**
+ * Mark the turn's opening and closing event (qoder / qoder-cn IDE only).
+ *
+ * The records of one turn arrive in emission order, so the first one is the
+ * user-input `other` event and the turn closes with its last `llm.response`.
+ * The event-log contract allows exactly one start and one end per turn, so the
+ * flags are only ever set to true and never stamped on the events in between.
+ * A turn without any `llm.response` (interrupted before the model replied)
+ * falls back to closing on its last record, which keeps the single-end
+ * guarantee intact.
+ */
+export function markTurnBoundaries(records) {
+  if (records.length === 0) return records;
+  if (!TURN_BOUNDARY_VARIANTS.has(records[0]['gen_ai.agent.type'])) return records;
 
-  for (const row of contentEvents) {
-    // Skip the user prompt row (already handled as user-hook outside boundaries)
-    if (row.type === 'user' && !isToolResult(row)) continue;
+  records[0]['gen_ai.turn.start'] = true;
 
-    const rowTs = row.timestamp ? Date.parse(row.timestamp) : 0;
-    if (!rowTs) continue;
-
-    // Each boundary "owns" from its startTs to the NEXT boundary's startTs (exclusive).
-    // This ensures tool_result events (which occur between endTs and next startTs)
-    // are assigned to the current boundary, not lost in the gap.
-    let bestIdx = -1;
-    for (let i = 0; i < boundaries.length; i++) {
-      const startMs = Date.parse(boundaries[i].startTs) || 0;
-      const nextStartMs = (i + 1 < boundaries.length)
-        ? Date.parse(boundaries[i + 1].startTs) || Infinity
-        : Infinity;
-      if (rowTs >= startMs && rowTs < nextStartMs) {
-        bestIdx = i;
-        break;
-      }
+  let closing = records[records.length - 1];
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i]['event.name'] === 'llm.response') {
+      closing = records[i];
+      break;
     }
-    if (bestIdx >= 0) assigned[bestIdx].push(row);
   }
+  closing['gen_ai.turn.end'] = true;
 
-  return assigned;
+  return records;
 }
 
 // --- Helpers -----------------------------------------------------------------
 
 /**
  * Split a list of content events into turns.
- * Each real user prompt (type === 'user' and not a tool result) starts a new
- * turn. Tool results and assistant content following a prompt belong to that
- * turn until the next real user prompt.
+ * isMeta rows stay on the preceding prompt, same as tool results.
+ * Slash-command control rows are dropped entirely: they neither start a turn
+ * nor contribute content to one.
  */
-function splitContentEventsIntoTurns(contentEvents) {
+export function splitContentEventsIntoTurns(contentEvents) {
   const turns = [];
   let currentTurn = [];
 
   for (const row of contentEvents) {
-    if (row.type === 'user' && !isToolResult(row)) {
+    if (isControlUserRow(row)) continue;
+    if (isRealUserPrompt(row)) {
       if (currentTurn.length > 0) {
         turns.push(currentTurn);
       }
@@ -844,11 +1119,46 @@ function splitContentEventsIntoTurns(contentEvents) {
   return turns;
 }
 
-function findPostToolUseTs(boundaries, currentIdx) {
-  if (currentIdx + 1 < boundaries.length) {
-    return isoToUnixNanos(boundaries[currentIdx + 1].startTs);
+function ensureEndAfterStart(startNanos, candidateEndNanos) {
+  try {
+    const start = BigInt(startNanos);
+    if (candidateEndNanos && BigInt(candidateEndNanos) > start) {
+      return candidateEndNanos;
+    }
+    return String(start + 1n);
+  } catch {
+    return candidateEndNanos || startNanos;
   }
-  return null;
+}
+
+function orderedLlmInterval(precedingNanos, candidateResponseNanos, fallbackStartNanos) {
+  try {
+    const preceding = precedingNanos
+      .filter(value => typeof value === 'string' && /^\d+$/.test(value))
+      .map(value => BigInt(value));
+    const fallbackStart = /^\d+$/.test(fallbackStartNanos || '')
+      ? BigInt(fallbackStartNanos)
+      : null;
+    let response = /^\d+$/.test(candidateResponseNanos || '')
+      ? BigInt(candidateResponseNanos)
+      : null;
+    let request = preceding.length > 0
+      ? preceding.reduce((latest, value) => value > latest ? value : latest) + 1n
+      : fallbackStart;
+
+    if (request === null && response !== null) request = response - 1n;
+    if (request === null) return { startNanos: '', endNanos: '' };
+    if (response === null || response <= request) response = request + 1n;
+    return {
+      startNanos: request >= 0n ? String(request) : '',
+      endNanos: response >= 0n ? String(response) : '',
+    };
+  } catch {
+    return {
+      startNanos: fallbackStartNanos || '',
+      endNanos: candidateResponseNanos || fallbackStartNanos || '',
+    };
+  }
 }
 
 function isToolResult(row) {
@@ -856,16 +1166,224 @@ function isToolResult(row) {
   return Array.isArray(content) && content.length > 0 && content[0].type === 'tool_result';
 }
 
-function extractUserText(row) {
-  const content = row.message?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === 'text') return block.text || '';
-      if (typeof block === 'string') return block;
+function extractToolResults(rows) {
+  const results = [];
+  for (const row of rows) {
+    if (row.type !== 'user' || !isToolResult(row)) continue;
+    for (const block of row.message?.content || []) {
+      if (block.type !== 'tool_result') continue;
+      results.push({
+        toolId: block.tool_use_id,
+        result: typeof block.content === 'string' ? block.content : JSON.stringify(block.content),
+        isError: block.is_error === true,
+        resultTs: row.timestamp,
+      });
     }
   }
-  return '';
+  return results;
+}
+
+// The transcript carries Anthropic's native stop_reason values, but
+// gen_ai.response.finish_reasons / output.messages[].finish_reason are the
+// normalized OTel GenAI enum shared with every other agent. Anthropic's
+// documented set is wider (stop_sequence, pause_turn, refusal,
+// model_context_window_exceeded), and validate-trace.mjs raises an *error* for
+// values outside VALID_FINISH_REASONS while only warning when the field is
+// absent — so an unmappable value is dropped rather than passed through. The raw
+// value stays on agent.stop_reason, which survives dropAgentScopedFields.
+// Exported so a test can pin it against the validator's set: this file is copied
+// into ~/.loongsuite-pilot/hooks and runs standalone, so it cannot import it.
+export const VALID_FINISH_REASONS = new Set([
+  'stop',
+  'length',
+  'content_filter',
+  'tool_call',
+  'tool_calls',
+  'error',
+  'end_turn',
+  'max_tokens',
+  // Terminal in otlp-trace-flusher's TERMINAL_FINISH_REASONS and already emitted
+  // by the Codex and WorkBuddy paths, so it belongs in the enum.
+  'cancelled',
+]);
+
+// stop_sequence and refusal both end the turn, so they map onto values that
+// TERMINAL_FINISH_REASONS ({stop, end_turn, cancelled, error}) recognizes;
+// spelling refusal as `content_filter` would be more faithful but would leave
+// that turn's buffer without a Signal A closer.
+const FINISH_REASON_ALIASES = {
+  tool_use: 'tool_call',
+  stop_sequence: 'stop',
+  refusal: 'stop',
+  model_context_window_exceeded: 'length',
+};
+
+// Exported for direct unit coverage: the record path forces `end_turn` on the
+// last boundary, so a fixture cannot exercise the drop branch there.
+export function normalizeFinishReason(reason) {
+  const mapped = FINISH_REASON_ALIASES[reason] ?? reason;
+  // Unknown values are dropped, never coerced to `stop`: a mid-turn value such
+  // as pause_turn would then read as terminal and Signal A would flush the turn
+  // buffer early, trading a validator error for a fragmented trace.
+  return VALID_FINISH_REASONS.has(mapped) ? mapped : undefined;
+}
+
+function isMetaUser(row) {
+  return row?.isMeta === true || row?.isMeta === 'true';
+}
+
+function isImageFileAttachment(row) {
+  return row?.type === 'attachment' && row?.attachment?.type === 'image_file';
+}
+
+function collectTurnImageFileAttachments(rows, userRow) {
+  const out = [];
+  const userUuid = typeof userRow?.uuid === 'string' ? userRow.uuid : '';
+  if (!Array.isArray(rows) || !userUuid) return out;
+
+  for (const row of rows) {
+    if (!isImageFileAttachment(row) || row.parentUuid !== userUuid) continue;
+    const att = row.attachment || {};
+    const filename = typeof att.filename === 'string' ? att.filename.trim() : '';
+    if (filename) out.push(slimImageFileAttachment(att, filename));
+  }
+  return out;
+}
+
+function slimImageFileAttachment(att, filename) {
+  const slim = { type: 'image_file', filename };
+  if (typeof att.displayPath === 'string' && att.displayPath.trim()) {
+    slim.displayPath = att.displayPath.trim();
+  }
+  if (typeof att.mediaType === 'string' && att.mediaType.trim()) {
+    slim.mediaType = att.mediaType.trim();
+  }
+  return slim;
+}
+
+function cliAttachmentFields(agentType, userRow, allParsed) {
+  if (agentType !== 'qoder-cli') return {};
+  const attachments = collectTurnImageFileAttachments(allParsed, userRow);
+  return attachments.length > 0 ? { 'agent.qoder.attachments': attachments } : {};
+}
+
+export function isRealUserPrompt(row) {
+  return row?.type === 'user' && !isToolResult(row) && !isMetaUser(row) && !isControlUserRow(row);
+}
+
+// Slash-command plumbing qoder-cli writes as type=user rows. Confirmed shapes,
+// all of them a plain-string content and entrypoint=cli:
+//   [local-command-caveat]                  isMeta
+//   [command-message, command-name]         no isMeta (one row holds both)
+//   [local-command-stdout | ...-stderr]     isMeta
+// None involves a model call. Only the caveat/stdout rows carry isMeta, so the
+// content is what identifies the pair, and no metadata field identifies all three.
+const CONTROL_TAGS = new Set([
+  'local-command-caveat',
+  'command-message',
+  'command-name',
+  'local-command-stdout',
+  'local-command-stderr',
+]);
+
+const CAVEAT_OR_OUTPUT_TAGS = new Set([
+  'local-command-caveat',
+  'local-command-stdout',
+  'local-command-stderr',
+]);
+
+function isEnvelopeSpace(ch) {
+  return ch === ' ' || ch === '\n' || ch === '\r' || ch === '\t';
+}
+
+/**
+ * Return the tag sequence `text` consists of, or null if it holds anything else.
+ *
+ * Deliberately a single forward scan rather than a regex: a pattern that repeats
+ * a lazily-matched envelope is ambiguous about where each envelope ends, and
+ * backtracks exponentially on input that nearly matches. The cursor here only
+ * ever moves forward, so cost is linear in the length of the text and a hostile
+ * prompt cannot stall the Stop hook.
+ */
+function scanControlEnvelopes(text) {
+  const tags = [];
+  let i = 0;
+
+  while (i < text.length) {
+    while (i < text.length && isEnvelopeSpace(text[i])) i++;
+    if (i >= text.length) break;
+    if (text[i] !== '<') return null;
+
+    const openEnd = text.indexOf('>', i + 1);
+    if (openEnd === -1) return null;
+    const tag = text.slice(i + 1, openEnd);
+    if (!CONTROL_TAGS.has(tag)) return null;
+
+    const closeAt = text.indexOf(`</${tag}>`, openEnd + 1);
+    if (closeAt === -1) return null;
+
+    tags.push(tag);
+    i = closeAt + tag.length + 3;
+  }
+
+  return tags.length > 0 ? tags : null;
+}
+
+function isControlEnvelopeSequence(tags, row) {
+  if (tags.length === 1) {
+    // A lone <command-name> is something a user can plausibly type or paste, so
+    // the banner and output rows are only recognized together with their isMeta.
+    return CAVEAT_OR_OUTPUT_TAGS.has(tags[0]) && isMetaUser(row);
+  }
+  if (tags.length === 2) {
+    return tags[0] === 'command-message' && tags[1] === 'command-name';
+  }
+  return false;
+}
+
+export function isControlUserRow(row) {
+  // A promptId means the CLI itself booked the row as a submitted prompt, so it
+  // can never be plumbing. Most rows carry no promptId, so this only
+  // short-circuits; the envelope shape is what decides.
+  if (row?.type !== 'user' || isToolResult(row) || row.promptId) return false;
+  // Only qoder-cli emits this plumbing, and only ever as a plain string. A
+  // content-block array is a real message, whatever its first block looks like.
+  if (row.entrypoint !== 'cli') return false;
+  const content = row.message?.content;
+  if (typeof content !== 'string') return false;
+
+  const tags = scanControlEnvelopes(content);
+  return tags !== null && isControlEnvelopeSequence(tags, row);
+}
+
+function extractUserTexts(row) {
+  const content = row.message?.content;
+  if (typeof content === 'string') return content ? [content] : [];
+  if (!Array.isArray(content)) return [];
+  const texts = [];
+  for (const block of content) {
+    if (typeof block === 'string') {
+      if (block) texts.push(block);
+      continue;
+    }
+    if (block?.type === 'text' && block.text) texts.push(block.text);
+  }
+  return texts;
+}
+
+function buildUserMessageParts(userText, contentEvents, agentType) {
+  const parts = [{ type: 'text', content: userText }];
+  if (agentType !== 'qoder-cli' || !Array.isArray(contentEvents)) return parts;
+  const seen = new Set([userText]);
+  for (const row of contentEvents) {
+    if (row.type !== 'user' || isToolResult(row)) continue;
+    for (const text of extractUserTexts(row)) {
+      if (!text || seen.has(text)) continue;
+      parts.push({ type: 'text', content: text });
+      seen.add(text);
+    }
+  }
+  return parts;
 }
 
 function inferVariant(row, sourceAgentId) {
@@ -883,14 +1401,16 @@ function resolveUserId(row, runtimeConfig) {
   return '';
 }
 
-// --- Legacy fallback (no progress events) ------------------------------------
-// Used when transcript has no progress events AND no assistant blocks detected.
+// --- Legacy fallback (no LLM boundaries) -------------------------------------
+// Used when `buildLlmBoundaries` yields nothing, i.e. the turn has no assistant
+// block. Progress events alone do not prevent this path.
 // Limitations: no llm.request synthesis (LLM spans will be 0ms orphan responses),
 // no multi-part merging. QoderTraceInput's token enricher provides tokens but timing is approximate.
 
-function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs) {
-  // When no progress events are available, use the old per-line normalization
-  for (const row of contentEvents) {
+function buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs) {
+  // Per-line normalization for the rows the caller did not emit itself. The
+  // turn's user prompt already arrives via `existingRecords`.
+  for (const row of residualEvents) {
     const record = buildQoderHookRecord(row, { agentId, runtimeConfig, turnId });
     if (record) existingRecords.push(record);
   }
@@ -918,6 +1438,9 @@ function buildLegacyEvents(contentEvents, turnId, sessionId, agentId, runtimeCon
 // --- Entry point -------------------------------------------------------------
 
 function isDirectExec() {
+  // The exported parser is also bundled into dist/index.js. That bundle must
+  // never run this stdin Hook entry point during collector startup.
+  if (path.basename(fileURLToPath(import.meta.url)) !== 'qoder-hook-processor.mjs') return false;
   const argv1 = process.argv[1];
   if (!argv1) return false;
   const here = fileURLToPath(import.meta.url);

@@ -15,8 +15,8 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Trace reporting | Export GenAI conversations and tool activity as OTLP traces. |
 | Token usage | Capture input, output, cache read, and cache creation tokens when the source agent exposes them. |
 | Tool activity | Capture tool call names, arguments, results, durations, and errors when available. |
-| Privacy controls | Disable message content capture per agent and mask secrets before output. |
-| Runtime operations | Manage the background service, inspect status, run an optional dashboard, and rollback versions. |
+| Privacy controls | Mask secrets and personal sensitive data before output. |
+| Runtime operations | Manage the background service, inspect status, use the built-in local dashboard, and rollback versions. |
 
 ## Supported Agents
 
@@ -25,7 +25,14 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Claude Code | Hook | Yes | Yes | Yes | Yes |
 | Codex | Hook | Yes | Yes | Yes | Yes |
 | Cursor | Hook | Yes | Yes | Yes | Yes |
+| Cursor CLI | Shared Cursor hook | Yes | Yes | Yes | Yes |
+| Grok Build | Hook + local session logs | Yes | Yes | Yes | Yes |
+| Hermes Agent | Native directory plugin | Yes | Yes | Yes | Yes |
+| Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
+| MiMo Code | Plugin injection | Yes | Yes | Yes | Yes |
+| OpenClaw | Plugin injection | Yes | Yes | Yes | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
+| Pi Coding Agent | Extension injection | Yes | Yes | Yes | Yes |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | Yes | Yes | Yes | Yes |
 | Qoder for JetBrains | Detection-only | Yes | Yes | Yes | Yes |
@@ -33,7 +40,28 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Qoder Work | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Qoder Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
+| Qwen Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
+| WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
+| [Doubao Work (macOS/Windows, experimental)](doubao-work.md) | Read-only client logs | Client turns + local tools | Metadata only | No | No |
+
+OpenClaw integration supports 2026.3.8 or later with automatic version detection; releases before 2026.5.12 use inferred model-call timing.
+
+### Documented Windows Agent Support
+
+The general support table describes integration capabilities across Pilot and must not be interpreted as an operating-system compatibility matrix. The following agents are currently explicitly documented as supported on Windows:
+
+| Agent | Windows Integration | Trace Export | Log Export | Token Usage | Conversation / Tool Calls | Requirement |
+|-------|---------------------|--------------|------------|-------------|---------------------------|-------------|
+| Claude Code | Hook | Yes | Yes | Yes | Yes | — |
+| Cursor | Hook | Yes | Yes | Yes | Yes | — |
+| Qoder Work | Hook / local data source | Yes | Yes | No | Yes | User edition |
+| Qoder CLI | Hook | Yes | Yes | No | Yes | — |
+| Qoder IDE | Hook / local data source | Yes | Yes | Yes | Yes | Qoder 1.10.0 or later, User edition |
+| OpenCode | Plugin injection | Yes | Yes | Yes | Yes | — |
+| WorkBuddy | Hook wakeup + local transcript | Yes | Yes | Yes | Yes | WorkBuddy Desktop 5.3.5.0; Windows 11 installed-product E2E |
+
+Agents omitted from this table do not currently have an explicit Windows support statement; omission does not necessarily mean that the agent cannot run on Windows. This matrix follows the [Alibaba Cloud AI Coding Agent access guide](https://help.aliyun.com/zh/cms/cloudmonitor-2-0/ai-application-access-ai-coding-agent/). See [Installation](installation.md) for Windows prerequisites and setup.
 
 ## Data Collected
 
@@ -48,7 +76,7 @@ Pilot focuses on activity that is useful for usage analysis, audit, and traceabi
 - Host and service metadata.
 - Agent-specific extension fields when a source exposes additional context.
 
-Message content, tool arguments, and tool results can contain sensitive information. These fields are documented as opt-in in the [Output Event Schema](output-event-schema.md), can be disabled per agent, and can be masked before export.
+Message content, tool arguments, and tool results can contain sensitive information. These fields enter the reporting pipeline and can be masked before export. See the [Output Event Schema](output-event-schema.md) and [Data Masking](masking.md).
 
 ## Output Destinations
 
@@ -61,7 +89,7 @@ Pilot can fan out the same normalized event stream to multiple destinations:
 | HTTP | Custom ingestion service or gateway. |
 | OTLP Trace | Trace backend, APM, or GenAI observability platform. |
 
-If no remote backend is configured, JSONL remains enabled by default so collected data is still visible locally.
+JSONL is disabled by default, including when no remote backend is configured. Set `jsonl.enabled` to `true` to write normalized events locally.
 
 ## Local Runtime
 
@@ -82,14 +110,14 @@ Important files and directories:
 | `plugins/` | Installed plugin assets. |
 | `logs/output/` | Local normalized JSONL output. |
 | `logs/input-state.json` | Input offsets and checkpoints. |
-| `sls-failed-logs/` | SLS upload failures persisted for diagnosis. |
+| `logs/sls-failed-logs/` | Bounded SLS failure metadata for diagnosis; no failed payloads. |
 | `versions/` and `current` | Versioned runtime layout used for updates and rollback. |
 
 ## Where To Go Next
 
 - Install Pilot with [Installation](installation.md).
 - Configure outputs and agent selection in [Configuration Guide](configuration.md).
-- Choose agents and content capture policy in [Agent Configuration](agents.md).
+- Choose agents in [Agent Configuration](agents.md).
 - Configure local output in [Local JSONL Output](local-jsonl-output.md).
 - Configure SLS reporting in [SLS Output](sls-output.md).
 - Configure trace reporting in [Trace Output](trace-output.md).

@@ -16,16 +16,29 @@ const PLUGIN_PATH = path.resolve(
  */
 let tmpDir;
 let prevDataDir;
+let previousResourceEnv;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'opencode-tokens-'));
   prevDataDir = process.env.LOONGSUITE_PILOT_DATA_DIR;
   process.env.LOONGSUITE_PILOT_DATA_DIR = tmpDir;
+  previousResourceEnv = {
+    AGENTTEAMS_WORKER_NAME: process.env.AGENTTEAMS_WORKER_NAME,
+    AGENTTEAMS_INSTANCE_ID: process.env.AGENTTEAMS_INSTANCE_ID,
+    AGENTTEAMS_TOKEN: process.env.AGENTTEAMS_TOKEN,
+  };
+  delete process.env.AGENTTEAMS_WORKER_NAME;
+  delete process.env.AGENTTEAMS_INSTANCE_ID;
+  delete process.env.AGENTTEAMS_TOKEN;
 });
 
 afterEach(() => {
   if (prevDataDir === undefined) delete process.env.LOONGSUITE_PILOT_DATA_DIR;
   else process.env.LOONGSUITE_PILOT_DATA_DIR = prevDataDir;
+  for (const [key, value] of Object.entries(previousResourceEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -100,5 +113,22 @@ describe('opencode plugin token mapping', () => {
     expect(rec['gen_ai.usage.input_tokens']).toBe(300);
     expect(rec['gen_ai.usage.cache_read.input_tokens']).toBe(0);
     expect(rec['gen_ai.usage.total_tokens']).toBe(340);
+    expect(rec['gen_ai.agent.name']).toBe('opencode');
+    expect(rec.resourceAttributes).toBeUndefined();
+  });
+
+  it('uses custom worker context without exposing non-allowlisted values', async () => {
+    process.env.AGENTTEAMS_WORKER_NAME = ' planner ';
+    process.env.AGENTTEAMS_INSTANCE_ID = ' instance-01 ';
+    process.env.AGENTTEAMS_TOKEN = 'must-not-leak';
+
+    const [rec] = await emitLlmResponse({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0 });
+
+    expect(rec['gen_ai.agent.name']).toBe('planner');
+    expect(rec.resourceAttributes).toEqual({
+      'agentteams.worker.name': 'planner',
+      'agentteams.instance.id': 'instance-01',
+    });
+    expect(JSON.stringify(rec)).not.toContain('must-not-leak');
   });
 });

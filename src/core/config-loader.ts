@@ -1,28 +1,55 @@
 import * as os from 'node:os';
+import { validateExcludedWorkspaces } from './workspace-policy.js';
+import {
+  DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+  globalPollIntervalMs,
+} from '../utils/poll-interval.js';
+import * as path from 'node:path';
 import type {
   AgentsConfig,
+  ListenerConfig,
   AnalyticsConfig,
   AutoUpdateConfig,
   CmsConfig,
-  FileCollectionToggle,
+  DashboardConfig,
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
   LogRetentionConfig,
   MaskConfig,
+  MaskReplacementMode,
   MaskType,
+  AgentMultimodalConfig,
+  MultimodalRuntimeConfig,
+  MultimodalSlsAuthMode,
+  MultimodalStorage,
+  MultimodalStorageAuth,
+  MultimodalUploadMode,
+  OtlpEndpoint,
+  OtlpEndpointEntry,
+  CmsEndpointEntry,
   OtlpTraceFlusherConfig,
   OtlpTraceRawConfig,
   SlsEndpoint,
+  SlsFlusherConfig,
   SlsMode,
   StatusBarConfig,
+  UpstreamLinkConfig,
+} from '../types/index.js';
+import {
+  MULTIMODAL_SLS_AUTH_MODES,
+  MULTIMODAL_UPLOAD_MODES,
+  SUPPORTED_MASK_TYPES,
 } from '../types/index.js';
 import { readJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
+import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
+import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
+import { resolveDoubaoAppEnabled, resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
-
-const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 export interface SlsEndpointEntry {
   name?: string;
@@ -32,6 +59,7 @@ export interface SlsEndpointEntry {
   mode?: SlsMode;
   accessKeyId?: string;
   accessKeySecret?: string;
+  apiKey?: string;
 }
 
 export interface SlsSingleConfig {
@@ -39,6 +67,7 @@ export interface SlsSingleConfig {
   mode?: SlsMode;
   accessKeyId?: string;
   accessKeySecret?: string;
+  apiKey?: string;
   endpoint?: string;
   project?: string;
   logstore?: string;
@@ -46,10 +75,20 @@ export interface SlsSingleConfig {
   destinationOverride?: boolean;
   batchMaxSize?: number;
   flushIntervalMs?: number;
+  timeout?: import('../types/index.js').SlsTimeoutConfig;
+  retry?: import('../types/index.js').SlsRetryConfig;
+  flushConcurrency?: number;
 }
 
 export interface InnerDataConfig {
   sls?: SlsEndpointEntry[];
+  otlp?: OtlpEndpointEntry[];
+  cms?: CmsEndpointEntry[];
+  serviceNamePrefix?: string;
+  /** Default storage used when the user has not configured a multimodal block. */
+  multimodal?: ConfigFile['multimodal'];
+  /** Managed per-agent defaults only configure multimodal uploads. */
+  agents?: Record<string, Pick<NonNullable<ConfigFile['agents']>[string], 'multimodal'>>;
 }
 
 /**
@@ -61,6 +100,8 @@ export interface ConfigFile {
   dataDir?: string;
   userId?: string;
   'user.id'?: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 
   sls?: SlsSingleConfig | SlsEndpointEntry[];
 
@@ -83,6 +124,9 @@ export interface ConfigFile {
   listeners?: Record<string, {
     enabled?: boolean;
     pollInterval?: number;
+    logDir?: string;
+    client?: 'doubao-work' | 'doubao';
+    includeConversationIds?: string[];
   }>;
 
   retention?: {
@@ -93,6 +137,8 @@ export interface ConfigFile {
     hookDebugDays?: number;
     outputDays?: number;
     slsFailedDays?: number;
+    otlpFailedDays?: number;
+    metricAlarmDays?: number;
   };
 
   hookWatchdog?: {
@@ -101,13 +147,48 @@ export interface ConfigFile {
     repairCooldownMs?: number;
   };
 
+  privacy?: { excludeWorkspaces?: string[] };
+  interceptor?: {
+    mode?: string;
+    types?: string[];
+  };
+
   collectLog?: boolean;
   collectTrace?: boolean;
+  serviceName?: string;
   serviceNamePrefix?: string;
+
+  upstreamLink?: {
+    enabled?: boolean;
+    propagateToTools?: boolean;
+    propagateToLlm?: boolean;
+    generateTraceWhenMissing?: boolean;
+    ttlMs?: number;
+  };
+
+  multimodal?: {
+    storage?: {
+      type?: string;
+      target?: {
+        endpoint?: string;
+        project?: string;
+        logstore?: string;
+        storageBasePath?: string;
+      };
+      auth?: {
+        mode?: string;
+        accessKeyId?: string;
+        accessKeySecret?: string;
+        securityToken?: string;
+        apiKey?: string;
+      };
+    };
+  };
 
   mask?: {
     mode?: string;
     types?: string[];
+    replacementMode?: string;
   };
 
   cms?: {
@@ -118,6 +199,7 @@ export interface ConfigFile {
   };
 
   otlpTrace?: {
+    spanEnrichers?: string[];
     endpoint?: string;
     headers?: Record<string, string>;
     resourceAttributes?: Record<string, string>;
@@ -126,11 +208,16 @@ export interface ConfigFile {
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
     resourceAttributeKeys?: string[];
+    spanAttributePassthroughPrefixes?: string[];
   };
 
   agents?: Record<string, {
     enabled?: boolean;
     captureMessageContent?: boolean | string;
+    multimodal?: {
+      uploadMode?: string;
+      allowedRootPaths?: string[];
+    };
   }>;
 
   autoUpdate?: {
@@ -148,9 +235,18 @@ export interface ConfigFile {
     enabled?: boolean;
     file?: { enabled?: boolean };
     qoderApi?: { enabled?: boolean };
+    multica?: { enabled?: boolean; mode?: 'on' | 'off' };
   };
 
   enableStatusBarApp?: boolean | string;
+
+  dashboard?: {
+    enabled?: boolean;
+    port?: number;
+  };
+
+  /** User-defined attributes injected into trace spans (merged with OTEL_SPAN_ATTRIBUTES env). */
+  globalSpanAttributes?: Record<string, unknown>;
 
   installId?: string;
   canary?: {
@@ -164,9 +260,14 @@ function env(key: string): string | undefined {
   return v !== undefined ? (process.platform === 'win32' ? v.trim() : v) : undefined;
 }
 
+function nonEmpty(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  return normalized ? normalized : undefined;
+}
+
 function envBool(key: string, fallback: boolean): boolean {
   const v = env(key);
-  if (v === undefined) return fallback;
+  if (v === undefined || v.trim() === '') return fallback; // empty string == unset, not "true"
   return v !== 'false' && v !== '0';
 }
 
@@ -186,7 +287,7 @@ function envInt(key: string, fallback: number): number {
  * Env vars override config file values. Config file overrides defaults.
  */
 export async function loadConfig(): Promise<AnalyticsConfig> {
-  const configPath = resolveHome(env('AGENT_DATA_COLLECTION_CONFIG') ?? DEFAULT_CONFIG_PATH);
+  const configPath = configJsonPath();
   const file = await readJsonFile<ConfigFile>(configPath);
 
   if (file) {
@@ -195,37 +296,337 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     logger.debug('no config file found, using env + defaults', { path: configPath });
   }
 
-  const dataDir = env('LOONGSUITE_PILOT_DATA_DIR') ?? file?.dataDir ?? '~/.loongsuite-pilot';
+  const dataDir = pickDataDir(env('LOONGSUITE_PILOT_DATA_DIR'), file?.dataDir);
 
   const innerDataConfigPath = resolveHome(`${dataDir}/configs/inner/data_config.json`);
   const innerDataConfig = await readJsonFile<InnerDataConfig>(innerDataConfigPath);
 
   const userId = env('LOONGSUITE_PILOT_USER_ID') ?? file?.userId ?? file?.['user.id'] ?? os.hostname();
+  const hostSn = typeof file?.hostSn === 'string' ? file.hostSn.trim() : '';
+  const hostIdentityTags = envBool(
+    'LOONGSUITE_PILOT_HOST_IDENTITY_TAGS',
+    file?.hostIdentityTags ?? true,
+  );
 
-  const serviceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix ?? 'loongsuite-pilot';
+  const serviceName = nonEmpty(env('LOONGSUITE_PILOT_SERVICE_NAME')) ?? nonEmpty(file?.serviceName);
+  const configuredServiceNamePrefix = env('LOONGSUITE_PILOT_SERVICE_NAME_PREFIX') ?? file?.serviceNamePrefix;
+  const serviceNamePrefix = configuredServiceNamePrefix ?? 'loongsuite-pilot';
+  const interceptor = buildInterceptorConfig(file?.interceptor);
+  const pipeline = buildPipelineConfig(file, configuredServiceNamePrefix);
 
   return {
     enabled: envBool('LOONGSUITE_PILOT_ENABLED', file?.enabled ?? true),
     autoStart: true,
     dataDir,
     userId,
+    hostSn,
+    hostIdentityTags,
     collectLog: envBool('LOONGSUITE_PILOT_COLLECT_LOG', file?.collectLog ?? true),
     collectTrace: envBool('LOONGSUITE_PILOT_COLLECT_TRACE', file?.collectTrace ?? true),
+    serviceName,
     serviceNamePrefix,
     cms: buildCmsConfig(file),
     otlpTrace: buildOtlpTraceRawConfig(file),
+    innerTrace: innerDataConfig
+      ? {
+          otlp: innerDataConfig.otlp,
+          cms: innerDataConfig.cms,
+          serviceNamePrefix: innerDataConfig.serviceNamePrefix,
+        }
+      : undefined,
     autoUpdate: buildAutoUpdateConfig(file),
 
     listeners: buildListenersConfig(file),
-    flushers: buildFlushersConfig(file, dataDir, serviceNamePrefix, innerDataConfig),
+    flushers: buildFlushersConfig(file, dataDir, serviceName, serviceNamePrefix, innerDataConfig),
     retention: buildRetentionConfig(file),
-    agents: buildAgentsConfig(file),
-    mask: buildMaskConfig(file),
+    agents: buildAgentsConfig(file, innerDataConfig),
+    privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
+    mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
-    fileCollection: buildFileCollectionConfig(file),
-    pipeline: buildPipelineConfig(file),
+    fileCollection: pipeline,
+    pipeline,
     statusBar: buildStatusBarConfig(file),
+    dashboard: buildDashboardConfig(file),
+    upstreamLink: buildUpstreamLinkConfig(file),
+    multimodal: buildMultimodalConfig(file, innerDataConfig),
+    globalSpanAttributes: resolveGlobalSpanAttributes(file),
+    interceptor,
   };
+}
+
+function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
+  const ttlMs = envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000); // 24h
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    propagateToTools: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
+      file?.upstreamLink?.propagateToTools ?? false,
+    ),
+    propagateToLlm: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM',
+      file?.upstreamLink?.propagateToLlm ?? false,
+    ),
+    generateTraceWhenMissing: envBool(
+      'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
+      file?.upstreamLink?.generateTraceWhenMissing ?? false,
+    ),
+    // Clamp: ttlMs <= 0 would make the retention cutoff Date.now() (or the future),
+    // deleting all freshly-written correlation files and silently breaking linking.
+    ttlMs: ttlMs > 0 ? ttlMs : 86_400_000,
+  };
+}
+
+const MULTIMODAL_UPLOAD_MODE_SET = new Set<string>(MULTIMODAL_UPLOAD_MODES);
+
+type MultimodalStorageRaw = NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>;
+
+function buildMultimodalConfig(
+  file: ConfigFile | null,
+  innerDataConfig?: InnerDataConfig | null,
+): MultimodalRuntimeConfig | undefined {
+  // Select a whole block so managed storage targets and user credentials are not merged.
+  const block = file?.multimodal !== undefined
+    ? file.multimodal
+    : innerDataConfig?.multimodal;
+  try {
+    if (block === undefined) return undefined;
+    if (block === null || typeof block !== 'object' || Array.isArray(block)) {
+      throw new Error('multimodal must be an object');
+    }
+    if (block.storage === undefined) {
+      throw new Error('multimodal.storage is required');
+    }
+    if (typeof block.storage !== 'object' || Array.isArray(block.storage)) {
+      throw new Error('multimodal.storage must be an object');
+    }
+    const storageRaw = block.storage;
+    const type = (storageRaw.type ?? '').trim();
+    if (type === 'oss') {
+      const storage = buildMultimodalOssStorage(storageRaw);
+      return { storage, storageBasePath: storage.target.storageBasePath };
+    }
+    if (type === 'sls' || type === 'delegatedOss') {
+      const storage = buildMultimodalSlsBackedStorage(type, storageRaw, file);
+      return {
+        storage,
+        storageBasePath: `sls://${storage.target.project}/${storage.target.logstore}`,
+      };
+    }
+    throw new Error(`invalid multimodal.storage.type: ${type || '(missing)'}`);
+  } catch (err) {
+    logger.error('multimodal config invalid; disabled for process', { error: String(err) });
+    return undefined;
+  }
+}
+
+function multimodalDestKey(endpoint: string, project: string, logstore: string): string | undefined {
+  try {
+    return `${normalizeEndpointUrl(regionalizeSlsEndpoint(endpoint, project))}|${project}|${logstore}`;
+  } catch {
+    return undefined;
+  }
+}
+
+function findReusedApiKeyAuth(
+  target: { endpoint: string; project: string; logstore: string },
+  file: ConfigFile | null,
+): { mode: 'apiKey'; apiKey: string } | undefined {
+  const dest = multimodalDestKey(target.endpoint, target.project, target.logstore);
+  if (!dest) return undefined;
+  const raw = file?.sls;
+  const entries = Array.isArray(raw) ? raw : raw ? [raw] : [];
+  let apiKey: string | undefined;
+  for (const ep of entries) {
+    if (!ep || typeof ep !== 'object') continue;
+    if (inferSlsMode(ep) !== 'apiKey' || (ep.apiKey && (ep.accessKeyId || ep.accessKeySecret))) continue;
+    const candidate = isNonEmptyString(ep.apiKey) ? ep.apiKey.trim() : undefined;
+    const endpoint = isNonEmptyString(ep.endpoint) ? ep.endpoint.trim() : undefined;
+    const project = isNonEmptyString(ep.project) ? ep.project.trim() : undefined;
+    const logstore = isNonEmptyString(ep.logstore) ? ep.logstore.trim() : undefined;
+    if (!candidate || !endpoint || !project || !logstore) continue;
+    if (multimodalDestKey(endpoint, project, logstore) !== dest) continue;
+    if (apiKey !== undefined && apiKey !== candidate) return undefined;
+    apiKey = candidate;
+  }
+  return apiKey ? { mode: 'apiKey', apiKey } : undefined;
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function buildMultimodalOssStorage(
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+): Extract<MultimodalStorage, { type: 'oss' }> {
+  const endpoint = (raw.target?.endpoint ?? '').trim();
+  const storageBasePathRaw = (raw.target?.storageBasePath ?? '').trim();
+  if (!endpoint) throw new Error('multimodal.storage.target.endpoint is required when type=oss');
+  if (!storageBasePathRaw) {
+    throw new Error('multimodal.storage.target.storageBasePath is required when type=oss');
+  }
+  if (!storageBasePathRaw.startsWith('oss://')) {
+    throw new Error('multimodal.storage.target.storageBasePath must start with oss:// when type=oss');
+  }
+  const auth = buildMultimodalStorageAuth(raw.auth);
+  if (auth.mode === 'anonymous') {
+    throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+  }
+  if (auth.mode !== 'ak') {
+    throw new Error('multimodal.storage.type=oss requires auth.mode=ak');
+  }
+  return {
+    type: 'oss',
+    target: {
+      endpoint: endpoint.replace(/\/+$/, ''),
+      storageBasePath: storageBasePathRaw.replace(/\/+$/, ''),
+    },
+    auth,
+  };
+}
+
+function buildMultimodalSlsBackedStorage(
+  type: 'sls' | 'delegatedOss',
+  raw: NonNullable<NonNullable<ConfigFile['multimodal']>['storage']>,
+  file: ConfigFile | null,
+): Extract<MultimodalStorage, { type: 'sls' | 'delegatedOss' }> {
+  const endpointRaw = (raw.target?.endpoint ?? '').trim().replace(/\/+$/, '');
+  const logstore = (raw.target?.logstore ?? '').trim();
+  if (!endpointRaw || !logstore) {
+    throw new Error(`multimodal.storage.target requires endpoint and logstore when type=${type}`);
+  }
+  const project = resolveMultimodalProject(raw.target!);
+  const endpoint = regionalizeSlsEndpoint(endpointRaw, project);
+  const auth = buildMultimodalStorageAuth(
+    raw.auth ?? findReusedApiKeyAuth({ endpoint, project, logstore }, file),
+  );
+  const target = { endpoint, project, logstore };
+  if (type === 'delegatedOss') {
+    if (auth.mode === 'anonymous') {
+      throw new Error('multimodal.storage.auth.mode=anonymous is only supported when type=sls');
+    }
+    return { type, target, auth };
+  }
+  return { type, target, auth };
+}
+
+const SLS_PUBLIC_HOST_SUFFIX = '.log.aliyuncs.com';
+
+/** Explicit project, then project-qualified multimodal host. */
+function resolveMultimodalProject(
+  target: NonNullable<MultimodalStorageRaw['target']>,
+): string {
+  let explicit: string | undefined;
+  if ('project' in target) {
+    if (!isNonEmptyString(target.project)) {
+      throw new Error('multimodal.storage.target.project is invalid');
+    }
+    explicit = target.project.trim();
+  }
+  const fromHost = projectFromQualifiedSlsHost(target.endpoint);
+  if (explicit && fromHost && explicit !== fromHost) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  if (explicit) return explicit;
+  if (fromHost) return fromHost;
+  throw new Error('multimodal.storage.target.project is required');
+}
+
+/** Strip `{project}.` from a public SLS host so request builders can prepend it once. */
+function regionalizeSlsEndpoint(endpoint: string, project: string): string {
+  let url: URL;
+  try {
+    url = new URL(normalizeEndpointUrl(endpoint));
+  } catch {
+    return endpoint;
+  }
+  const host = url.hostname.replace(/\.$/, '');
+  if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return endpoint;
+  const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+  const parts = rest.split('.').filter(Boolean);
+  if (parts.length < 2) return endpoint;
+  if (parts[0] !== project) {
+    throw new Error('multimodal.storage.target.project conflicts with project-qualified endpoint');
+  }
+  const regionalHost = `${parts.slice(1).join('.')}${SLS_PUBLIC_HOST_SUFFIX}`;
+  const port = url.port ? `:${url.port}` : '';
+  return `${url.protocol}//${regionalHost}${port}`;
+}
+
+/** `{project}.{region}.log.aliyuncs.com` — regional `{region}.log.aliyuncs.com` has no project. */
+function projectFromQualifiedSlsHost(endpoint: string | undefined): string | undefined {
+  if (!isNonEmptyString(endpoint)) return undefined;
+  try {
+    const host = new URL(normalizeEndpointUrl(endpoint)).hostname.replace(/\.$/, '');
+    if (!host.endsWith(SLS_PUBLIC_HOST_SUFFIX)) return undefined;
+    const rest = host.slice(0, -SLS_PUBLIC_HOST_SUFFIX.length);
+    const parts = rest.split('.').filter(Boolean);
+    return parts.length >= 2 ? parts[0] : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function buildMultimodalStorageAuth(
+  raw: { mode?: string; accessKeyId?: string; accessKeySecret?: string; securityToken?: string; apiKey?: string } | undefined,
+): MultimodalStorageAuth {
+  const accessKeyId = (raw?.accessKeyId ?? '').trim();
+  const accessKeySecret = (raw?.accessKeySecret ?? '').trim();
+  const securityToken = (raw?.securityToken ?? '').trim();
+  const apiKey = (raw?.apiKey ?? '').trim();
+  const hasAk = !!(accessKeyId && accessKeySecret);
+  const hasApiKey = !!apiKey;
+  if (hasApiKey && (accessKeyId || accessKeySecret || securityToken)) {
+    throw new Error('multimodal.storage.auth cannot include both apiKey and access keys');
+  }
+
+  const mode = resolveMultimodalStorageAuthMode(raw?.mode, { hasAk, hasApiKey });
+  if (mode === 'anonymous') {
+    if (accessKeyId || accessKeySecret || securityToken || apiKey) {
+      throw new Error('multimodal.storage.auth.mode=anonymous cannot include credentials');
+    }
+    return { mode: 'anonymous' };
+  }
+  if (mode === 'apiKey') {
+    if (!apiKey) throw new Error('multimodal.storage.auth requires apiKey when mode=apiKey');
+    return { mode: 'apiKey', apiKey };
+  }
+  if (!hasAk) {
+    throw new Error('multimodal.storage.auth requires accessKeyId and accessKeySecret when mode=ak');
+  }
+  return {
+    mode: 'ak',
+    accessKeyId,
+    accessKeySecret,
+    ...(securityToken ? { securityToken } : {}),
+  };
+}
+
+function resolveMultimodalStorageAuthMode(
+  raw: string | undefined,
+  creds: { hasAk: boolean; hasApiKey: boolean },
+): MultimodalSlsAuthMode {
+  const mode = (raw ?? '').trim();
+  if ((MULTIMODAL_SLS_AUTH_MODES as readonly string[]).includes(mode)) {
+    return mode as MultimodalSlsAuthMode;
+  }
+  if (mode) throw new Error(`unsupported multimodal.storage.auth.mode: ${mode}`);
+  if (creds.hasApiKey === creds.hasAk) {
+    throw new Error('multimodal.storage.auth requires exactly one complete credential set when mode is omitted');
+  }
+  return creds.hasApiKey ? 'apiKey' : 'ak';
+}
+
+/**
+ * User-defined global span attributes: config.json `globalSpanAttributes` merged
+ * with the `OTEL_SPAN_ATTRIBUTES` env (key1=value1,key2=value2). Env wins over
+ * config. Reserved-prefix keys and non-string values are dropped.
+ */
+function resolveGlobalSpanAttributes(file: ConfigFile | null): Record<string, string> {
+  const fromConfig = (file?.globalSpanAttributes as Record<string, unknown>) ?? {};
+  const fromEnv = parseKeyValueAttributes(env('OTEL_SPAN_ATTRIBUTES'));
+  // Sanitize the merged result so config and env are treated consistently
+  // (drop reserved-prefix keys and non-string values from both).
+  return sanitizeAttributes({ ...fromConfig, ...fromEnv });
 }
 
 function buildOtlpTraceRawConfig(file: ConfigFile | null): OtlpTraceRawConfig | undefined {
@@ -255,29 +656,114 @@ function buildCmsConfig(file: ConfigFile | null): CmsConfig {
   };
 }
 
-function buildAgentsConfig(file: ConfigFile | null): AgentsConfig {
-  const result: AgentsConfig = {};
-  if (!file?.agents || typeof file.agents !== 'object') return result;
+function configValueType(value: unknown): string {
+  return Array.isArray(value) ? 'array' : value === null ? 'null' : typeof value;
+}
 
-  for (const [agentType, policy] of Object.entries(file.agents)) {
-    if (!agentType || !policy || typeof policy !== 'object') continue;
+function buildAgentsConfig(file: ConfigFile | null, innerDataConfig: InnerDataConfig | null): AgentsConfig {
+  const policies: NonNullable<ConfigFile['agents']> = {};
+  for (const [source, managed] of [
+    [innerDataConfig?.agents, true],
+    [file?.agents, false],
+  ] as const) {
+    if (source === undefined) continue;
+    const sourceName = managed ? 'inner' : 'user';
+    if (!source || typeof source !== 'object' || Array.isArray(source)) {
+      logger.warn('Ignoring invalid agents config; expected an object', {
+        source: sourceName, type: configValueType(source),
+      });
+      continue;
+    }
+    for (const [agentType, policy] of Object.entries(source)) {
+      if (!agentType || !policy || typeof policy !== 'object' || Array.isArray(policy)) {
+        logger.warn('Ignoring invalid agent policy; expected an object', {
+          source: sourceName, agentType, type: configValueType(policy),
+        });
+        continue;
+      }
+      const multimodal = policy.multimodal;
+      if (managed) {
+        const ignoredFields = Object.keys(policy).filter(key => key !== 'multimodal');
+        if (!multimodal || typeof multimodal !== 'object' || Array.isArray(multimodal)) {
+          logger.warn('Ignoring managed agent policy without valid multimodal settings', {
+            agentType, type: configValueType(multimodal), ignoredFields,
+          });
+          continue;
+        }
+        if (ignoredFields.length > 0) {
+          logger.warn('Ignoring unsupported managed agent fields', { agentType, ignoredFields });
+        }
+      }
+      // Only user agent policies may supply enabled and captureMessageContent.
+      const acceptedPolicy = managed ? { multimodal } : policy;
+      const previous = policies[agentType];
+      policies[agentType] = {
+        ...previous,
+        ...acceptedPolicy,
+        ...(multimodal && typeof multimodal === 'object' && !Array.isArray(multimodal)
+          ? { multimodal: { ...previous?.multimodal, ...multimodal } }
+          : {}),
+      };
+    }
+  }
+
+  const result: AgentsConfig = {};
+  for (const [agentType, policy] of Object.entries(policies)) {
+    const captureMessageContent = parseOptionalBool(policy.captureMessageContent) ?? true;
+    const multimodal = buildAgentMultimodalConfig(agentType, policy.multimodal);
     result[agentType] = {
       enabled: policy.enabled,
-      captureMessageContent: parseOptionalBool(policy.captureMessageContent) ?? true,
+      captureMessageContent,
+      ...(multimodal ? { multimodal } : {}),
     };
   }
 
   return result;
 }
 
-const SUPPORTED_MASK_TYPES: readonly MaskType[] = [
-  'cloudAccessKey',
-  'apiKey',
-  'privateKey',
-  'databaseUrl',
-];
+function buildAgentMultimodalConfig(
+  agentType: string,
+  block: { uploadMode?: string; allowedRootPaths?: string[] } | undefined,
+): AgentMultimodalConfig | undefined {
+  if (block == null) return undefined;
+  if (typeof block !== 'object' || Array.isArray(block)) {
+    logger.warn('Ignoring invalid agent multimodal config; expected an object', {
+      agentType, type: configValueType(block),
+    });
+    return undefined;
+  }
+
+  const uploadModeRaw = block.uploadMode ?? 'none';
+  const uploadMode = MULTIMODAL_UPLOAD_MODE_SET.has(uploadModeRaw)
+    ? (uploadModeRaw as MultimodalUploadMode)
+    : 'none';
+  if (uploadModeRaw !== uploadMode) {
+    logger.warn('Invalid agent multimodal uploadMode; using none', {
+      agentType, type: configValueType(uploadModeRaw),
+    });
+  }
+  if (uploadMode === 'none') return { uploadMode };
+
+  const allowedRootPaths = Array.isArray(block.allowedRootPaths)
+    ? [...new Set(
+      block.allowedRootPaths
+        .filter((p): p is string => typeof p === 'string')
+        .map(p => resolveHome(p.trim()))
+        .filter(Boolean),
+    )]
+    : undefined;
+
+  return {
+    uploadMode,
+    ...(allowedRootPaths && allowedRootPaths.length > 0 ? { allowedRootPaths } : {}),
+  };
+}
 
 const SUPPORTED_MASK_TYPE_SET = new Set<string>(SUPPORTED_MASK_TYPES);
+const SUPPORTED_MASK_REPLACEMENT_MODES = new Set<MaskReplacementMode>([
+  'placeholder',
+  'preview',
+]);
 
 function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
   const rawTypes = Array.isArray(value)
@@ -291,34 +777,63 @@ function parseMaskTypes(value: string | string[] | undefined): MaskType[] {
 }
 
 function buildMaskConfig(file: ConfigFile | null): MaskConfig {
+  const fileReplacementMode = file?.mask?.replacementMode;
+  const rawReplacementMode =
+    nonEmpty(env('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE')) ??
+    (typeof fileReplacementMode === 'string' ? nonEmpty(fileReplacementMode) : undefined);
+  const replacementMode: MaskReplacementMode = rawReplacementMode === 'placeholder'
+    ? 'placeholder'
+    : 'preview';
+  if (rawReplacementMode && !SUPPORTED_MASK_REPLACEMENT_MODES.has(rawReplacementMode as MaskReplacementMode)) {
+    logger.warn('invalid mask replacement mode, using preview', {
+      replacementMode: rawReplacementMode,
+    });
+  }
+
   const mode = env('LOONGSUITE_PILOT_MASK_MODE') ?? file?.mask?.mode;
   if (mode !== 'all' && mode !== 'custom' && mode !== 'none') {
-    return { mode: 'none', types: [] };
+    return { mode: 'none', types: [], replacementMode };
   }
 
   if (mode === 'all' || mode === 'none') {
-    return { mode, types: [] };
+    return { mode, types: [], replacementMode };
   }
 
   const types = parseMaskTypes(env('LOONGSUITE_PILOT_MASK_TYPES') ?? file?.mask?.types);
 
-  return { mode: 'custom', types };
+  return { mode: 'custom', types, replacementMode };
 }
 
 function buildListenersConfig(
   file: ConfigFile | null,
-): Record<string, { enabled: boolean; pollInterval: number }> {
-  const defaults: Record<string, { enabled: boolean; pollInterval: number }> = {
-    qoder: { enabled: true, pollInterval: 30_000 },
-    'qoder-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-work': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-log': { enabled: true, pollInterval: 30_000 },
-    'qoder-work-sqlite': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-hook': { enabled: true, pollInterval: 30_000 },
-    'qoder-cli-session': { enabled: true, pollInterval: 30_000 },
-    'cursor-hook': { enabled: true, pollInterval: 30_000 },
-    'claude-code-log': { enabled: true, pollInterval: 30_000 },
-    'codex-transcript': { enabled: true, pollInterval: 30_000 },
+): Record<string, ListenerConfig> {
+  const defaults: Record<string, ListenerConfig> = {
+    qoder: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qoder-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-trace': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-sqlite': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'qwen-work-cn-collaboration': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'cursor-hook': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'claude-code-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'grok-build-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'codex-transcript': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'copilot-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'opencode-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
+    'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -328,8 +843,33 @@ function buildListenersConfig(
     for (const [key, val] of Object.entries(file.listeners)) {
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
-        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? 30_000,
+        pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
+        ...(key === 'doubao-work' || key === 'doubao' ? resolveDoubaoWorkSource(val) : {}),
       };
+      if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
+        const ids: unknown = val.includeConversationIds;
+        if (!Array.isArray(ids) || ids.length > 1000 || ids.some(id =>
+          typeof id !== 'string' || id.trim() === '' || id.length > 512)) {
+          // Invalid restrictions must never widen the collection scope.
+          logger.warn('Invalid Qwen Work collaboration conversation allowlist; collecting no conversations');
+          result[key].includeConversationIds = [];
+        } else {
+          result[key].includeConversationIds = [...new Set(ids.map(id => id.trim()))];
+        }
+      }
+      if (key === 'doubao-work' && val.client !== undefined && val.client !== 'doubao' && val.client !== 'doubao-work') {
+        logger.warn('Invalid Doubao client; disabling this listener', {
+          valueType: typeof val.client,
+          allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
+      if (key === 'doubao' && val.client !== undefined && val.client !== 'doubao') {
+        logger.warn('Invalid Doubao App client; disabling this listener', {
+          valueType: typeof val.client, allowedValues: ['doubao'],
+        });
+        result[key].enabled = false;
+      }
     }
   }
 
@@ -345,11 +885,17 @@ function buildListenersConfig(
     }
   }
 
-  // Env overrides for specific poll intervals
+  // Env overrides for specific poll intervals. The unified var wins over these.
   const envPoll = envInt('QODER_ANALYTICS_POLL_INTERVAL', 0);
   if (envPoll > 0) result.qoder.pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-sqlite'].pollInterval = envPoll;
-  if (envPoll > 0) result['qoder-cli-session'].pollInterval = envPoll;
+  if (envPoll > 0) result['qoder-trace'].pollInterval = envPoll;
+
+  const globalPoll = globalPollIntervalMs();
+  if (globalPoll !== undefined) {
+    for (const entry of Object.values(result)) {
+      entry.pollInterval = globalPoll;
+    }
+  }
 
   return result;
 }
@@ -374,6 +920,8 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
     hookDebugDays: resolve(file?.retention?.hookDebugDays, 7),
     outputDays: resolve(file?.retention?.outputDays, 7),
     slsFailedDays: resolve(file?.retention?.slsFailedDays, 7),
+    otlpFailedDays: resolve(file?.retention?.otlpFailedDays, 7),
+    metricAlarmDays: resolve(file?.retention?.metricAlarmDays, 7),
   };
 }
 
@@ -391,25 +939,36 @@ function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
   };
 }
 
-function buildFileCollectionConfig(file: ConfigFile | null): FileCollectionToggle {
-  return buildPipelineConfig(file);
-}
-
-function buildPipelineConfig(file: ConfigFile | null): PipelineToggle {
-  const legacyEnabled = file?.fileCollection?.enabled;
-  const enabled = envBool(
-    'LOONGSUITE_PILOT_PIPELINE_ENABLED',
-    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', file?.pipeline?.enabled ?? legacyEnabled ?? false),
-  );
+function buildPipelineConfig(file: ConfigFile | null, configuredServiceNamePrefix?: string): PipelineToggle {
+  const configured = file?.pipeline?.enabled ?? file?.fileCollection?.enabled;
+  const enabled = (fallback: boolean) => envBool('LOONGSUITE_PILOT_PIPELINE_ENABLED',
+    envBool('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', configured ?? fallback));
+  const multicaEnabled = envBool('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', file?.pipeline?.multica?.enabled ?? true);
+  const mode = buildMulticaMode(file?.pipeline?.multica?.mode);
   return {
-    enabled,
+    enabled: enabled(false),
     file: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_FILE_ENABLED', file?.pipeline?.file?.enabled ?? true),
     },
     qoderApi: {
       enabled: envBool('LOONGSUITE_PILOT_PIPELINE_QODER_API_ENABLED', file?.pipeline?.qoderApi?.enabled ?? true),
     },
+    multica: {
+      enabled: multicaEnabled,
+      mode,
+      discoverLocalSources: multicaEnabled && mode === 'on' && enabled(true) || undefined,
+      // Pilot's built-in prefix must not rename environments on existing installations.
+      serviceNamePrefix: configuredServiceNamePrefix,
+    },
   };
+}
+
+function buildMulticaMode(value: unknown): 'on' | 'off' {
+  const raw = process.env.LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE ?? value ?? 'off';
+  const mode = typeof raw === 'string' ? raw.trim().toLowerCase() : raw;
+  if (mode === 'on' || mode === 'off') return mode;
+  logger.warn('Invalid Multica collection mode; collection disabled');
+  return 'off';
 }
 
 function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
@@ -426,96 +985,207 @@ function buildStatusBarConfig(file: ConfigFile | null): StatusBarConfig {
   };
 }
 
+const DEFAULT_DASHBOARD_PORT = 8_765;
+
+function buildDashboardConfig(file: ConfigFile | null): DashboardConfig {
+  const port = file?.dashboard?.port;
+  return {
+    enabled: file?.dashboard?.enabled === true,
+    port: typeof port === 'number' && Number.isInteger(port) && port >= 1 && port <= 65_535
+      ? port
+      : DEFAULT_DASHBOARD_PORT,
+  };
+}
+
 function buildFlushersConfig(
   file: ConfigFile | null,
   dataDir: string,
+  serviceName: string | undefined,
   serviceNamePrefix: string,
   innerDataConfig: InnerDataConfig | null,
 ): FlusherConfig {
   return {
-    sls: buildSlsConfig(file, serviceNamePrefix, innerDataConfig),
+    sls: buildSlsConfig(file, serviceName, serviceNamePrefix, innerDataConfig),
     jsonl: buildJsonlConfig(file, dataDir),
     http: buildHttpConfig(file),
   };
 }
 
 /**
- * Build OtlpTraceFlusherConfig with two paths:
- *   1. New path: config.otlpTrace (generic OTLP, headers passthrough)
- *   2. Fallback: config.cms (ARMS-specific, auto-assembles x-arms-* headers)
+ * Build OtlpTraceFlusherConfig by taking the UNION of all configured trace
+ * backends and exporting the same spans to each:
+ *   - user config.otlpTrace (generic OTLP, endpoint from env or config)
+ *   - user config.cms (ARMS shorthand, auto-assembles x-arms-* headers)
+ *   - inner config.innerTrace.otlp[]  (managed generic OTLP backends)
+ *   - inner config.innerTrace.cms[]   (managed ARMS shorthand backends)
  *
- * Both paths require collectTrace=true.
+ * Endpoints are deduped by normalized URL + license-key + project. Conversion
+ * happens once; serviceName / resourceAttributes / captureMessageContent are
+ * therefore shared across all backends. Requires collectTrace=true.
  */
 export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
   if (!config.collectTrace) return undefined;
 
-  const otlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
-  if (otlpEndpoint) {
-    return buildOtlpTraceConfigNew(otlpEndpoint, config);
+  const endpoints: OtlpEndpoint[] = [];
+  // Collected from any ARMS/CMS backend; merged into the shared resource.
+  const armsResourceAttributes: Record<string, string> = {};
+  // An exact top-level serviceName wins for every user/managed backend. Without
+  // it, user backends use the legacy base and managed backends may override that
+  // base via inner serviceNamePrefix. Only tag an override when it differs, so
+  // the default case stays on the flusher's single-conversion path.
+  const userServiceName = config.serviceName
+    ?? config.otlpTrace?.serviceName
+    ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  const innerPrefix = config.serviceName ? undefined : config.innerTrace?.serviceNamePrefix;
+  const innerServiceName = innerPrefix && innerPrefix !== userServiceName ? innerPrefix : undefined;
+
+  // 1. User generic OTLP (endpoint via env or config).
+  const userOtlpEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT') ?? config.otlpTrace?.endpoint;
+  if (userOtlpEndpoint) {
+    let headers: Record<string, string> | undefined;
+    const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
+    if (envHeaders) {
+      // Do NOT log the raw value — it carries auth headers (license key / token).
+      try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { length: envHeaders.length }); }
+    } else {
+      headers = config.otlpTrace?.headers;
+    }
+    endpoints.push({
+      name: 'user-otlp',
+      endpoint: userOtlpEndpoint,
+      headers,
+      compression: config.otlpTrace?.compression,
+    });
   }
 
-  return buildOtlpTraceConfigLegacy(config);
-}
+  // 2. User CMS/ARMS shorthand (legacy path — now additive, not exclusive).
+  if (config.cms.enabled && config.cms.endpoint) {
+    endpoints.push(cmsEntryToOtlpEndpoint('user-cms', {
+      endpoint: config.cms.endpoint,
+      licenseKey: config.cms.licenseKey,
+      workspace: config.cms.workspace,
+    }, armsResourceAttributes));
+  }
 
-function buildOtlpTraceConfigNew(
-  endpoint: string,
-  config: AnalyticsConfig,
-): OtlpTraceFlusherConfig {
+  // 3. Inner managed generic OTLP backends.
+  // Guard with Array.isArray: managed data_config.json is control-plane pushed,
+  // so a non-array (object/string) serialization must not throw here — mirrors
+  // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
+  const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
+  innerOtlp.forEach((ep, i) => {
+    if (!ep.endpoint) return;
+    endpoints.push({
+      name: ep.name ?? `inner-otlp-${i}`,
+      endpoint: ep.endpoint,
+      headers: ep.headers,
+      compression: ep.compression,
+      serviceName: innerServiceName,
+    });
+  });
+
+  // 4. Inner managed CMS/ARMS shorthand backends.
+  const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
+  innerCms.forEach((ep, i) => {
+    if (!ep.endpoint) return;
+    endpoints.push(
+      cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes, innerServiceName),
+    );
+  });
+
+  const deduped = dedupOtlpEndpoints(endpoints);
+  if (deduped.length === 0) return undefined;
+
   const otlp = config.otlpTrace;
-
-  let headers: Record<string, string> | undefined;
-  const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
-  if (envHeaders) {
-    try { headers = JSON.parse(envHeaders); } catch { logger.warn('LOONGSUITE_PILOT_OTLP_HEADERS is not valid JSON, ignoring', { raw: envHeaders }); }
-  } else {
-    headers = otlp?.headers;
-  }
-
-  const captureMessageContent = otlp?.captureMessageContent ?? resolveCaptureMessageContent(config.agents);
-  const serviceName = otlp?.serviceName ?? (config.serviceNamePrefix || 'loongsuite-pilot');
+  // The global Trace switch is independent of per-agent policies. InputManager
+  // applies those policies before records reach this shared flusher.
+  const captureMessageContent = otlp?.captureMessageContent ?? true;
+  const serviceName = userServiceName;
+  const resourceAttributes = { ...(otlp?.resourceAttributes ?? {}), ...armsResourceAttributes };
 
   return {
     enabled: true,
-    endpoint,
+    endpoints: deduped,
     protocol: 'http/protobuf',
-    headers,
     serviceName,
-    resourceAttributes: otlp?.resourceAttributes,
+    appendAgentTypeToServiceName: config.serviceName ? false : undefined,
+    resourceAttributes: Object.keys(resourceAttributes).length > 0 ? resourceAttributes : undefined,
     captureMessageContent,
-    debug: otlp?.debug ?? false,
+    debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
+    spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
+    spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),
     maxExportBatchBytes: otlp?.maxExportBatchBytes,
-    compression: otlp?.compression,
   };
 }
 
-function buildOtlpTraceConfigLegacy(config: AnalyticsConfig): OtlpTraceFlusherConfig | undefined {
-  const { cms, serviceNamePrefix } = config;
-  if (!cms.enabled || !cms.endpoint) return undefined;
+/** Resolve explicitly configured modules relative to the configuration file. */
+function resolveSpanEnricherPaths(value: unknown, dataDir: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    logger.warn('otlpTrace.spanEnrichers must be an array; ignoring');
+    return [];
+  }
+  const paths: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !entry.trim() || !entry.trim().endsWith('.mjs')) {
+      logger.warn('Ignoring invalid span enricher path; expected a local .mjs file');
+      continue;
+    }
+    const expanded = entry.trim().replace(/^\$PILOT_DATA(?=[/\\]|$)/, () => path.resolve(resolveHome(dataDir)));
+    const resolved = path.resolve(path.dirname(configJsonPath()), resolveHome(expanded));
+    if (!paths.includes(resolved)) paths.push(resolved);
+    if (paths.length === 16) {
+      logger.warn('At most 16 span enrichers are loaded');
+      break;
+    }
+  }
+  return paths;
+}
 
-  const armsProject = extractArmsProject(cms.endpoint);
+/** Expand an ARMS/CMS shorthand entry into an OTLP endpoint with x-arms-* headers. */
+function cmsEntryToOtlpEndpoint(
+  name: string,
+  cms: { endpoint: string; licenseKey?: string; workspace?: string; project?: string },
+  armsResourceAttributes: Record<string, string>,
+  serviceName?: string,
+): OtlpEndpoint {
   const headers: Record<string, string> = {};
+  const armsProject = cms.project || extractArmsProject(cms.endpoint);
   if (cms.licenseKey) headers['x-arms-license-key'] = cms.licenseKey;
   if (armsProject) headers['x-arms-project'] = armsProject;
   if (cms.workspace) headers['x-cms-workspace'] = cms.workspace;
+  armsResourceAttributes['acs.arms.service.feature'] = 'genai_app';
+  return { name, endpoint: cms.endpoint, headers, serviceName };
+}
 
-  const captureMessageContent = resolveCaptureMessageContent(config.agents);
+/** Stable serialization of headers (sorted keys) for dedup keying. */
+function stableHeaderKey(headers?: Record<string, string>): string {
+  if (!headers) return '';
+  return Object.keys(headers)
+    .sort()
+    .map(k => `${k}=${headers[k]}`)
+    .join('&');
+}
 
-  return {
-    enabled: true,
-    endpoint: cms.endpoint,
-    protocol: 'http/protobuf',
-    headers,
-    serviceName: serviceNamePrefix || 'loongsuite-pilot',
-    resourceAttributes: { 'acs.arms.service.feature': 'genai_app' },
-    captureMessageContent,
-    debug: cms.debug ?? false,
-    turnIdleTimeoutMs: 0,
-    resourceAttributeKeys: resolveResourceAttributeKeys(config.otlpTrace),
-    maxExportBatchBytes: undefined,
-    compression: undefined,
-  };
+/**
+ * Dedup by normalized URL + full headers + serviceName. Because the CMS shorthand
+ * encodes license-key / project / workspace as headers, this subsumes those fields
+ * and also distinguishes generic OTLP backends that share a URL but differ in auth
+ * headers — so a managed backend is never silently folded into a user endpoint.
+ * serviceName is included so the same URL under two service names is kept as two
+ * distinct backends. First occurrence wins.
+ */
+function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
+  const seen = new Set<string>();
+  const result: OtlpEndpoint[] = [];
+  for (const ep of endpoints) {
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${stableHeaderKey(ep.headers)}|${ep.serviceName ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(ep);
+  }
+  return result;
 }
 
 function resolveResourceAttributeKeys(
@@ -532,6 +1202,20 @@ function resolveResourceAttributeKeys(
   )];
 }
 
+function resolveSpanAttributePassthroughPrefixes(
+  otlp: AnalyticsConfig['otlpTrace'],
+): string[] {
+  const prefixes = Array.isArray(otlp?.spanAttributePassthroughPrefixes)
+    ? otlp.spanAttributePassthroughPrefixes
+    : [];
+  return [...new Set(
+    prefixes
+      .filter((prefix): prefix is string => typeof prefix === 'string')
+      .map(prefix => prefix.trim())
+      .filter(prefix => prefix.length > 0),
+  )];
+}
+
 function extractArmsProject(endpoint: string): string {
   try {
     const url = new URL(endpoint);
@@ -542,14 +1226,20 @@ function extractArmsProject(endpoint: string): string {
   }
 }
 
-function resolveCaptureMessageContent(agents: AgentsConfig): boolean {
-  const values = Object.values(agents);
-  if (values.length === 0) return true;
-  return values.every(a => a.captureMessageContent !== false);
+function inferSlsMode(args: {
+  mode?: SlsMode;
+  accessKeyId?: string;
+  accessKeySecret?: string;
+  apiKey?: string;
+}): SlsMode {
+  if (args.mode) return args.mode;
+  if (args.accessKeyId && args.accessKeySecret) return 'ak';
+  if (args.apiKey) return 'apiKey';
+  return 'webtracking';
 }
 
 function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint {
-  const mode: SlsMode = ep.mode ?? (ep.accessKeyId && ep.accessKeySecret ? 'ak' : 'webtracking');
+  const mode = inferSlsMode(ep);
   const rawEndpoint = ep.endpoint ?? '';
   const endpoint = rawEndpoint
     ? (/^https?:\/\//.test(rawEndpoint) ? rawEndpoint : `https://${rawEndpoint}`)
@@ -563,14 +1253,23 @@ function parseSlsEndpointEntry(ep: SlsEndpointEntry, index: number): SlsEndpoint
     mode,
     redact: false,
   };
-  if (mode === 'ak') {
+  if (mode === 'ak' || ep.accessKeyId || ep.accessKeySecret) {
     result.accessKeyId = ep.accessKeyId ?? '';
     result.accessKeySecret = ep.accessKeySecret ?? '';
   }
+  if (mode === 'apiKey' || ep.apiKey) {
+    result.apiKey = ep.apiKey ?? '';
+  }
+  warnIfAmbiguousSlsCredentials(result);
   return result;
 }
 
-function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, innerDataConfig: InnerDataConfig | null) {
+function buildSlsConfig(
+  file: ConfigFile | null,
+  serviceName: string | undefined,
+  serviceNamePrefix: string,
+  innerDataConfig: InnerDataConfig | null,
+) {
   const rawSls = file?.sls;
   const isArray = Array.isArray(rawSls);
   const single = isArray ? null : (rawSls as SlsSingleConfig | undefined) ?? null;
@@ -587,6 +1286,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     const userMode = readUserSlsMode(single);
     const userAk = env('LOONGSUITE_SLS_ACCESS_KEY_ID') ?? single.accessKeyId;
     const userSk = env('LOONGSUITE_SLS_ACCESS_KEY_SECRET') ?? single.accessKeySecret;
+    const userApiKey = single.apiKey;
     const userRawEndpoint = env('LOONGSUITE_SLS_ENDPOINT') ?? single.endpoint;
     const userProject = env('LOONGSUITE_SLS_PROJECT') ?? single.project;
     const userLogstore = env('LOONGSUITE_SLS_LOGSTORE') ?? single.logstore;
@@ -601,6 +1301,7 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
         logstore: userLogstore!,
         accessKeyId: userAk,
         accessKeySecret: userSk,
+        apiKey: userApiKey,
       });
       endpoints = [userEndpoint];
     } else {
@@ -611,9 +1312,16 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   }
 
   if (innerDataConfig?.sls && Array.isArray(innerDataConfig.sls)) {
+    // An exact user serviceName wins globally. Otherwise managed endpoints get
+    // their own __service_name__ base only when the inner prefix differs.
+    const innerPrefix = serviceName ? undefined : innerDataConfig.serviceNamePrefix;
+    const innerServiceName = innerPrefix && innerPrefix !== serviceNamePrefix ? innerPrefix : undefined;
     const innerEndpoints = innerDataConfig.sls
       .filter(ep => ep.endpoint && ep.logstore)
-      .map((ep, i) => parseSlsEndpointEntry(ep, i));
+      .map((ep, i) => {
+        const parsed = parseSlsEndpointEntry(ep, i);
+        return innerServiceName ? { ...parsed, serviceName: innerServiceName } : parsed;
+      });
     endpoints = [...endpoints, ...innerEndpoints];
   }
 
@@ -624,12 +1332,15 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
   const topLevelEndpoint = primary?.endpoint ?? '';
   const topLevelAk = primary?.accessKeyId ?? '';
   const topLevelSk = primary?.accessKeySecret ?? '';
+  const topLevelApiKey = primary?.apiKey ?? '';
 
   const enabled = single?.enabled !== undefined
     ? single.enabled
     : endpoints.length > 0 && endpoints.every(ep => {
         if (!ep.endpoint || !ep.logstore) return false;
+        if (hasAmbiguousSlsCredentials(ep)) return false;
         if (ep.mode === 'ak') return !!(ep.project && ep.accessKeyId && ep.accessKeySecret);
+        if (ep.mode === 'apiKey') return !!(ep.project && ep.apiKey);
         return true;
       });
 
@@ -638,17 +1349,22 @@ function buildSlsConfig(file: ConfigFile | null, serviceNamePrefix: string, inne
     mode: topLevelMode,
     accessKeyId: topLevelAk,
     accessKeySecret: topLevelSk,
+    apiKey: topLevelApiKey,
     endpoint: topLevelEndpoint,
     endpoints,
     batchMaxSize: single?.batchMaxSize ?? 20,
     flushIntervalMs: single?.flushIntervalMs ?? 2_000,
+    serviceName,
     serviceNamePrefix,
+    timeout: single?.timeout,
+    retry: single?.retry,
+    flushConcurrency: single?.flushConcurrency,
   };
 }
 
 function readUserSlsMode(single: SlsSingleConfig | null): SlsMode | undefined {
   const raw = env('LOONGSUITE_SLS_MODE') ?? single?.mode;
-  if (raw === 'ak' || raw === 'webtracking') return raw;
+  if (raw === 'ak' || raw === 'webtracking' || raw === 'apiKey') return raw;
   return undefined;
 }
 
@@ -659,8 +1375,9 @@ function buildUserSlsEndpoint(args: {
   logstore: string;
   accessKeyId: string | undefined;
   accessKeySecret: string | undefined;
+  apiKey: string | undefined;
 }): SlsEndpoint {
-  const mode: SlsMode = args.mode ?? (args.accessKeyId && args.accessKeySecret ? 'ak' : 'webtracking');
+  const mode = inferSlsMode(args);
 
   const rawEndpoint = args.rawEndpoint ?? '';
   const endpoint = rawEndpoint
@@ -676,11 +1393,29 @@ function buildUserSlsEndpoint(args: {
     mode,
     redact: false,
   };
-  if (mode === 'ak') {
+  if (mode === 'ak' || args.accessKeyId || args.accessKeySecret) {
     result.accessKeyId = args.accessKeyId ?? '';
     result.accessKeySecret = args.accessKeySecret ?? '';
   }
+  if (mode === 'apiKey' || args.apiKey) {
+    result.apiKey = args.apiKey ?? '';
+  }
+  warnIfAmbiguousSlsCredentials(result);
   return result;
+}
+
+function hasAmbiguousSlsCredentials(endpoint: SlsEndpoint): boolean {
+  return !!(endpoint.apiKey && (endpoint.accessKeyId || endpoint.accessKeySecret));
+}
+
+function warnIfAmbiguousSlsCredentials(endpoint: SlsEndpoint): void {
+  if (!hasAmbiguousSlsCredentials(endpoint)) return;
+  logger.warn('SLS endpoint has both API Key and AK/SK credentials; endpoint disabled until credentials are unambiguous', {
+    endpoint: endpoint.name,
+    mode: endpoint.mode,
+    project: endpoint.project,
+    logstore: endpoint.logstore,
+  });
 }
 
 /**
@@ -703,7 +1438,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
   const seen = new Set<string>();
   const result: SlsEndpoint[] = [];
   for (const ep of endpoints) {
-    const key = `${normalizeEndpointUrl(ep.endpoint)}|${ep.project}|${ep.logstore}`;
+    const key = `${normalizeEndpointUrl(ep.endpoint)}|${ep.project}|${ep.logstore}|${ep.serviceName ?? ''}`;
     if (seen.has(key)) continue;
     seen.add(key);
     result.push(ep);
@@ -713,7 +1448,7 @@ function dedupSlsEndpoints(endpoints: SlsEndpoint[]): SlsEndpoint[] {
 
 function buildJsonlConfig(file: ConfigFile | null, dataDir: string) {
   return {
-    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? true),
+    enabled: envBool('JSONL_ENABLED', file?.jsonl?.enabled ?? false),
     outputDir: resolveHome(
       env('JSONL_OUTPUT_DIR') ?? file?.jsonl?.outputDir ?? `${dataDir}/logs/output`,
     ),

@@ -5,6 +5,7 @@ import * as crypto from 'node:crypto';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
+import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
@@ -85,14 +86,12 @@ export class ZCodeRolloutInput extends BaseInput {
     const files = await this.discoverRolloutFiles();
     for (const filePath of files) {
       const stateKey = this.stateKey(filePath);
-      const existing = this.stateStore.get(stateKey);
-      if (existing && typeof existing.lastOffset === 'number' && existing.lastOffset > 0) {
-        continue; // already tracking this file
-      }
+      if (this.stateStore.get(stateKey).lastOffset !== undefined) continue;
       try {
         const stat = await fs.promises.stat(filePath);
-        this.stateStore.setOffset(stateKey, stat.size);
-        this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
+        if (stat.isFile()) {
+          this.stateStore.update(stateKey, { lastOffset: stat.size, extra: { inode: stat.ino } });
+        }
       } catch {
         // file may disappear — skip silently
       }
@@ -119,53 +118,42 @@ export class ZCodeRolloutInput extends BaseInput {
       return [];
     }
 
-    const prevOffset = this.stateStore.getOffset(stateKey);
-    const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode as number | undefined;
-
-    if (prevInode !== undefined && prevInode !== Number((stat as any).ino)) {
-      // Inode changed → file rotated, reset to 0 to re-read the new file.
-      this.stateStore.setOffset(stateKey, 0);
-    }
-
-    let offset = this.stateStore.getOffset(stateKey);
-    if (offset > 0 && stat.size < offset) {
-      // File truncated (e.g. zcode compaction reset). Reset to 0.
-      this.logger.info('rollout file truncated, resetting offset', {
-        file: filePath,
-        recorded: offset,
-        actual: stat.size,
-      });
-      offset = 0;
-      this.stateStore.setOffset(stateKey, 0);
-    }
-    if (stat.size <= offset) return [];
-
-    const handle = await fs.promises.open(filePath, 'r');
-    try {
-      const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.stateStore.setOffset(stateKey, stat.size);
-      this.stateStore.update(stateKey, { extra: { inode: Number((stat as any).ino) } });
-
-      const lines: Record<string, unknown>[] = [];
-      for (const line of text.split('\n')) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        let parsed: Record<string, unknown>;
-        try {
-          parsed = JSON.parse(trimmed) as Record<string, unknown>;
-        } catch (err) {
-          this.logger.warn('invalid rollout JSONL line', { file: filePath, error: String(err) });
-          continue;
-        }
-        lines.push(parsed);
+    if (!stat.isFile()) return [];
+    const previous = this.stateStore.get(stateKey);
+    const savedOffset = previous.lastOffset ?? 0;
+    const inode = previous.extra?.inode;
+    const reset = (inode !== undefined && inode !== stat.ino) || stat.size < savedOffset;
+    const offset = reset ? 0 : savedOffset;
+    if (stat.size <= offset) {
+      if (reset || previous.lastOffset === undefined) {
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino, skippingLine: false } });
       }
-      return this.buildEntriesFromRolloutLines(lines);
-    } finally {
-      await handle.close();
+      return [];
     }
+
+    const batch = await readBoundedLineTail(filePath, stat, offset,
+      !reset && previous.extra?.skippingLine === true, this.getInputRuntimeAccumulator());
+    if (!batch) return [];
+    if (batch.beganSkip) this.logger.warn('oversized ZCode rollout line skipped', { file: filePath, offset });
+
+    const lines: Record<string, unknown>[] = [];
+    for (const line of batch.text.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const parsed: unknown = JSON.parse(line);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          lines.push(parsed as Record<string, unknown>);
+        }
+      } catch {
+        this.logger.warn('invalid rollout JSONL line', { file: filePath });
+      }
+    }
+    const entries = this.buildEntriesFromRolloutLines(lines);
+    if (batch.offset !== previous.lastOffset || reset || inode === undefined) {
+      this.stateStore.update(stateKey, { lastOffset: batch.offset,
+        extra: { inode: stat.ino, skippingLine: batch.skippingLine } });
+    }
+    return entries;
   }
 
   /**

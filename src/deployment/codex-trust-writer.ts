@@ -1,34 +1,8 @@
-/**
- * codex-trust-writer.ts — Codex hook trust hash 写入 / 校验。
- *
- * 移植自 codex-plugin .../src/trust.ts,改 ESM TypeScript + 新增能力:
- *   - verifyTrustHashes() 自洽性检查(Q8 决策)
- *   - EVENT_KEY_MAP 扩展到 10 个事件(为未来 codex 全事件兼容留余地)
- *   - forceBypass 应急通道(R4):写 bypass_hook_trust = true 顶层字段
- *   - marker 名从外部传入(不再硬编码 "otel-codex-hook")
- *
- * 算法核心(对齐 codex-rs/config/src/fingerprint.rs):
- *   computeHookTrustHash(eventName, command):
- *     identity = NormalizedHookIdentity {
- *       event_name,
- *       hooks: [{ type:"command", command, timeout:600, async:false }]
- *     }
- *     SHA-256(canonical_json(identity)) → "sha256:<hex>"
- *
- * Trust block 结构:
- *     # BEGIN <marker> trust
- *     bypass_hook_trust = true   # 仅 forceBypass=true 时
- *     [hooks.state."<hooks.json>:<event>:0:0"]
- *     trusted_hash = "sha256:..."
- *     ...
- *     # END <marker> trust
- */
-
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
+import { parse as parseToml } from 'smol-toml';
 
-/** 已知 Codex hook 事件 → snake_case label。 */
-const EVENT_KEY_MAP: Record<string, string> = {
+export const CODEX_HOOK_EVENT_KEYS: Record<string, string> = {
   PreToolUse: 'pre_tool_use',
   PermissionRequest: 'permission_request',
   PostToolUse: 'post_tool_use',
@@ -36,11 +10,54 @@ const EVENT_KEY_MAP: Record<string, string> = {
   PreCompact: 'pre_compact',
   PostCompact: 'post_compact',
   SessionStart: 'session_start',
+  SessionEnd: 'session_end',
   UserPromptSubmit: 'user_prompt_submit',
   SubagentStart: 'subagent_start',
   SubagentStop: 'subagent_stop',
   Stop: 'stop',
 };
+
+const MATCHER_EVENTS = new Set([
+  'PreToolUse',
+  'PermissionRequest',
+  'PostToolUse',
+  'PreCompact',
+  'PostCompact',
+  'SessionStart',
+  'SessionEnd',
+  'SubagentStart',
+  'SubagentStop',
+]);
+
+const ADDITIONAL_CONTEXT_EVENTS = new Set([
+  'PreToolUse',
+  'PostToolUse',
+  'SessionStart',
+  'UserPromptSubmit',
+  'SubagentStart',
+]);
+
+const DEFAULT_ADDITIONAL_CONTEXT_LIMIT = 2_500;
+
+export interface InstalledCodexCommandHandler {
+  type: 'command';
+  command: string;
+  commandWindows?: string;
+  timeout?: number;
+  async?: boolean;
+  statusMessage?: string;
+  additionalContextLimit?: number;
+}
+
+/** Exact location and source config of one handler in the installed hooks.json. */
+export interface InstalledCodexHookLocation {
+  eventName: string;
+  eventKey: string;
+  groupIndex: number;
+  handlerIndex: number;
+  matcher?: string;
+  handler: InstalledCodexCommandHandler;
+}
 
 function canonicalJson(value: unknown): unknown {
   if (value === null || value === undefined) return value;
@@ -56,330 +73,588 @@ function canonicalJson(value: unknown): unknown {
 }
 
 function versionForToml(obj: unknown): string {
-  const canonical = canonicalJson(obj);
-  const serialized = JSON.stringify(canonical);
+  const serialized = JSON.stringify(canonicalJson(obj));
   const hex = crypto.createHash('sha256').update(serialized, 'utf-8').digest('hex');
   return `sha256:${hex}`;
 }
 
-/**
- * 计算单个 hook 的 trust hash。
- * 对齐 codex-rs `command_hook_hash`(见 hooks/src/engine/discovery.rs)。
- *
- * NormalizedHookIdentity { event_name, #[flatten] group: MatcherGroup }
- * MatcherGroup { matcher: Option<String>, hooks: Vec<HookHandlerConfig> }
- *   matcher = None → TOML 中字段缺失
- * HookHandlerConfig::Command { type:"command", command, timeout_sec:Some(600), async:false, status_message:None, command_windows:None }
- *   timeout_sec serde rename "timeout";command_windows / status_message 缺省时跳过
- */
-export function computeHookTrustHash(eventName: string, command: string): string {
-  const eventKey = EVENT_KEY_MAP[eventName];
-  if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
-
-  const identity: Record<string, unknown> = {
-    event_name: eventKey,
-    // matcher: None → 缺失字段
-    hooks: [
-      {
-        type: 'command',
-        command,
-        timeout: 600,
-        async: false,
-        // status_message: None / command_windows: None → 缺失字段
-      },
-    ],
-  };
-  return versionForToml(identity);
+function normalizedTimeout(eventName: string, configured: number | undefined): number {
+  if (eventName === 'SessionEnd') {
+    return Math.min(3, Math.max(1, configured ?? 1));
+  }
+  return Math.max(1, configured ?? 600);
 }
 
-/**
- * 构建 trust state key。
- *
- * key 格式: `<hooks.json 绝对路径>:<event_label>:<group_index>:<handler_index>`
- *
- * group_index = hook 在 hooks.json 中的数组位置(0-based),由调用方传入。
- * 如果其他第三方 hook(如 r2c)排在前面,pilot 的 hook 会在 1、2... 的位置。
- * handler_index 目前固定 0(每个 group 只有一个 handler)。
- */
+/** Mirror Codex discovery.rs handler normalization before trust hashing. */
+function normalizeInstalledHandler(
+  location: InstalledCodexHookLocation,
+  platform: NodeJS.Platform,
+): Record<string, unknown> {
+  const source = location.handler;
+  const command = platform === 'win32'
+    ? source.commandWindows ?? source.command
+    : source.command;
+  const normalized: Record<string, unknown> = {
+    type: 'command',
+    command,
+    timeout: normalizedTimeout(location.eventName, source.timeout),
+    async: source.async ?? false,
+  };
+  if (source.statusMessage !== undefined) normalized.statusMessage = source.statusMessage;
+  if (
+    ADDITIONAL_CONTEXT_EVENTS.has(location.eventName)
+    && source.additionalContextLimit !== undefined
+    && source.additionalContextLimit !== DEFAULT_ADDITIONAL_CONTEXT_LIMIT
+  ) {
+    normalized.additionalContextLimit = source.additionalContextLimit;
+  }
+  return normalized;
+}
+
+/** Compute the hash from the actual installed group and handler. */
+export function computeInstalledHookTrustHash(
+  location: InstalledCodexHookLocation,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const expectedKey = CODEX_HOOK_EVENT_KEYS[location.eventName];
+  if (!expectedKey || expectedKey !== location.eventKey) {
+    throw new Error(`Unknown or inconsistent hook event: ${location.eventName}`);
+  }
+  const matcher = MATCHER_EVENTS.has(location.eventName) ? location.matcher : undefined;
+  return versionForToml({
+    event_name: location.eventKey,
+    ...(matcher !== undefined ? { matcher } : {}),
+    hooks: [normalizeInstalledHandler(location, platform)],
+  });
+}
+
+/** Compatibility helper for callers that only need Codex's default command identity. */
+export function computeHookTrustHash(
+  eventName: string,
+  command: string,
+  matcher?: string,
+): string {
+  const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
+  if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
+  return computeInstalledHookTrustHash({
+    eventName,
+    eventKey,
+    groupIndex: 0,
+    handlerIndex: 0,
+    ...(matcher !== undefined ? { matcher } : {}),
+    handler: { type: 'command', command },
+  });
+}
+
+export function installedHookStateKey(
+  hooksJsonAbsPath: string,
+  location: InstalledCodexHookLocation,
+): string {
+  return `${hooksJsonAbsPath}:${location.eventKey}:${location.groupIndex}:${location.handlerIndex}`;
+}
+
 export function hookStateKey(
   hooksJsonAbsPath: string,
   eventName: string,
-  groupIndex: number = 0,
+  groupIndex = 0,
+  handlerIndex = 0,
 ): string {
-  const eventKey = EVENT_KEY_MAP[eventName];
+  const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
   if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
-  return `${hooksJsonAbsPath}:${eventKey}:${groupIndex}:0`;
+  return `${hooksJsonAbsPath}:${eventKey}:${groupIndex}:${handlerIndex}`;
 }
 
-interface ParsedTrustHash {
-  key: string;     // 完整 hook state key,如 "/abs/hooks.json:session_start:0:0"
-  hash: string;    // sha256:xxx
+function encodeTomlBasicString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function asTable(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
 }
 
 /**
- * 从 config.toml content 中提取所有 [hooks.state."..."].trusted_hash 条目。
- * 仅按 marker BEGIN/END 包裹的 block 内提取。
+ * Locate editable lines without mistaking text in multiline strings or arrays
+ * for config. This scanner only finds boundaries; smol-toml decodes keys and
+ * validates the complete document. Keep original lines so unrelated formatting
+ * and comments do not go through a TOML serialization round trip.
  */
-function parseTrustBlock(content: string, marker: string): ParsedTrustHash[] {
+function configLines(content: string): Array<{ text: string; editable: boolean }> {
+  let quote = '';
+  let multiline = false;
+  let depth = 0;
+  return content.split('\n').map(text => {
+    const editable = !quote && depth === 0;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i]!;
+      if (quote) {
+        if (quote === '"' && ch === '\\') { i++; continue; }
+        if (ch !== quote) continue;
+        if (!multiline) { quote = ''; continue; }
+        if (text.slice(i, i + 3) !== quote.repeat(3)) continue;
+        // A multiline closing delimiter may have one or two literal quotes.
+        while (text[i + 1] === quote) i++;
+        quote = '';
+        multiline = false;
+      } else if (ch === '#') {
+        break;
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+        multiline = text.slice(i, i + 3) === ch.repeat(3);
+        if (multiline) i += 2;
+      } else if (ch === '[' || ch === '{') {
+        depth++;
+      } else if (ch === ']' || ch === '}') {
+        depth--;
+      }
+    }
+    return { text, editable };
+  });
+}
+
+function trustSectionKey(header: string): string | undefined {
+  // Only a table declaration, never an assignment or an array of tables.
+  if (!/^\s*\[(?!\[)/.test(header)) return undefined;
+  try {
+    const parsed = parseToml(header);
+    const hooks = asTable(parsed.hooks);
+    const state = asTable(hooks?.state);
+    if (!state || Object.keys(parsed).length !== 1 || Object.keys(hooks!).length !== 1) {
+      return undefined;
+    }
+    const keys = Object.keys(state);
+    const table = keys.length === 1 ? asTable(state[keys[0]!]) : undefined;
+    return table && Object.keys(table).length === 0 ? keys[0] : undefined;
+  } catch {
+    // Recover the exact malformed Windows path emitted by old Pilot versions.
+    // Never use the raw spelling as an alternative when TOML decoding succeeds:
+    // an escaped key can name a different, third-party handler.
+    const legacy = header.match(/^\s*\[hooks\.state\."([^"\r\n]+)"\]\s*$/);
+    return legacy?.[1];
+  }
+}
+
+interface ParsedTrustSection {
+  key: string;
+  hash?: string;
+  enabled?: boolean;
+}
+
+interface TrustSectionRange {
+  key: string;
+  start: number;
+  end: number;
+}
+
+function trustSectionRanges(content: string): TrustSectionRange[] {
+  const lines = configLines(content);
+  const sections: TrustSectionRange[] = [];
+  let current: TrustSectionRange | undefined;
+  for (let i = 0; i < lines.length; i++) {
+    const { text, editable } = lines[i]!;
+    if (!editable || !/^\s*\[/.test(text)) continue;
+    if (current) current.end = i;
+    const key = trustSectionKey(text);
+    current = key === undefined ? undefined : { key, start: i, end: lines.length };
+    if (current) sections.push(current);
+  }
+  return sections;
+}
+
+function parseTrustSections(content: string): ParsedTrustSection[] {
+  const lines = content.split('\n');
+  return trustSectionRanges(content).map(({ key, start, end }) => {
+    try {
+      const fields = parseToml(lines.slice(start + 1, end).join('\n'), { integersAsBigInt: true });
+      return {
+        key,
+        hash: typeof fields.trusted_hash === 'string' ? fields.trusted_hash : undefined,
+        enabled: typeof fields.enabled === 'boolean' ? fields.enabled : undefined,
+      };
+    } catch {
+      return { key };
+    }
+  });
+}
+
+function removeExactTrustSections(content: string, keys: ReadonlySet<string>): string {
+  if (keys.size === 0) return content;
+  const lines = content.split('\n');
+  const keep = lines.map(() => true);
+  for (const { key, start, end } of trustSectionRanges(content)) {
+    if (!keys.has(key)) continue;
+    // An unclosed value in an owned section can hide subsequent user tables.
+    // Refuse to delete an ambiguous range, even if its removal would produce
+    // syntactically valid output. Legacy malformed Windows *headers* remain
+    // repairable because only the body is checked here.
+    validateConfig(lines.slice(start + 1, end).join('\n'));
+    keep.fill(false, start, end);
+  }
+  return lines.filter((_, i) => keep[i]).join('\n');
+}
+
+function markerLineMembership(content: string, marker: string): boolean[] {
   const begin = `# BEGIN ${marker} trust`;
   const end = `# END ${marker} trust`;
-  const beginIdx = content.indexOf(begin);
-  const endIdx = content.indexOf(end);
-  if (beginIdx === -1 || endIdx === -1 || endIdx <= beginIdx) return [];
-
-  const block = content.slice(beginIdx, endIdx);
-  const out: ParsedTrustHash[] = [];
-  const sectionRe = /\[hooks\.state\."([^"]+)"\]\s*\n\s*trusted_hash\s*=\s*"([^"]+)"/g;
-  let m: RegExpExecArray | null;
-  while ((m = sectionRe.exec(block)) !== null) {
-    out.push({ key: m[1]!, hash: m[2]! });
-  }
-  return out;
+  let inside = false;
+  return configLines(content).map(({ text, editable }) => {
+    const trimmed = text.trim();
+    if (editable && trimmed === begin) {
+      inside = true;
+      return false;
+    }
+    if (editable && trimmed === end) {
+      inside = false;
+      return false;
+    }
+    return inside;
+  });
 }
 
 /**
- * 移除老版本插件留下的"裸" [hooks.state."<hooksJsonAbsPath>:<event>:<group>:0"] 段。
- * 不在 marker 块内,但 path/event 匹配 + handler=0 → pilot 拥有的 slot,清掉。
- * 匹配任意 group index(老插件可能在 :0:0,新 pilot 可能在 :1:0 等)。
+ * Remove only exact Pilot-owned trust keys whose table starts inside Pilot's
+ * legacy marker block. The marker is a scope hint, never ownership proof: a
+ * reserializer may move unrelated tables between the comments, so exact keys
+ * derived from the installed hooks.json remain mandatory.
  */
-function removeStaleTrustState(
+function removeMarkedTrustSections(
   content: string,
-  hooksJsonAbsPath: string,
-  hookEvents: readonly string[],
-): string {
-  const ownedEventKeys = new Set(
-    hookEvents.map((event) => {
-      const eventKey = EVENT_KEY_MAP[event];
-      if (!eventKey) throw new Error(`Unknown hook event: ${event}`);
-      return eventKey;
-    }),
-  );
-
-  const lines = content.split('\n');
-  const out: string[] = [];
-  let skipping = false;
-
-  const sectionHeader = /^\s*\[hooks\.state\."([^"]+)"\]\s*$/;
-  const anyHeader = /^\s*\[/;
-
-  const isOwnedKey = (key: string): boolean => {
-    // key 格式: "<path>:<event>:<group>:<handler>"
-    const lastColon = key.lastIndexOf(':');
-    if (lastColon === -1) return false;
-    const handlerPart = key.slice(lastColon + 1);
-    const rest = key.slice(0, lastColon);
-    const groupColon = rest.lastIndexOf(':');
-    if (groupColon === -1) return false;
-    const groupPart = rest.slice(groupColon + 1);
-    const eventStart = rest.slice(0, groupColon);
-    const eventColon = eventStart.lastIndexOf(':');
-    if (eventColon === -1) return false;
-    const eventKey = eventStart.slice(eventColon + 1);
-    const pathPart = eventStart.slice(0, eventColon);
-
-    return (
-      pathPart === hooksJsonAbsPath &&
-      ownedEventKeys.has(eventKey) &&
-      handlerPart === '0'
-    );
-  };
-
-  for (const line of lines) {
-    const headerMatch = line.match(sectionHeader);
-    if (headerMatch) {
-      skipping = isOwnedKey(headerMatch[1]!);
-      if (skipping) continue;
-      out.push(line);
-      continue;
-    }
-    if (anyHeader.test(line)) {
-      // 任何其他 table header 终止跳过区
-      skipping = false;
-      out.push(line);
-      continue;
-    }
-    if (skipping) continue;
-    out.push(line);
-  }
-
-  let result = out.join('\n');
-  result = result.replace(/\n{3,}/g, '\n\n');
-  return result;
-}
-
-export interface WriteTrustedHashesOpts {
-  configPath: string;            // ~/.codex/config.toml
-  hooksJsonAbsPath: string;      // ~/.codex/hooks.json 绝对路径
-  hookEvents: readonly string[]; // 要写 trust 的 event 列表(如 ["SessionStart", ...])
-  /**
-   * event → 实际写入 hooks.json 的完整 command 字符串。
-   * trust hash 算法必须用相同字符串,否则 codex 端校验失败。
-   */
-  eventToCommand: Record<string, string>;
-  /**
-   * event → hooks.json 中实际的 group index(0-based 数组位置)。
-   * 当其他第三方 hook 排在前面时,pilot 的 hook 可能在 1、2... 位置。
-   * 由 HookStrategy.writeCodexTrust 从 hooks.json 回读提供。
-   */
-  eventToGroupIndex: Record<string, number>;
-  marker: string;                // BEGIN/END marker 名(如 "otel-codex-hook")
-  forceBypass?: boolean;         // R4 应急:写 bypass_hook_trust = true
-}
-
-/**
- * 写入 trust block(幂等):
- *   1. 清已有 BEGIN/END 块
- *   2. 清裸的 [hooks.state."<owned>"] 残留(老插件残留)
- *   3. 写新 BEGIN/END 块(forceBypass=true 时块顶含 bypass_hook_trust = true)
- *
- * 注意 command 字符串与 hook 注册到 hooks.json 时一致:`bash <entryPath> <subcommand>`
- */
-export function writeTrustedHashes(opts: WriteTrustedHashesOpts): void {
-  const { configPath, hooksJsonAbsPath, hookEvents, eventToCommand, eventToGroupIndex, marker, forceBypass } = opts;
-
-  let content = '';
-  if (fs.existsSync(configPath)) {
-    content = fs.readFileSync(configPath, 'utf-8');
-  }
-
-  const TRUST_BEGIN = `# BEGIN ${marker} trust`;
-  const TRUST_END = `# END ${marker} trust`;
-
-  // Step 1: 删 BEGIN/END marker 注释行(仅删注释行本身,不按范围删,
-  // 因为 codex 桌面版会重新序列化 TOML,导致 END marker 位移,范围删会误伤用户数据)
-  content = content.split('\n')
-    .filter((line) => line.trim() !== TRUST_BEGIN && line.trim() !== TRUST_END)
-    .join('\n');
-
-  // Step 1b: 删 bypass_hook_trust 行(上次 forceBypass 留下的)
-  content = content.split('\n')
-    .filter((line) => !/^\s*bypass_hook_trust\s*=/.test(line))
-    .join('\n');
-
-  // Step 2: 清所有 owned [hooks.state."<our path>:<our event>:<any group>:0"] section
-  content = removeStaleTrustState(content, hooksJsonAbsPath, hookEvents);
-
-  // Step 3: 写新块
-  const lines: string[] = [TRUST_BEGIN];
-  if (forceBypass) {
-    lines.push('bypass_hook_trust = true');
-    lines.push('');
-  }
-  for (const event of hookEvents) {
-    const command = eventToCommand[event];
-    if (!command) throw new Error(`Missing eventToCommand[${event}]`);
-    const groupIndex = eventToGroupIndex[event] ?? 0;
-    const hash = computeHookTrustHash(event, command);
-    const key = hookStateKey(hooksJsonAbsPath, event, groupIndex);
-    lines.push(`[hooks.state."${key}"]`);
-    lines.push(`trusted_hash = "${hash}"`);
-    lines.push('');
-  }
-  lines.push(TRUST_END);
-
-  const separator = !content || content.endsWith('\n') ? '' : '\n';
-  let out = content + separator + '\n' + lines.join('\n') + '\n';
-  out = out.replace(/\n{3,}/g, '\n\n');
-  fs.writeFileSync(configPath, out, 'utf-8');
-}
-
-/**
- * 删除 pilot 写入的 trust 条目(uninstall / 卸载场景)。
- *
- * 策略:逐条精确删除,不依赖 BEGIN/END 范围(codex 桌面版会重新序列化 TOML,
- * 导致 END marker 位移,范围删除会误伤 marker 之间的用户数据)。
- *
- * 删除顺序:
- *   1. 删 `# BEGIN <marker> trust` 和 `# END <marker> trust` 注释行
- *   2. 删 `bypass_hook_trust = true` 行(forceBypass 应急开关)
- *   3. 逐条删 `[hooks.state."<hooksJsonAbsPath>:<owned_event>:<any_group>:0"]` section
- *
- * @param hooksJsonAbsPath 不传时退化为只删 marker 注释行(兼容老的 installer 调用)
- * @param hookEvents 不传时退化为只删 marker 注释行
- */
-export function removeTrustBlock(
-  configPath: string,
   marker: string,
-  hooksJsonAbsPath?: string,
-  hookEvents?: readonly string[],
-): boolean {
-  if (!fs.existsSync(configPath)) return false;
-  let content = fs.readFileSync(configPath, 'utf-8');
-  const before = content;
-
-  const TRUST_BEGIN = `# BEGIN ${marker} trust`;
-  const TRUST_END = `# END ${marker} trust`;
-
-  // Step 1: 删 BEGIN/END marker 注释行(仅删注释行本身,不删中间内容)
-  content = content.split('\n')
-    .filter((line) => line.trim() !== TRUST_BEGIN && line.trim() !== TRUST_END)
-    .join('\n');
-
-  // Step 2: 删 bypass_hook_trust 行(如存在)
-  content = content.split('\n')
-    .filter((line) => !/^\s*bypass_hook_trust\s*=/.test(line))
-    .join('\n');
-
-  // Step 3: 逐条删 [hooks.state."<owned>"] section
-  if (hooksJsonAbsPath && hookEvents) {
-    content = removeStaleTrustState(content, hooksJsonAbsPath, hookEvents);
+  keys: ReadonlySet<string>,
+): string {
+  if (keys.size === 0) return content;
+  const lines = content.split('\n');
+  const inMarker = markerLineMembership(content, marker);
+  const keep = lines.map(() => true);
+  for (const { key, start, end } of trustSectionRanges(content)) {
+    if (!inMarker[start] || !keys.has(key)) continue;
+    validateConfig(lines.slice(start + 1, end).join('\n'));
+    keep.fill(false, start, end);
   }
-
-  content = content.replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
-
-  if (content === before) return false;
-  fs.writeFileSync(configPath, content, 'utf-8');
-  return true;
+  return lines.filter((_, i) => keep[i]).join('\n');
 }
 
-export interface VerifyTrustHashesOpts {
+function removeLegacyTrustMarkers(content: string, marker: string): string {
+  return configLines(content).filter(({ text, editable }) => !editable || (
+    text.trim() !== `# BEGIN ${marker} trust`
+    && text.trim() !== `# END ${marker} trust`
+    && !/^\s*bypass_hook_trust\s*=/.test(text)
+  )).map(line => line.text).join('\n');
+}
+
+class InvalidCodexConfigError extends Error {}
+
+function validateConfig(content: string): void {
+  try {
+    parseToml(content, { integersAsBigInt: true });
+  } catch {
+    // Parser error messages include source excerpts, potentially credentials.
+    throw new InvalidCodexConfigError('Refusing to write invalid Codex config.toml; original file left unchanged');
+  }
+}
+
+function writeValidatedConfig(configPath: string, content: string): void {
+  validateConfig(content);
+  fs.writeFileSync(configPath, content, 'utf-8');
+}
+
+function appendCanonicalTrustSections(
+  content: string,
+  marker: string,
+  entries: ReadonlyMap<string, string>,
+  enabledByKey: ReadonlyMap<string, boolean>,
+): string {
+  if (entries.size === 0) return content;
+  const lines: string[] = [`# BEGIN ${marker} trust`];
+  for (const [key, hash] of entries) {
+    lines.push(`[hooks.state.${encodeTomlBasicString(key)}]`);
+    const enabled = enabledByKey.get(key);
+    if (enabled !== undefined) lines.push(`enabled = ${enabled}`);
+    lines.push(`trusted_hash = "${hash}"`, '');
+  }
+  lines.push(`# END ${marker} trust`);
+  const separator = !content || content.endsWith('\n') ? '' : '\n';
+  return `${content}${separator}\n${lines.join('\n')}\n`;
+}
+
+export interface InstalledTrustOpts {
+  configPath: string;
+  hooksJsonAbsPath: string;
+  locations: Record<string, InstalledCodexHookLocation>;
+  retiredKeys?: readonly string[];
+  marker: string;
+}
+
+interface LegacyTrustOpts {
   configPath: string;
   hooksJsonAbsPath: string;
   hookEvents: readonly string[];
-  /** event → 实际写入 hooks.json 的完整 command 字符串(与 writeTrustedHashes 一致)。 */
   eventToCommand: Record<string, string>;
-  /** event → hooks.json 中实际的 group index(与 writeTrustedHashes 一致)。 */
   eventToGroupIndex: Record<string, number>;
+  retiredKeys?: readonly string[];
   marker: string;
+}
+
+type TrustOpts = InstalledTrustOpts | LegacyTrustOpts;
+
+function normalizeTrustOpts(opts: TrustOpts): InstalledTrustOpts {
+  if ('locations' in opts) return opts;
+  const locations: Record<string, InstalledCodexHookLocation> = {};
+  for (const eventName of opts.hookEvents) {
+    const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
+    const command = opts.eventToCommand[eventName];
+    if (!eventKey) throw new Error(`Unknown hook event: ${eventName}`);
+    if (!command) throw new Error(`Missing eventToCommand[${eventName}]`);
+    locations[eventName] = {
+      eventName,
+      eventKey,
+      groupIndex: opts.eventToGroupIndex[eventName] ?? 0,
+      handlerIndex: 0,
+      handler: { type: 'command', command },
+    };
+  }
+  return {
+    configPath: opts.configPath,
+    hooksJsonAbsPath: opts.hooksJsonAbsPath,
+    locations,
+    retiredKeys: opts.retiredKeys,
+    marker: opts.marker,
+  };
+}
+
+function expectedTrustState(opts: InstalledTrustOpts): Map<string, string> {
+  const expected = new Map<string, string>();
+  for (const location of Object.values(opts.locations)) {
+    expected.set(
+      installedHookStateKey(opts.hooksJsonAbsPath, location),
+      computeInstalledHookTrustHash(location),
+    );
+  }
+  return expected;
+}
+
+/**
+ * Check whether a parsed remainder can be preserved and return only current
+ * entries that still need a canonical table. Undefined means an uneditable
+ * retired entry or conflicting current entry remains in the document.
+ */
+function missingPreservableTrustEntries(
+  state: Record<string, unknown> | undefined,
+  expected: ReadonlyMap<string, string>,
+  retiredKeys: ReadonlySet<string>,
+  enabledByKey: ReadonlyMap<string, boolean>,
+): Map<string, string> | undefined {
+  for (const retiredKey of retiredKeys) {
+    if (state?.[retiredKey] !== undefined) return undefined;
+  }
+
+  const missing = new Map<string, string>();
+  for (const [key, hash] of expected) {
+    const rawState = state?.[key];
+    if (rawState === undefined) {
+      missing.set(key, hash);
+      continue;
+    }
+    const remaining = asTable(rawState);
+    if (remaining?.trusted_hash !== hash) return undefined;
+    // Never lose an explicit disable from a matching Pilot declaration.
+    if (enabledByKey.get(key) === false && remaining.enabled !== false) return undefined;
+  }
+  return missing;
+}
+
+function verifyTrustContent(content: string, opts: InstalledTrustOpts): VerifyResult {
+  let state: Record<string, unknown> | undefined;
+  try {
+    const parsed = parseToml(content, { integersAsBigInt: true });
+    state = asTable(asTable(parsed.hooks)?.state);
+  } catch {
+    return { valid: false, mismatches: ['invalid Codex config.toml'] };
+  }
+  const mismatches: string[] = [];
+  // Pilot briefly wrote this as an emergency bypass, but Codex only supports
+  // bypassing trust via the per-invocation --dangerously-bypass-hook-trust flag.
+  // Treat the unsupported legacy field as repairable state so deployment removes it.
+  if (configLines(content).some(line => line.editable && /^\s*bypass_hook_trust\s*=/.test(line.text))) {
+    mismatches.push('unsupported config field bypass_hook_trust');
+  }
+  for (const [key, hash] of expectedTrustState(opts)) {
+    const current = asTable(state?.[key])?.trusted_hash;
+    if (current === undefined) mismatches.push(`missing key=${key}`);
+    else if (current !== hash) mismatches.push(`hash mismatch key=${key} (expected=${hash}, got=${current})`);
+  }
+  for (const key of opts.retiredKeys ?? []) {
+    if (state?.[key] !== undefined) mismatches.push(`retired key still present=${key}`);
+  }
+  return { valid: mismatches.length === 0, mismatches };
+}
+
+/** Exact deterministic verification against the installed hooks.json locations. */
+export function verifyTrustHashes(rawOpts: TrustOpts): VerifyResult {
+  const opts = normalizeTrustOpts(rawOpts);
+  if (!fs.existsSync(opts.configPath)) {
+    return { valid: false, mismatches: ['config.toml missing'] };
+  }
+  return verifyTrustContent(fs.readFileSync(opts.configPath, 'utf-8'), opts);
+}
+
+/**
+ * Upsert only Pilot's exact current keys. Marker position is never used to
+ * infer ownership, so unrelated hook state survives Codex TOML reserialization.
+ * Returns false when the trust state is already correct and no file was written.
+ */
+export function writeTrustedHashes(rawOpts: TrustOpts): boolean {
+  const opts = normalizeTrustOpts(rawOpts);
+  const existing = fs.existsSync(opts.configPath)
+    ? fs.readFileSync(opts.configPath, 'utf-8')
+    : '';
+  const initialVerification = verifyTrustContent(existing, opts);
+  const expected = expectedTrustState(opts);
+  // Never infer ownership from marker position: Codex may reserialize TOML and
+  // move the END comment past unrelated third-party sections. Only touch exact
+  // current keys plus retired keys proven from the still-installed Pilot hooks.
+  const retiredKeys = new Set(opts.retiredKeys ?? []);
+  const exactKeys = new Set([...expected.keys(), ...retiredKeys]);
+  const enabledByKey = new Map<string, boolean>();
+  for (const section of parseTrustSections(existing)) {
+    if (section.enabled === undefined || expected.get(section.key) !== section.hash) continue;
+    // If old Pilot produced conflicting copies, an explicit disable wins.
+    enabledByKey.set(section.key, enabledByKey.get(section.key) === false ? false : section.enabled);
+  }
+
+  // Prefer the least-invasive repair first. Pilot's canonical block may have
+  // collided with an equivalent table/dotted-key/inline-table written by Codex
+  // or another tool. Remove only Pilot's exact keys from inside its marker
+  // region, then preserve any remaining semantically-correct representation.
+  // This deliberately avoids needing source ranges for every valid TOML syntax.
+  let minimal = removeMarkedTrustSections(existing, opts.marker, exactKeys);
+  const removedMarkedSections = minimal !== existing;
+  minimal = removeLegacyTrustMarkers(minimal, opts.marker);
+  // Retired table declarations are safe to remove independently. Doing this
+  // before parsing lets us preserve a semantically-correct dotted/inline
+  // current entry in the same write. A retired dotted/inline entry remains in
+  // the parsed state below and is rejected as uneditable.
+  minimal = removeExactTrustSections(minimal, retiredKeys);
+  let minimalState: Record<string, unknown> | undefined;
+  let minimalParses = false;
+  try {
+    const parsed = parseToml(minimal, { integersAsBigInt: true });
+    minimalState = asTable(asTable(parsed.hooks)?.state);
+    minimalParses = true;
+  } catch {
+    // The remaining document is still invalid or ambiguous. Fall through to
+    // the existing deterministic exact-section reconciliation below.
+  }
+
+  if (minimalParses) {
+    const remainingOwnedState = [...exactKeys].some(key => minimalState?.[key] !== undefined);
+    // A healthy canonical Pilot block is already the desired state. Removing it
+    // would only recreate identical text. But if the same key remains after the
+    // marked section is removed, another TOML representation exists even when
+    // smol-toml permissively accepts a redefinition that Codex rejects.
+    if (initialVerification.valid && (!removedMarkedSections || !remainingOwnedState)) {
+      return false;
+    }
+    const missing = missingPreservableTrustEntries(
+      minimalState,
+      expected,
+      retiredKeys,
+      enabledByKey,
+    );
+    if (missing) {
+      const output = appendCanonicalTrustSections(minimal, opts.marker, missing, enabledByKey);
+      if (output === existing) return false;
+      try {
+        writeValidatedConfig(opts.configPath, output);
+        return true;
+      } catch (err) {
+        if (!(err instanceof InvalidCodexConfigError)) throw err;
+        // A valid inline parent table cannot be extended by appending a sibling
+        // table. Fall through so the exact-section path can either reconcile a
+        // replaceable representation or report it as uneditable.
+      }
+    }
+  }
+
+  let content = removeLegacyTrustMarkers(existing, opts.marker);
+  content = removeExactTrustSections(content, exactKeys);
+  let missing = expected;
+  let parsedRemainder = false;
+  try {
+    const parsed = parseToml(content, { integersAsBigInt: true });
+    const remainingState = asTable(asTable(parsed.hooks)?.state);
+    const preservable = missingPreservableTrustEntries(
+      remainingState,
+      expected,
+      retiredKeys,
+      enabledByKey,
+    );
+    if (!preservable) {
+      throw new InvalidCodexConfigError(
+        'Refusing to replace an uneditable Codex hook trust entry; original file left unchanged',
+      );
+    }
+    missing = preservable;
+    parsedRemainder = true;
+  } catch (err) {
+    if (err instanceof InvalidCodexConfigError) throw err;
+    // Preserve the existing behavior for unrelated invalid TOML: validation of
+    // the final candidate below rejects the write and leaves the source intact.
+  }
+  const output = appendCanonicalTrustSections(content, opts.marker, missing, enabledByKey);
+  if (output === existing) return false;
+  try {
+    writeValidatedConfig(opts.configPath, output);
+  } catch (err) {
+    if (parsedRemainder && err instanceof InvalidCodexConfigError) {
+      throw new InvalidCodexConfigError(
+        'Refusing to extend an uneditable Codex hook trust entry; original file left unchanged',
+      );
+    }
+    throw err;
+  }
+  return true;
+}
+
+export function removeTrustBlock(
+  configPath: string,
+  marker: string,
+  ownedHookStateKeys: readonly string[] = [],
+): boolean {
+  if (!fs.existsSync(configPath)) return false;
+  const before = fs.readFileSync(configPath, 'utf-8');
+  const owned = new Set(ownedHookStateKeys);
+  const content = removeExactTrustSections(removeLegacyTrustMarkers(before, marker), owned);
+  if (content === before) return false;
+  writeValidatedConfig(configPath, content);
+  return true;
+}
+
+/**
+ * Remove exact position-based trust entries without touching the active markers.
+ * Retired-key cleanup runs before current trust repair: leave invalid TOML
+ * unchanged and return false so that repair still gets a chance to run.
+ * Filesystem errors still propagate to the caller's deployment error handler.
+ */
+export function removeTrustStateKeys(
+  configPath: string,
+  ownedHookStateKeys: readonly string[],
+): boolean {
+  if (!fs.existsSync(configPath) || ownedHookStateKeys.length === 0) return false;
+  const before = fs.readFileSync(configPath, 'utf-8');
+  try {
+    const content = removeExactTrustSections(before, new Set(ownedHookStateKeys));
+    if (content === before) return false;
+    writeValidatedConfig(configPath, content);
+    return true;
+  } catch (err) {
+    if (err instanceof InvalidCodexConfigError) return false;
+    throw err;
+  }
 }
 
 export interface VerifyResult {
   valid: boolean;
   mismatches: string[];
-}
-
-/**
- * 自洽性检查 (Q8):重新 parse config.toml,把每条 trust state 与本地重算的 hash 对比。
- * 仅校验 pilot 自己写入的(BEGIN/END 块内的)条目。
- *
- * 用途: deploy 后立即调用,确认我们写入正确(防止 string 拼接错位等);失败时 logger.error。
- *       不直接阻塞 deploy(让 hook-watchdog 活性检查再次触发 redeploy 兜底)。
- */
-export function verifyTrustHashes(opts: VerifyTrustHashesOpts): VerifyResult {
-  const { configPath, hooksJsonAbsPath, hookEvents, eventToCommand, eventToGroupIndex, marker } = opts;
-  if (!fs.existsSync(configPath)) {
-    return { valid: false, mismatches: ['config.toml missing'] };
-  }
-  const content = fs.readFileSync(configPath, 'utf-8');
-  const parsed = parseTrustBlock(content, marker);
-  const parsedMap = new Map(parsed.map((p) => [p.key, p.hash]));
-
-  const mismatches: string[] = [];
-  for (const event of hookEvents) {
-    const command = eventToCommand[event];
-    if (!command) {
-      mismatches.push(`event=${event} missing command mapping`);
-      continue;
-    }
-    const groupIndex = eventToGroupIndex[event] ?? 0;
-    const expectedKey = hookStateKey(hooksJsonAbsPath, event, groupIndex);
-    const expectedHash = computeHookTrustHash(event, command);
-    const actualHash = parsedMap.get(expectedKey);
-    if (!actualHash) {
-      mismatches.push(`event=${event} missing key=${expectedKey}`);
-    } else if (actualHash !== expectedHash) {
-      mismatches.push(`event=${event} hash mismatch (expected=${expectedHash}, got=${actualHash})`);
-    }
-  }
-  return { valid: mismatches.length === 0, mismatches };
 }

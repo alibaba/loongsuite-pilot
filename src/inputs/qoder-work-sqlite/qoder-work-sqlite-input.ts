@@ -1,17 +1,20 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
 import { ClientType, CollectionMethod } from '../../types/index.js';
+import { queryReadonly } from '../../utils/node-sqlite.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveQoderWorkRoot } from '../qoder-work-log/qoder-work-log-input.js';
+import { resolvePollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+
 /** Relative path of the SQLite DB inside the QoderWork data root. */
 const DB_REL_PATH = path.join('data', 'agents.db');
 const SOURCE = 'qoder-work-sqlite';
 const UNKNOWN_MODEL = 'unknown';
 const SQL_BATCH_LIMIT = 1000;
+const TOOL_RESULT_DEDUPE_LIMIT = 50_000;
 
 export interface QoderWorkSqliteInputOptions extends InputOptions {
   dbPath?: string;
@@ -69,7 +72,7 @@ export class QoderWorkSqliteInput extends BaseInput {
     this.agentType = agentType;
     this.id = `${agentType}-sqlite`;
     this.dbPath = opts.dbPath ?? path.join(dataRoot, DB_REL_PATH);
-    this.pollIntervalMs = opts.pollIntervalMs ?? 30_000;
+    this.pollIntervalMs = resolvePollIntervalMs(opts.pollIntervalMs, DEFAULT_POLL_INTERVAL_MS);
   }
 
   static getWatchPaths(): string[] {
@@ -91,8 +94,9 @@ export class QoderWorkSqliteInput extends BaseInput {
 
     try {
       const baseline = await readMaxUpdatedAt(this.dbPath);
+      const extra = toPlainObject(state.extra);
       this.stateStore.update(this.id, {
-        extra: { lastUpdatedAt: baseline },
+        extra: { ...extra, lastUpdatedAt: baseline },
       });
     } catch (err) {
       this.logger.warn('failed to baseline qoder-work sqlite cursor', { error: String(err) });
@@ -115,12 +119,13 @@ export class QoderWorkSqliteInput extends BaseInput {
     if (rows.length === 0) return [];
 
     const entries: AgentActivityEntry[] = [];
+    const emittedToolResultIds = new Set(getStringArray(state.extra, 'emittedToolResultIds'));
     let maxUpdate = cursor;
 
     for (const row of rows) {
       if (row.updatedAt > maxUpdate) maxUpdate = row.updatedAt;
       try {
-        const rowEntries = transformRow(row, this.agentType);
+        const rowEntries = transformRow(row, this.agentType, emittedToolResultIds);
         entries.push(...rowEntries);
       } catch (err) {
         this.logger.warn('row transform failed', {
@@ -130,14 +135,23 @@ export class QoderWorkSqliteInput extends BaseInput {
       }
     }
 
+    const extra = toPlainObject(state.extra);
     this.stateStore.update(this.id, {
-      extra: { lastUpdatedAt: maxUpdate },
+      extra: {
+        ...extra,
+        lastUpdatedAt: maxUpdate,
+        emittedToolResultIds: capArray([...emittedToolResultIds], TOOL_RESULT_DEDUPE_LIMIT),
+      },
     });
     return entries;
   }
 }
 
-function transformRow(row: MessageRow, agentType: ClientType): AgentActivityEntry[] {
+function transformRow(
+  row: MessageRow,
+  agentType: ClientType,
+  emittedToolResultIds: Set<string> = new Set(),
+): AgentActivityEntry[] {
   const sessionId = row.sessionId ?? '';
   // QoderWork stores `updated_at` as unix seconds; normalise to milliseconds
   // so downstream timestamp serialisation matches the rest of the pipeline.
@@ -204,10 +218,14 @@ function transformRow(row: MessageRow, agentType: ClientType): AgentActivityEntr
       ? rawResult
       : toJsonValue(rawResult) ?? '';
 
+    const eventId = hashId([sessionId, row.id, 'tool_result', callId, toolName, hashJson(resultPayload)]);
+    if (emittedToolResultIds.has(eventId)) continue;
+    emittedToolResultIds.add(eventId);
+
     out.push(
       buildAgentActivityEntry({
         timestamp: tsMs,
-        'event.id': hashId([sessionId, row.id, 'tool_result', callId, String(i)]),
+        'event.id': eventId,
         'event.name': 'tool.result',
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
@@ -275,38 +293,36 @@ function readMaxUpdatedAt(dbPath: string): Promise<number> {
   );
 }
 
-function queryReadonly<T>(
-  dbPath: string,
-  sql: string,
-  params: unknown[],
-): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    let db: sqlite3.Database;
-    db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) {
-        reject(openErr);
-        return;
-      }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (queryErr) {
-            reject(queryErr);
-            return;
-          }
-          if (closeErr) {
-            reject(closeErr);
-            return;
-          }
-          resolve(rows);
-        });
-      });
-    });
-  });
+function getStringArray(extra: unknown, key: string): string[] {
+  const value = toPlainObject(extra)[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
 }
 
+function toPlainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function capArray<T>(values: T[], max: number): T[] {
+  return values.length > max ? values.slice(values.length - max) : values;
+}
 
 function stringOr(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.length > 0 ? value : fallback;
+}
+
+function hashJson(value: JsonValue): string {
+  return crypto
+    .createHash('sha256')
+    .update(stableStringify(value))
+    .digest('hex');
+}
+
+function stableStringify(value: JsonValue): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
 }
 
 function hashId(parts: Array<string | number | undefined>): string {

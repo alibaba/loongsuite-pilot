@@ -12,6 +12,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
     appendedLines.push({ path, line });
   }),
   ensureDir: vi.fn(),
+  getTodayDateString: () => '2026-09-02',
 }));
 
 const mockSendAlarm = vi.fn();
@@ -22,11 +23,18 @@ vi.mock('../../../src/internal/sender.js', () => ({
 }));
 
 const mockReadFileSync = vi.fn<[string, string], string>();
+const mockExistsSync = vi.fn<[string], boolean>();
 vi.mock('node:fs', () => ({
   readFileSync: (...args: [string, string]) => mockReadFileSync(...args),
+  existsSync: (...args: [string]) => mockExistsSync(...args),
 }));
 
 import { UpdaterMetrics } from '../../../src/updater/updater-metrics.js';
+import type { ProcessLiveness } from '../../../src/utils/pid-utils.js';
+
+function isDailyLog(filePath: string, prefix: string): boolean {
+  return filePath.includes(`${prefix}-`) && /-\d{4}-\d{2}-\d{2}\.jsonl$/.test(filePath);
+}
 
 describe('UpdaterMetrics', () => {
   let killSpy: ReturnType<typeof vi.spyOn> | null = null;
@@ -38,6 +46,7 @@ describe('UpdaterMetrics', () => {
     mockSendAlarm.mockClear();
     mockSendStatus.mockClear();
     mockReadFileSync.mockReturnValue('12345\n');
+    mockExistsSync.mockReturnValue(true);
     killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number) => {
       if (signal === 0) return true;
       throw new Error('not supported');
@@ -50,23 +59,24 @@ describe('UpdaterMetrics', () => {
     vi.useRealTimers();
   });
 
-  function createMetrics(userId = 'test-user') {
+  function createMetrics(userId = 'test-user', collectorLiveness?: () => ProcessLiveness) {
     return new UpdaterMetrics({
       dataDir: '/tmp/test-data',
       version: '1.0.0',
       collectorPidFile: '/tmp/test-data/loongsuite-pilot.pid',
       userId,
+      collectorLiveness,
     });
   }
 
   describe('writeEvent', () => {
-    it('writes updater event to pilot-updater-events.jsonl after flush', async () => {
+    it('writes updater event to a daily pilot-updater-events file after flush', async () => {
       const m = createMetrics();
       await m.start();
       m.writeEvent('updater_started');
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       expect(eventLines).toHaveLength(1);
 
       const parsed = JSON.parse(eventLines[0].line);
@@ -85,7 +95,7 @@ describe('UpdaterMetrics', () => {
       });
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.current_version).toBe('1.0.0');
       expect(parsed.latest_version).toBe('1.0.1');
@@ -97,7 +107,7 @@ describe('UpdaterMetrics', () => {
       m.writeEvent('updater_started');
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.user_id).toBe('user-123');
     });
@@ -111,7 +121,7 @@ describe('UpdaterMetrics', () => {
       });
       await m.stop();
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       const parsed = JSON.parse(eventLines[0].line);
       expect(parsed.error).toBe('download timeout');
       expect(parsed.consecutive_failures).toBe(3);
@@ -119,13 +129,13 @@ describe('UpdaterMetrics', () => {
   });
 
   describe('writeAlarm', () => {
-    it('writes alarm entry to pilot-alarms.jsonl after flush', async () => {
+    it('writes alarm entry to a daily pilot-alarms file after flush', async () => {
       const m = createMetrics();
       await m.start();
       m.writeAlarm('UPDATER_FAILURE_ALARM', '2', 'update failed');
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(1);
 
       const parsed = JSON.parse(alarmLines[0].line);
@@ -144,7 +154,7 @@ describe('UpdaterMetrics', () => {
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarm = alarmLines
         .map(l => JSON.parse(l.line))
         .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -158,7 +168,7 @@ describe('UpdaterMetrics', () => {
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarm = alarmLines
         .map(l => JSON.parse(l.line))
         .find((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -176,7 +186,7 @@ describe('UpdaterMetrics', () => {
 
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       const formatAlarms = alarmLines
         .map(l => JSON.parse(l.line))
         .filter((a: { alarm_type: string }) => a.alarm_type === 'USER_ID_FORMAT_ALARM');
@@ -190,12 +200,12 @@ describe('UpdaterMetrics', () => {
       await m.start();
       m.writeEvent('updater_started');
 
-      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(0);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(30_000);
       await vi.advanceTimersByTimeAsync(0);
 
-      const eventLines = appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'));
+      const eventLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'));
       expect(eventLines).toHaveLength(1);
 
       await m.stop();
@@ -209,24 +219,24 @@ describe('UpdaterMetrics', () => {
       m.writeAlarm('UPDATER_FAILURE_ALARM', '2', 'err');
       await m.stop();
 
-      expect(appendedLines.filter(l => l.path.includes('pilot-updater-events.jsonl'))).toHaveLength(2);
-      expect(appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'))).toHaveLength(1);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(2);
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'))).toHaveLength(1);
     });
   });
 
   describe('sendAlarm / sendStatus integration', () => {
-    it('calls sendStatus for queued events on flush', async () => {
+    it('does NOT send events as status rows (collector folds them into the heartbeat)', async () => {
       const m = createMetrics();
       await m.start();
       m.writeEvent('updater_started');
       await m.stop();
 
-      expect(mockSendStatus).toHaveBeenCalled();
-      const call = mockSendStatus.mock.calls.find(
+      // Events are persisted to the local JSONL only; no pilot_updater_event topic.
+      expect(appendedLines.filter(l => isDailyLog(l.path, 'pilot-updater-events'))).toHaveLength(1);
+      const statusCall = mockSendStatus.mock.calls.find(
         (c: unknown[]) => c[0] === 'pilot_updater_event',
       );
-      expect(call).toBeDefined();
-      expect(call![1]).not.toHaveProperty('__topic__');
+      expect(statusCall).toBeUndefined();
     });
 
     it('calls sendAlarm for queued alarms on flush', async () => {
@@ -244,58 +254,113 @@ describe('UpdaterMetrics', () => {
   });
 
   describe('collector health check', () => {
-    it('writes SERVICE_NOT_RUNNING_ALARM when collector PID file is missing', async () => {
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error('ENOENT');
-      });
+    it('suppresses SERVICE_NOT_RUNNING_ALARM during startup grace', async () => {
+      const m = createMetrics('test-user', () => down('pid file is missing'));
 
-      const m = createMetrics();
       await m.start();
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
-      expect(alarmLines.length).toBeGreaterThanOrEqual(1);
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
+      expect(alarmLines).toHaveLength(0);
+    });
+
+    it('requires two consecutive misses after startup grace before alarming', async () => {
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
+      expect(alarmLines).toHaveLength(1);
       const parsed = JSON.parse(alarmLines[0].line);
       expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
-      expect(parsed.alarm_level).toBe('3');
+      expect(parsed.alarm_message).toContain('no matching collector command found');
+      await m.stop();
     });
 
-    it('does NOT write alarm when collector process is running', async () => {
-      mockReadFileSync.mockReturnValue('12345\n');
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: number) => {
-        if (signal === 0) return true;
-        throw new Error('not supported');
-      }) as typeof process.kill);
+    it('enriches SERVICE_NOT_RUNNING_ALARM with the startup-crash cause when a breadcrumb exists', async () => {
+      mockReadFileSync.mockImplementation((p: string) => {
+        if (p.includes('last-startup-crash.json')) {
+          return JSON.stringify({
+            schema: 1, ts: 1, phase: 'module_load', version: '9.9.9', pid: 1,
+            error_message: 'Cannot open sqlite3 binding',
+            error_stack_head: 'Error: Cannot open sqlite3 binding',
+          });
+        }
+        return '12345\n';
+      });
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
 
-      const m = createMetrics();
       await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
+      expect(alarmLines).toHaveLength(1);
+      const parsed = JSON.parse(alarmLines[0].line);
+      expect(parsed.alarm_type).toBe('SERVICE_NOT_RUNNING_ALARM');
+      expect(parsed.alarm_message).toContain('cause=native_module_missing');
+      expect(parsed.alarm_message).toContain('version=9.9.9');
+      expect(parsed.alarm_message).toContain('no matching collector command found');
+      await m.stop();
+    });
+
+    it('does not alarm when collector PID changes but command identity is found', async () => {
+      const m = createMetrics('test-user', () => ({
+        running: true,
+        pid: 456,
+        source: 'process-scan',
+        reason: 'matching process command found; pid file points to stale or mismatched pid 123',
+        pidFileState: 'stale',
+      }));
+
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       await m.stop();
 
-      const alarmLines = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl'));
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
       expect(alarmLines).toHaveLength(0);
-
-      killSpy.mockRestore();
     });
 
-    it('fires health check every 60 seconds', async () => {
-      mockReadFileSync.mockImplementation(() => {
-        throw new Error('ENOENT');
+    it('resets collector failures after process identity recovery', async () => {
+      let call = 0;
+      const liveness = vi.fn<[], ProcessLiveness>().mockImplementation(() => {
+        call++;
+        if (call <= 4) return down('no matching collector command found');
+        return { running: true, pid: 456, source: 'process-scan', reason: 'matching process command found' };
       });
+      const m = createMetrics('test-user', liveness);
 
-      const m = createMetrics();
       await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await m.stop();
 
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.advanceTimersByTimeAsync(0);
-      const before = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl')).length;
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
+      expect(alarmLines).toHaveLength(0);
+    });
 
-      await vi.advanceTimersByTimeAsync(30_000);
-      await vi.advanceTimersByTimeAsync(0);
+    it('respects service alarm cooldown for persistent misses', async () => {
+      const m = createMetrics('test-user', () => down('no matching collector command found'));
 
-      const after = appendedLines.filter(l => l.path.includes('pilot-alarms.jsonl')).length;
-      expect(after).toBeGreaterThan(before);
+      await m.start();
+      await vi.advanceTimersByTimeAsync(3 * 60_000 + 60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
 
+      const alarmLines = appendedLines.filter(l => isDailyLog(l.path, 'pilot-alarms'));
+      expect(alarmLines).toHaveLength(1);
       await m.stop();
     });
   });
 });
+
+function down(reason: string): ProcessLiveness {
+  return {
+    running: false,
+    source: 'none',
+    reason,
+    pidFileState: 'missing',
+  };
+}

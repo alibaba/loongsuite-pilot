@@ -1,4 +1,4 @@
-import { describe, expect, test, beforeEach, afterEach } from 'vitest';
+import { describe, expect, test, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -130,6 +130,33 @@ describe('ZCodeRolloutInput: baseline skip (spec §1.5 #1)', () => {
     expect(sessionIds.has('turn_historic')).toBe(false);
     expect(sessionIds.has('turn_historic_2')).toBe(false);
   });
+});
+
+test('resumes a partially written rollout record after restart', async () => {
+  const sessionId = 'sess_partial';
+  const file = rolloutPath(sessionId);
+  const stateKey = `zcode-rollout:${file}`;
+  const record = JSON.stringify(baseModelIoLine({ sessionId }));
+  const split = Math.floor(record.length / 2);
+  fs.writeFileSync(file, record.slice(0, split));
+  const first = new ZCodeRolloutInput({ stateStore, rolloutDir });
+  expect(await first['collect']()).toEqual([]);
+  expect(stateStore.getOffset(stateKey)).toBe(0);
+
+  await stateStore.save();
+  fs.appendFileSync(file, record.slice(split) + '\n');
+  const reloaded = new StateStore(path.join(tmpRoot, 'state.json'));
+  await reloaded.load();
+  const resumed = new ZCodeRolloutInput({ stateStore: reloaded, rolloutDir });
+  const onEntries = vi.fn();
+  resumed.on('entries', onEntries);
+  await resumed.start();
+  await resumed.stop();
+  expect(reloaded.getOffset(stateKey)).toBe(Buffer.byteLength(record) + 1);
+  expect(onEntries).toHaveBeenCalledOnce();
+  expect(onEntries).toHaveBeenCalledWith(expect.arrayContaining([
+    expect.objectContaining({ 'gen_ai.session.id': sessionId, 'event.name': 'llm.response' }),
+  ]));
 });
 
 // ─── scenario #2: multi-attempt (streaming recovery → multiple STEPs) ───

@@ -1,4 +1,4 @@
-# Qoder hook entrypoint (Windows) — delegates to qoder-hook-processor.mjs.
+# Qoder hook entrypoint (Windows) - delegates to qoder-hook-processor.mjs.
 # Usage: powershell -File qoder-loongsuite-pilot-hook.ps1 [agent-id]
 
 $ErrorActionPreference = "Continue"
@@ -10,26 +10,60 @@ $Processor = Join-Path $ScriptDir "qoder-hook-processor.mjs"
 if (-not [Console]::IsInputRedirected) { exit 0 }
 if (-not (Test-Path $Processor)) { exit 0 }
 
-$MIN_NODE_MAJOR = 18
+$MIN_NODE_MAJOR = 22
+
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the version from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeVersion {
+    param([string]$bin)
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+\.[0-9]+\.[0-9]+)') { return $Matches[1] }
+    return $null
+}
 
 function Test-NodeSuitable {
     param([string]$bin)
     if (-not (Test-Path $bin)) { return $false }
+    $ver = Get-ManagedNodeVersion $bin
     try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge $MIN_NODE_MAJOR
+        if (-not $ver) { $ver = & $bin --version 2>$null }
+        if (-not $ver -or $ver -notmatch '^v?([0-9]+)\.([0-9]+)\.') { return $false }
+        $major = [int]$Matches[1]
+        $minor = [int]$Matches[2]
+        return $major -gt 23 -or ($major -eq 23 -and $minor -ge 4) -or ($major -eq 22 -and $minor -ge 13)
     } catch { return $false }
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+    $dataDirs = @($env:LOONGSUITE_PILOT_DATA_DIR, (Join-Path $env:USERPROFILE '.loongsuite-pilot')) | Where-Object { $_ } | Select-Object -Unique
+    foreach ($dataDir in $dataDirs) {
+        $pinFile = Join-Path $dataDir 'node-bin'
+        if (Test-Path $pinFile) {
+            $pinned = ([string](Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue)).Trim([char]0xFEFF).Trim()
+            if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+        }
     }
     $candidates = @()
+    foreach ($dataDir in $dataDirs) {
+        $runtimeDir = Join-Path $dataDir 'runtime'
+        $dirs = Get-ChildItem $runtimeDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^node-v[0-9]+\.[0-9]+\.[0-9]+' } | Sort-Object -Property @{Expression={ [int](($_.Name -replace '^node-v','') -split '\.')[0] }}, @{Expression={ [int](($_.Name -replace '^node-v','') -split '\.')[1] }} -Descending
+        foreach ($d in $dirs) {
+            $candidates += Join-Path $d.FullName 'node.exe'
+            $candidates += Join-Path $d.FullName 'bin\node.exe'
+        }
+    }
     $nvmHome = $env:NVM_HOME
     if ($nvmHome -and (Test-Path $nvmHome)) {
         $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
@@ -53,62 +87,23 @@ function Resolve-NodeBin {
 
 $nodeBin = Resolve-NodeBin
 if (-not $nodeBin) {
-    Write-Error "[loongsuite-pilot] node >= $MIN_NODE_MAJOR not found"
+    Write-Error "[loongsuite-pilot] SQLite-capable node (22.13+, 23.4+, or newer) not found"
     exit 0
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
-    }
-
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    # Cursor encodes hook payloads through the system codepage (GBK/CP936), garbling
-    # all non-ASCII text.  Reversal: decode the garbled bytes as UTF-8, encode the
-    # resulting string as GBK — this recovers the ORIGINAL UTF-8 bytes.  We validate
-    # by checking that the recovered bytes are valid UTF-8; if not, keep the originals.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {
-            # Validation failed — original bytes are already correct UTF-8, keep them
-        }
-    }
-
-    if ($rawBytes.Length -eq 0) {
-        & $nodeBin $Processor --agent-id $AgentId 2>$null
-    } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" --agent-id $AgentId"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $null = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
-    }
+    # CLM/WDAC-safe: let node inherit this process's stdin (fd0) and read it
+    # directly; PowerShell never touches the bytes. The old implementation used
+    # [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo to spawn
+    # node -- those .NET calls throw under Constrained Language Mode (enforced by
+    # Device Guard/WDAC), crashing the hook and silently dropping telemetry. BOM
+    # stripping and the Chinese UTF-8->GBK double-encoding fixup now live in node
+    # (shared/decode-payload.mjs), so here we only pass through, which works in
+    # both language modes.
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    & $nodeBin $Processor --agent-id $AgentId 2>$null | Out-Null
 } catch {}
 
 exit 0

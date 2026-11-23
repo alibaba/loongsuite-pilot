@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AutoUpdateConfig } from '../../../src/types/index.js';
 
@@ -6,6 +7,14 @@ vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
   }),
+}));
+
+const mockHookAssetLock = vi.fn<[string, () => Promise<unknown>], Promise<unknown>>();
+const mockHookUpgradeInProgress = vi.fn<[string], Promise<boolean>>();
+vi.mock('../../../src/utils/hook-asset-lock.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/utils/hook-asset-lock.js')>(),
+  withHookAssetLock: (...args: [string, () => Promise<unknown>]) => mockHookAssetLock(...args),
+  hookUpgradeInProgress: (dir: string) => mockHookUpgradeInProgress(dir),
 }));
 
 // --- Mock version-utils (we test these separately) ---
@@ -30,6 +39,7 @@ const mockFsStat = vi.fn();
 const mockFsCp = vi.fn<[string, string, any], Promise<void>>();
 const mockFsCopyFile = vi.fn<[string, string], Promise<void>>();
 const mockFsChmod = vi.fn<[string, number], Promise<void>>();
+const mockFsMkdtemp = vi.fn<[string], Promise<string>>();
 
 vi.mock('node:fs/promises', () => ({
   readFile: (...args: [string, string]) => mockFsReadFile(...args),
@@ -43,12 +53,24 @@ vi.mock('node:fs/promises', () => ({
   cp: (...args: [string, string, any]) => mockFsCp(...args),
   copyFile: (...args: [string, string]) => mockFsCopyFile(...args),
   chmod: (...args: [string, number]) => mockFsChmod(...args),
+  mkdtemp: (...args: [string]) => mockFsMkdtemp(...args),
 }));
+
+const mockWriteFileSync = vi.fn();
+const mockRenameSync = vi.fn();
 
 // --- Mock node:fs (createWriteStream) ---
 vi.mock('node:fs', () => ({
   createWriteStream: vi.fn(() => ({ fake: true })),
   createReadStream: vi.fn(),
+  readdirSync: vi.fn(() => []),
+  mkdirSync: vi.fn(),
+  writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
+  renameSync: (...args: unknown[]) => mockRenameSync(...args),
+  rmSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(() => ''),
+  statSync: vi.fn(),
 }));
 
 // --- Mock stream pipeline ---
@@ -60,6 +82,7 @@ vi.mock('node:stream/promises', () => ({
 const mockExecFile = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: (...args: any[]) => mockExecFile(...args),
+  spawn: vi.fn(),
 }));
 
 // --- Mock node:util promisify to wrap our mockExecFile ---
@@ -82,7 +105,7 @@ vi.mock('../../../src/utils/fs-utils.js', async (importOriginal) => {
 // --- Mock global fetch ---
 const mockFetch = vi.fn<[string, any?], Promise<Response>>();
 
-import { Updater } from '../../../src/updater/updater.js';
+import { Updater, buildPaths } from '../../../src/updater/updater.js';
 import type { VersionManifest, LocalVersion } from '../../../src/updater/updater.js';
 
 function makeConfig(overrides: Partial<AutoUpdateConfig> = {}): AutoUpdateConfig {
@@ -129,6 +152,38 @@ function makeResponseStream(status = 200): Response {
   } as unknown as Response;
 }
 
+function pilotCommandArgs(call: [string, string[]]): string[] {
+  const [cmd, args] = call;
+  if (String(cmd).toLowerCase().includes('powershell')) {
+    const fileIndex = args.indexOf('-File');
+    return fileIndex >= 0 ? args.slice(fileIndex + 2) : [];
+  }
+  return args;
+}
+
+function pilotCommands(): string[] {
+  return mockExecFile.mock.calls
+    .map((call: [string, string[]]) => pilotCommandArgs(call)[0])
+    .filter(Boolean);
+}
+
+function isInterceptorRuntimePath(filePath: string): boolean {
+  return String(filePath).replace(/\\/g, '/').endsWith('/interceptor/runtime.json');
+}
+
+function healthyInterceptorRuntime(overrides: Record<string, unknown> = {}) {
+  return {
+    service: 'loongsuite-pilot-interceptor',
+    status: 'ok',
+    pid: process.pid,
+    version: '1.0.2',
+    daemon_port: 18791,
+    packageVersion: '1.0.2',
+    updatedAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 describe('Updater', () => {
   let tmpDir: string;
 
@@ -137,6 +192,8 @@ describe('Updater', () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', mockFetch);
     tmpDir = '/tmp/test-updater';
+    mockHookAssetLock.mockImplementation((_dir, body) => body());
+    mockHookUpgradeInProgress.mockResolvedValue(false);
 
     // Default fs mocks
     mockFsRm.mockResolvedValue(undefined);
@@ -147,25 +204,62 @@ describe('Updater', () => {
     mockFsCopyFile.mockResolvedValue(undefined);
     mockFsChmod.mockResolvedValue(undefined);
     mockFsReaddir.mockResolvedValue([]);
+    // Default: mkdtemp returns a deterministic child of the requested prefix.
+    mockFsMkdtemp.mockImplementation((prefix: string) => Promise.resolve(prefix + 'XXXXXX'));
     // Default: no current pointer file → first deployment
     mockFsReadFile.mockRejectedValue(new Error('ENOENT'));
     // Default: access checks fail (nothing exists)
     mockFsAccess.mockRejectedValue(new Error('ENOENT'));
     // Default: execFile succeeds
     mockExecFile.mockResolvedValue({ stdout: '', stderr: '' });
-    // Default: readJsonFile / writeJsonFile
-    mockReadJsonFile.mockResolvedValue({});
+    // Default: config reads return an empty object; collector health reads see
+    // the freshly started target version so existing successful-upgrade tests
+    // exercise the health gate without waiting for a timer.
+    mockReadJsonFile.mockImplementation((filePath: string) => {
+      const normalized = String(filePath).replace(/\\/g, '/');
+      if (normalized.endsWith('/logs/runtime.json')) {
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'bbb',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      if (normalized.endsWith('/interceptor/runtime.json')) {
+        return Promise.resolve({
+          service: 'loongsuite-pilot-interceptor',
+          status: 'ok',
+          pid: process.pid,
+          version: '1.0.2',
+          daemon_port: 18791,
+          packageVersion: '1.0.2',
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      return Promise.resolve({});
+    });
     mockWriteJsonFile.mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   // ─── LIFECYCLE ─────────────────────────────────────────
 
   describe('lifecycle', () => {
+    it('keeps a publication marker that can still protect a surviving postinstall', () => {
+      const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
+      updater.start();
+      expect(mockFsRm).not.toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+    });
+
     it('does not start timer when disabled', () => {
       const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
       updater.start();
@@ -268,12 +362,142 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined); // versions dir exists
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime({ packageVersion: '1.0.2', version: '1.0.2' }))
+          : String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
       // fetch called once for manifest, not for download
       expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('repairs an unhealthy collector even when the target is already current', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve(runtimeReads === 1 ? null : {
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'aaa',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      expect(pilotCommands()).toEqual(['start-collector', 'schedule-updater-restart']);
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('keeps failure state when already-current collector recovery never becomes healthy', async () => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime())
+          : String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve(null)
+          : Promise.resolve({})
+      ));
+      const updater = new Updater(makeConfig(), tmpDir);
+      const gc = vi.spyOn(updater as any, 'gcOldVersions');
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      expect(pilotCommands()).toContain('start-collector');
+      expect(pilotCommands()).not.toContain('schedule-updater-restart');
+      expect(gc).not.toHaveBeenCalled();
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
+    it.each([
+      ['an old version', '1.0.1', 'old'],
+      ['an old build of the same version', '1.0.2', 'old'],
+    ])('restarts a live collector running %s', async (_case, packageVersion, gitCommit) => {
+      mockFetch.mockResolvedValueOnce(makeResponseJson(
+        makeManifest({ version: '1.0.2', git_commit: 'aaa' }),
+      ));
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (filePath.endsWith('/current')) return Promise.resolve('1.0.2_aaa\n');
+        if (filePath.endsWith('/VERSION')) {
+          return Promise.resolve('version=1.0.2\ngit_commit=aaa\n');
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsAccess.mockResolvedValue(undefined);
+      let runtimeReads = 0;
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) {
+          return Promise.resolve(healthyInterceptorRuntime({ pid: process.ppid }));
+        }
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        runtimeReads++;
+        return Promise.resolve(runtimeReads <= 2 ? {
+          status: 'active',
+          packageVersion,
+          gitCommit,
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        } : {
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'aaa',
+          pid: process.ppid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+
+      await updater.check();
+
+      expect(pilotCommands()).toEqual(['restart-collector', 'schedule-updater-restart']);
+      expect((updater as any).consecutiveFailures).toBe(0);
     });
   });
 
@@ -323,6 +547,339 @@ describe('Updater', () => {
         expect.stringContaining('current.tmp'),
         expect.stringContaining('/current'),
       );
+    });
+
+    it.each([
+      { layout: 'default', cacheOverride: '', cacheName: '.loongsuite-pilot' },
+      { layout: 'split', cacheOverride: '~/custom-cache', cacheName: 'custom-cache' },
+    ])('uses the bootstrap cache for pointers and publication lock in the $layout layout', async ({
+      cacheOverride, cacheName,
+    }) => {
+      setupForDownload();
+      const home = path.resolve(tmpDir, 'home');
+      const data = path.join(home, 'custom-data');
+      const cache = path.join(home, cacheName);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheOverride);
+      vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', data);
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+
+      await new Updater(makeConfig()).check();
+
+      expect(mockHookAssetLock).toHaveBeenCalledWith(cache, expect.any(Function));
+      expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'current.tmp'), '1.0.2_bbb\n');
+      const postinstall = mockExecFile.mock.calls.find(([, args]) =>
+        Array.isArray(args) && args.some((arg) => String(arg).endsWith('postinstall.js')));
+      expect(postinstall?.[2].env.LOONGSUITE_PILOT_DATA_DIR).toBe(data);
+    });
+
+    it('runs the staged package postinstall, pointed at this install data dir', async () => {
+      // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
+      // plugins}, so this call is also how an install broken by the Windows fs.cpSync
+      // fail-fast heals itself -- the trees get rebuilt on the next auto-upgrade with no
+      // reinstall. Nothing else covered it: the other deploy tests stub it absent, so
+      // deleting the call left every test green.
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      const call = mockExecFile.mock.calls.find((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(call, 'postinstall.js was never executed').toBeTruthy();
+      // The NEW package's copy, run out of the staging dir: the point is to install the
+      // assets that shipped with the version being activated.
+      expect(String((call![1] as string[])[0])).toContain('.candidate');
+      // And told which tree to fill. Unset, postinstall falls back to
+      // $HOME/.loongsuite-pilot, which is the wrong one for a custom data dir.
+      const env = (call![2] as { env?: Record<string, string> }).env ?? {};
+      expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
+
+      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
+      expect(fallback?.[2]).toMatchObject({
+        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
+      });
+      expect(fallback?.[2].env.LOONGSUITE_PILOT_DATA_DIR).not.toBe(tmpDir);
+
+      const markerWrite = mockFsWriteFile.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      const postinstallCall = mockExecFile.mock.calls.findIndex((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(markerWrite).toBeGreaterThanOrEqual(0);
+      expect(mockFsWriteFile.mock.invocationCallOrder[markerWrite]).toBeLessThan(
+        mockExecFile.mock.invocationCallOrder[postinstallCall],
+      );
+      const currentRename = mockFsRename.mock.calls.findIndex(([, dst]) => String(dst).endsWith('/current'));
+      const markerClear = mockFsRm.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      expect(markerClear).toBeGreaterThanOrEqual(0);
+      expect(mockFsRename.mock.invocationCallOrder[currentRename]).toBeLessThan(
+        mockFsRm.mock.invocationCallOrder[markerClear],
+      );
+    });
+
+    it('leaves active hook assets and pointers alone when acquiring the publication lock fails', async () => {
+      setupForDownload();
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+      mockHookAssetLock.mockRejectedValueOnce(new Error('hook asset lock busy'));
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockHookAssetLock).toHaveBeenCalledWith(tmpDir, expect.any(Function));
+      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
+      expect(fallback?.[2]).toMatchObject({
+        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
+      });
+      expect(pilotCommands().some((command) => command.includes('postinstall.js'))).toBe(false);
+      expect(pilotCommands()).not.toContain('restart-collector');
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
+    });
+
+    it('defers activation while the preceding postinstall marker is still fresh', async () => {
+      setupForDownload();
+      mockHookUpgradeInProgress.mockResolvedValue(true);
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockHookUpgradeInProgress).toHaveBeenCalledWith(tmpDir);
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
+      expect(mockFsRm).not.toHaveBeenCalledWith(expect.stringContaining('hook-upgrade-in-progress'), { force: true });
+    });
+
+    it('clears the hook upgrade marker when activation fails', async () => {
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsRename.mockImplementation((src: string) => {
+        if (String(src).endsWith('.candidate')) return Promise.reject(new Error('rename failed'));
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.2_bbb\n',
+      );
+    });
+
+    it('restores old hook assets and pointer under the same lock when activation fails', async () => {
+      setupForDownload();
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+      const readFile = mockFsReadFile.getMockImplementation()!;
+      mockFsReadFile.mockImplementation((file, encoding) => {
+        if (file.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
+        if (file.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        return readFile(file, encoding);
+      });
+      mockFsCopyFile.mockImplementation((file) => file.includes('1.0.2_bbb')
+        ? Promise.reject(new Error('copy failed'))
+        : Promise.resolve());
+
+      let lockHeld = false;
+      mockHookAssetLock.mockImplementation(async (_dir, body) => {
+        lockHeld = true;
+        try { return await body(); }
+        finally { lockHeld = false; }
+      });
+      const posts: string[] = [];
+      mockExecFile.mockImplementation(async (_node: string, args: string[]) => {
+        if (args[0]?.endsWith('postinstall.js')) {
+          expect(lockHeld).toBe(true);
+          posts.push(args[0]);
+        }
+        return { stdout: '', stderr: '' };
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(posts).toEqual([
+        expect.stringContaining('1.0.2_bbb.candidate'),
+        expect.stringContaining('1.0.1_aaa'),
+      ]);
+      expect(mockFsWriteFile.mock.calls.filter(([file]) => file.endsWith('/current.tmp'))).toEqual([
+        [expect.any(String), '1.0.2_bbb\n'],
+        [expect.any(String), '1.0.1_aaa\n'],
+      ]);
+    });
+
+    it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
+      const expOs = process.platform === 'win32' ? 'win' : process.platform;
+      const expArch = process.arch;
+      const supported = ['darwin', 'linux', 'win'].includes(expOs)
+        && ['x64', 'arm64'].includes(expArch)
+        && !(expOs === 'win' && expArch === 'arm64');
+      // On an unsupported host the updater keeps the system node; nothing to assert.
+      if (!supported) return;
+
+      const nodeArchive = `node-v22.22.2-${expOs}-${expArch}.${expOs === 'win' ? 'zip' : 'tar.gz'}`;
+      const modulesArchive = `node-modules-${expOs}-${expArch}.tar.gz`;
+      const nodeLeaf = expOs === 'win' ? 'node.exe' : 'node';
+      const nodeBin = `${tmpDir}/runtime/node-v22.22.2-${expOs}-${expArch}/bin/${nodeLeaf}`;
+
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest()))  // manifest
+        .mockResolvedValueOnce(makeResponseStream())              // package
+        .mockResolvedValueOnce(makeResponseStream())              // node archive
+        .mockResolvedValueOnce(makeResponseStream())              // node SHASUMS
+        .mockResolvedValueOnce(makeResponseStream())              // modules archive
+        .mockResolvedValueOnce(makeResponseStream());             // modules SHASUMS
+      mockComputeSha256.mockResolvedValue('SHA');
+
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockResolvedValue({ isDirectory: () => true });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('collector-daemon.js')) return Promise.resolve();
+        if (p.includes('updater-daemon.js')) return Promise.resolve();
+        if (p.includes('loongsuite-pilot.')) return Promise.resolve();
+        // Managed node binary + staged prebuilt modules exist after extraction.
+        if (p.includes('/runtime/') && (p.endsWith(`/${nodeLeaf}`))) return Promise.resolve();
+        if (p.includes('.pilot-nm-') && p.endsWith('node_modules')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('SHASUMS256')) {
+          return Promise.resolve(`SHA  ${nodeArchive}\nSHA  ${modulesArchive}\n` as unknown as string);
+        }
+        if (String(filePath).includes('/scripts/')) {
+          return Promise.resolve(Buffer.from('script') as unknown as string);
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      // node-bin pin repointed at the managed runtime (atomic tmp + rename).
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        nodeBin + '\n',
+      );
+      expect(mockFsRename).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        expect.stringContaining('node-bin'),
+      );
+
+      // Prebuilt modules were adopted, so npm install must be skipped.
+      const execCommands = mockExecFile.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(execCommands).not.toContain('npm');
+    });
+
+    it('rolls pointers back when pinning the managed node runtime fails', async () => {
+      const expOs = process.platform === 'win32' ? 'win' : process.platform;
+      const expArch = process.arch;
+      const supported = ['darwin', 'linux', 'win'].includes(expOs)
+        && ['x64', 'arch'].includes(expArch === 'arm64' ? 'arch' : expArch)
+        && !(expOs === 'win' && expArch === 'arm64');
+      // On an unsupported host the managed runtime is never adopted, so there is no
+      // pin step to fail; the ABI-consistency hazard this guards does not arise.
+      if (!supported) return;
+
+      const nodeArchive = `node-v22.22.2-${expOs}-${expArch}.${expOs === 'win' ? 'zip' : 'tar.gz'}`;
+      const modulesArchive = `node-modules-${expOs}-${expArch}.tar.gz`;
+      const nodeLeaf = expOs === 'win' ? 'node.exe' : 'node';
+
+      mockFetch
+        .mockResolvedValueOnce(makeResponseJson(makeManifest()))  // manifest
+        .mockResolvedValueOnce(makeResponseStream())              // package
+        .mockResolvedValueOnce(makeResponseStream())              // node archive
+        .mockResolvedValueOnce(makeResponseStream())              // node SHASUMS
+        .mockResolvedValueOnce(makeResponseStream())              // modules archive
+        .mockResolvedValueOnce(makeResponseStream());             // modules SHASUMS
+      mockComputeSha256.mockResolvedValue('SHA');
+
+      mockFsReaddir.mockImplementation((dir: string) => {
+        if (dir.includes('download-tmp')) return Promise.resolve(['loongsuite-pilot']);
+        return Promise.resolve([]);
+      });
+      mockFsStat.mockResolvedValue({ isDirectory: () => true });
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('collector-daemon.js')) return Promise.resolve();
+        if (p.includes('updater-daemon.js')) return Promise.resolve();
+        if (p.includes('loongsuite-pilot.')) return Promise.resolve();
+        if (p.includes('/runtime/') && p.endsWith(`/${nodeLeaf}`)) return Promise.resolve();
+        if (p.includes('.pilot-nm-') && p.endsWith('node_modules')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsReadFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('SHASUMS256')) {
+          return Promise.resolve(`SHA  ${nodeArchive}\nSHA  ${modulesArchive}\n` as unknown as string);
+        }
+        if (String(filePath).endsWith('/current')) return Promise.resolve('1.0.1_aaa\n' as unknown as string);
+        if (String(filePath).endsWith('/previous')) return Promise.resolve('1.0.0_zzz\n' as unknown as string);
+        if (String(filePath).endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n' as unknown as string);
+        if (String(filePath).includes('/scripts/')) {
+          return Promise.resolve(Buffer.from('script') as unknown as string);
+        }
+        return Promise.reject(new Error('ENOENT'));
+      });
+      // The managed runtime is adopted, but repointing the CLI wrapper fails.
+      mockFsWriteFile.mockImplementation((filePath: string) => {
+        if (String(filePath).includes('node-bin.tmp')) {
+          return Promise.reject(new Error('EACCES: pin dir not writable'));
+        }
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      // The pin was attempted (managed runtime adopted)...
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('node-bin.tmp'),
+        expect.any(String),
+      );
+      // ...and because it failed, the previous pointers were restored instead of
+      // leaving the new (managed-ABI) version active on the old system-node pin.
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.1_aaa\n',
+      );
+      expect(mockFsWriteFile).toHaveBeenCalledWith(
+        expect.stringContaining('/previous.tmp'),
+        '1.0.0_zzz\n',
+      );
+      // The upgrade must not report success: no collector restart was executed.
+      const execCommands = mockExecFile.mock.calls.map((c: unknown[]) => String(c[0]));
+      expect(execCommands).not.toContain('npm');
     });
 
     it('syncs installed scripts after switching the current pointer', async () => {
@@ -405,6 +962,40 @@ describe('Updater', () => {
         expect.stringContaining('/versions/1.0.1_aaa/scripts/loongsuite-pilot.sh'),
         expect.stringMatching(/\.local\/bin\/loongsuite-pilot\.tmp$/),
       );
+    });
+
+    it('syncs Windows CLI as -service.ps1 and removes legacy loongsuite-pilot.ps1', async () => {
+      const realPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+      try {
+        expect(buildPaths(tmpDir).loongsuitePilotBin).toMatch(/loongsuite-pilot-service\.ps1$/);
+
+        setupForDownload();
+        mockFsAccess.mockImplementation((p: string) => {
+          if (p.includes('package.json')) return Promise.resolve();
+          if (p.includes('dist/index.js')) return Promise.resolve();
+          if (p.includes('dist/updater/index.js')) return Promise.resolve();
+          if (p.includes('postinstall.js')) return Promise.reject(new Error('ENOENT'));
+          if (p.includes('collector-daemon.js')) return Promise.resolve();
+          if (p.includes('updater-daemon.js')) return Promise.resolve();
+          if (p.includes('loongsuite-pilot.ps1')) return Promise.resolve();
+          return Promise.reject(new Error('ENOENT'));
+        });
+
+        const updater = new Updater(makeConfig(), tmpDir);
+        await updater.check();
+
+        expect(mockFsCopyFile).toHaveBeenCalledWith(
+          expect.stringContaining('/scripts/loongsuite-pilot.ps1'),
+          expect.stringMatching(/loongsuite-pilot-service\.ps1\.tmp$/),
+        );
+        expect(mockFsRm).toHaveBeenCalledWith(
+          expect.stringMatching(/[/\\]loongsuite-pilot\.ps1$/),
+          expect.objectContaining({ force: true }),
+        );
+      } finally {
+        Object.defineProperty(process, 'platform', { configurable: true, value: realPlatform });
+      }
     });
 
     it('updates previous pointer when upgrading', async () => {
@@ -497,7 +1088,7 @@ describe('Updater', () => {
         ([p]: [string]) => p.includes('/versions/1.0.0_old'),
       );
       const restartCallIndex = mockExecFile.mock.calls.findIndex(
-        ([cmd, args]: [string, string[]]) => String(cmd).includes('loongsuite-pilot') && args[0] === 'restart-collector',
+        (call: [string, string[]]) => pilotCommandArgs(call)[0] === 'restart-collector',
       );
       expect(mockFsRm.mock.invocationCallOrder[staleRmIndex]).toBeGreaterThan(
         mockExecFile.mock.invocationCallOrder[restartCallIndex],
@@ -591,44 +1182,391 @@ describe('Updater', () => {
       expect(rmCalls.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('does not start monitor when monitor was not already running', async () => {
+    it('restarts only the collector because the dashboard shares its lifecycle', async () => {
       setupForDownload();
       const updater = new Updater(makeConfig(), tmpDir);
       await updater.check();
 
-      const loongsuitePilotCalls = mockExecFile.mock.calls.filter(
-        ([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'),
-      );
-      expect(loongsuitePilotCalls.map(([, args]) => args)).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls.map(([, args]) => args)).not.toContainEqual(['monitor', 'start']);
+      const commandArgs = mockExecFile.mock.calls
+        .map((call: [string, string[]]) => pilotCommandArgs(call))
+        .filter(([command]: string[]) => [
+          'restart-collector', 'start-collector', 'schedule-updater-restart',
+          'restart-interceptor',
+        ].includes(command));
+      expect(commandArgs).toContainEqual([
+        'restart-collector', '--defer-updater-restart',
+      ]);
+      expect(commandArgs.flat()).not.toContain('restart-interceptor');
+      expect(commandArgs.flat()).not.toContain('start-interceptor');
+      expect(commandArgs).toContainEqual([
+        'schedule-updater-restart',
+      ]);
+      expect(commandArgs.flat()).not.toContain('monitor');
     });
 
-    it('restarts monitor after update when monitor was already running', async () => {
+    it('recovers a timed-out restart with the start-only command before reporting success', async () => {
       setupForDownload();
-      const realKill = process.kill;
-      const killSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number, signal?: NodeJS.Signals | number) => {
-        if (pid === 12345 && signal === 0) return true;
-        throw new Error('not running');
-      }) as typeof process.kill);
-      mockFsReadFile.mockImplementation((filePath: string) => {
-        if (filePath.endsWith('/loongsuite-pilot-monitor.pid')) return Promise.resolve('12345\n');
-        if (filePath.endsWith('/loongsuite-pilot-dashboard.pid')) return Promise.reject(new Error('ENOENT'));
-        if (filePath.includes('/scripts/')) return Promise.resolve(Buffer.from('script'));
-        return Promise.reject(new Error('ENOENT'));
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          const error = new Error('Command timed out');
+          (error as any).killed = true;
+          return Promise.reject(error);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      const commands = pilotCommands();
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('allows a full health window after timed-out restart recovery', async () => {
+      setupForDownload();
+      const recoveryStartedAt = Date.now();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
+        if (!String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve({});
+        if (Date.now() - recoveryStartedAt < 29_500) return Promise.resolve(null);
+        return Promise.resolve({
+          status: 'active',
+          packageVersion: '1.0.2',
+          gitCommit: 'bbb',
+          pid: process.pid,
+          updatedAt: new Date().toISOString(),
+        });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      expect(metrics.writeEvent).toHaveBeenCalledWith('collector_restarted', {
+        latest_version: '1.0.2',
+      });
+      expect((updater as any).consecutiveFailures).toBe(0);
+    });
+
+    it('does not report success when Windows start-only returns Unknown command', async () => {
+      setupForDownload();
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command timed out'), { killed: true }));
+        }
+        if (args.includes('start-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            stdout: 'Unknown command: start-collector',
+            stderr: '',
+            code: 1,
+            killed: false,
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+
+      await updater.check();
+
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
+      );
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure',
+        expect.objectContaining({
+          error: expect.stringContaining('stdout="Unknown command: start-collector"'),
+        }),
+      );
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+
+    it('does not report restart success or run GC when collector health never appears', async () => {
+      setupForDownload();
+      mockReadJsonFile.mockImplementation((filePath: string) => {
+        if (isInterceptorRuntimePath(filePath)) return Promise.resolve(healthyInterceptorRuntime());
+        if (String(filePath).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
+      });
+      const metrics = {
+        writeEvent: vi.fn().mockResolvedValue(undefined),
+        writeAlarm: vi.fn().mockResolvedValue(undefined),
+      };
+      const updater = new Updater(makeConfig(), tmpDir);
+      updater.setMetrics(metrics as any);
+      const gc = vi.spyOn(updater as any, 'gcOldVersions');
+
+      const checkPromise = updater.check();
+      await vi.runAllTimersAsync();
+      await checkPromise;
+
+      const commands = pilotCommands();
+      expect(commands).toContain('restart-collector');
+      expect(commands).toContain('start-collector');
+      expect(metrics.writeEvent).not.toHaveBeenCalledWith(
+        'collector_restarted', expect.anything(),
+      );
+      expect(metrics.writeEvent).toHaveBeenCalledWith(
+        'update_failure', expect.objectContaining({ consecutive_failures: 1 }),
+      );
+      expect(gc).not.toHaveBeenCalled();
+      expect((updater as any).consecutiveFailures).toBe(1);
+    });
+  });
+
+  describe('collector health validation', () => {
+    it('requires the target version, a fresh heartbeat, and a new PID for rebuilds', () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const now = Date.now();
+      const runtime = {
+        status: 'active',
+        packageVersion: '1.0.2',
+        gitCommit: 'bbb',
+        pid: process.pid,
+        updatedAt: new Date(now).toISOString(),
+      };
+
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, packageVersion: '1.0.1' }, '1.0.2', now, null,
+      )).toContain('expected 1.0.2');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, gitCommit: 'aaa' }, '1.0.2', now, null, 'bbb',
+      )).toContain('expected bbb');
+      expect((updater as any).collectorHealthFailure(
+        { ...runtime, updatedAt: new Date(now - 1).toISOString() }, '1.0.2', now, null,
+      )).toBe('runtime record predates restart');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, process.pid,
+      )).toBe('collector PID did not change');
+      expect((updater as any).collectorHealthFailure(
+        runtime, '1.0.2', now, null,
+      )).toBe('');
+    });
+  });
+
+  describe('collector command invocation', () => {
+    it('passes Windows commands after -File and defers the updater handoff', async () => {
+      const realPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      try {
+        const updater = new Updater(makeConfig(), tmpDir);
+        await (updater as any).runCollectorCommand('restart-collector');
+        await (updater as any).runCollectorCommand('start-collector');
+        await (updater as any).runCollectorCommand('schedule-updater-restart');
+
+        expect(mockExecFile.mock.calls).toHaveLength(3);
+        expect(mockExecFile.mock.calls.map((call: [string, string[]]) => call[0]))
+          .toEqual(['powershell.exe', 'powershell.exe', 'powershell.exe']);
+        expect(mockExecFile.mock.calls.map((call: [string, string[]]) => pilotCommandArgs(call)))
+          .toEqual([
+            ['restart-collector', '--defer-updater-restart'],
+            ['start-collector'],
+            ['schedule-updater-restart'],
+          ]);
+      } finally {
+        Object.defineProperty(process, 'platform', { value: realPlatform });
+      }
+    });
+
+    it('preserves child-process diagnostics when start-only recovery fails', async () => {
+      const restartError = Object.assign(new Error('restart timed out'), {
+        stdout: 'restart output',
+        killed: true,
+        signal: 'SIGTERM',
+      });
+      const recoveryError = Object.assign(new Error('start failed'), {
+        stdout: 'start output',
+        stderr: 'permission denied',
+        code: 1,
+        killed: false,
+      });
+      mockExecFile.mockRejectedValueOnce(recoveryError);
+      const updater = new Updater(makeConfig(), tmpDir);
+
+      await expect((updater as any).startCollectorForRecovery(restartError)).rejects.toThrow(
+        /stdout="restart output".*killed=true.*signal=SIGTERM.*stdout="start output".*stderr="permission denied".*code=1.*killed=false/,
+      );
+    });
+  });
+
+  describe('restartCollector failure reporting', () => {
+    function attachMetrics(updater: Updater): unknown[][] {
+      const calls: unknown[][] = [];
+      updater.setMetrics({
+        writeAlarm: (...args: unknown[]) => { calls.push(args); return Promise.resolve(); },
+        writeEvent: () => Promise.resolve(),
+      } as never);
+      return calls;
+    }
+
+    function failRestartWith(err: unknown): void {
+      mockExecFile.mockImplementation((cmd: string, args: string[]) => {
+        if (String(cmd).includes('loongsuite-pilot') || (args ?? []).includes('restart-collector') || (args ?? []).includes('start-collector')) {
+          return Promise.reject(err);
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+    }
+
+    it('alarms with the stage the service script recorded when recovery also fails', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'register-denied',
+            init_type: 'taskscheduler',
+            detail: 'self-heal failed: Access is denied.',
+            diag: { definition_owner: 'BUILTIN\\Administrators' },
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) {
+          return Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(Object.assign(new Error('Command failed'), {
+        code: 1,
+        stdout: '[restart-failure] target=collector stage=register-denied\n',
+        stderr: 'Service manager failed to restart collector\n',
+      }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=register-denied');
+      expect(message).toContain('reason="self-heal failed: Access is denied."');
+      expect(message).toContain('definition_owner="BUILTIN\\Administrators"');
+      expect(message).toContain('stdout="[restart-failure] target=collector stage=register-denied"');
+    });
+
+    it('does not attribute an older breadcrumb to this attempt', async () => {
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000) - 900,
+            target: 'collector',
+            stage: 'register-denied',
+            detail: 'stale evidence from fifteen minutes ago',
+          });
+        }
+        return Promise.resolve({});
+      });
+      failRestartWith(new Error('spawn ENOENT'));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=unknown');
+      expect(message).not.toContain('register-denied');
+      expect(message).not.toContain('stale evidence');
+    });
+
+    it('writes a timeout breadcrumb when restart-collector is killed', async () => {
+      failRestartWith(Object.assign(new Error('Command failed'), { killed: true, signal: 'SIGTERM' }));
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await expect((updater as any).restartCollector('1.0.2', false)).rejects.toThrow();
+
+      const payload = mockWriteFileSync.mock.calls
+        .map((call) => String(call[1] ?? ''))
+        .find((text) => text.includes('"stage"'));
+      expect(payload).toBeTruthy();
+      expect(JSON.parse(payload as string).stage).toBe('timeout');
+      expect(JSON.parse(payload as string).target).toBe('collector');
+      const message = (alarms[0] as [string, string, string])[2];
+      expect(message).toContain('stage=timeout');
+    });
+
+    it('stays silent when the restart succeeds', async () => {
+      const updater = new Updater(makeConfig(), tmpDir);
+      const alarms = attachMetrics(updater);
+      await (updater as any).restartCollector('1.0.2', false);
+      expect(alarms).toEqual([]);
+    });
+
+    it('alarms with the first restart stage when start-collector succeeds but health never appears', async () => {
+      mockExecFile.mockImplementation((_cmd: string, args: string[]) => {
+        if ((args ?? []).includes('restart-collector')) {
+          return Promise.reject(Object.assign(new Error('Command failed'), {
+            code: 1,
+            stdout: '[restart-failure] target=collector stage=task-missing\n',
+            stderr: 'Service manager failed to restart collector\n',
+          }));
+        }
+        return Promise.resolve({ stdout: '', stderr: '' });
+      });
+      mockReadJsonFile.mockImplementation((file: string) => {
+        if (String(file).includes('last-restart-failure-collector.json')) {
+          return Promise.resolve({
+            schema: 1,
+            ts: Math.floor(Date.now() / 1000),
+            target: 'collector',
+            stage: 'task-missing',
+            init_type: 'taskscheduler',
+            detail: 'scheduled task is not registered',
+            diag: {},
+          });
+        }
+        if (String(file).endsWith('/logs/runtime.json')) return Promise.resolve(null);
+        return Promise.resolve({});
       });
 
       const updater = new Updater(makeConfig(), tmpDir);
-      await updater.check();
+      const alarms = attachMetrics(updater);
+      const pending = (updater as any).restartCollector('1.0.2', false);
+      const assertion = expect(pending).rejects.toThrow(/did not become healthy/);
+      await vi.runAllTimersAsync();
+      await assertion;
 
-      const loongsuitePilotCalls = mockExecFile.mock.calls
-        .filter(([cmd]: [string]) => String(cmd).includes('loongsuite-pilot'))
-        .map(([, args]) => args);
-      expect(loongsuitePilotCalls).toContainEqual(['restart-collector']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'stop']);
-      expect(loongsuitePilotCalls).toContainEqual(['monitor', 'start']);
-
-      killSpy.mockRestore();
-      process.kill = realKill;
+      expect(alarms).toHaveLength(1);
+      const [type, level, message] = alarms[0] as [string, string, string];
+      expect(type).toBe('UPDATER_FAILURE_ALARM');
+      expect(level).toBe('2');
+      expect(message).toContain('stage=task-missing');
+      expect(message).toContain('health check failed after start-collector recovery');
+      expect(message).toContain('runtime record not found');
     });
   });
 
@@ -643,6 +1581,22 @@ describe('Updater', () => {
       await updater.check();
 
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('fetches the manifest once when two checks overlap', async () => {
+      let releaseFetch: (value: Response) => void = () => {};
+      mockFetch.mockImplementation(() => new Promise((resolve) => {
+        releaseFetch = resolve;
+      }));
+      const updater = new Updater(makeConfig(), tmpDir);
+      const first = updater.check();
+      const second = updater.check();
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      releaseFetch(makeResponseJson(null, 500));
+      await Promise.all([first, second]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect((updater as any).checking).toBe(false);
     });
 
     it('resets checking flag after check completes', async () => {
@@ -684,6 +1638,19 @@ describe('Updater', () => {
         return Promise.reject(new Error('ENOENT'));
       });
       mockFsAccess.mockResolvedValue(undefined);
+      mockReadJsonFile.mockImplementation((filePath: string) => (
+        isInterceptorRuntimePath(filePath)
+          ? Promise.resolve(healthyInterceptorRuntime({ packageVersion: '1.0.2', version: '1.0.2' }))
+          : String(filePath).endsWith('/logs/runtime.json')
+          ? Promise.resolve({
+            status: 'active',
+            packageVersion: '1.0.2',
+            gitCommit: 'aaa',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          })
+          : Promise.resolve({})
+      ));
 
       const updater = new Updater(makeConfig(), tmpDir);
 

@@ -10,6 +10,7 @@ import { QoderApiInput } from './qoder-api-input.js';
 import { QoderApiSlsSender } from '../../flusher/qoder-api/qoder-api-sls-sender.js';
 import { createLogger, type BoundLogger } from '../../../utils/logger.js';
 import { persistFailedLogs } from '../../../flushers/sls-transport.js';
+import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const DEFAULT_INTERVAL_SECONDS = 300;
 const DEFAULT_BACKFILL_DAYS = 7;
@@ -38,7 +39,7 @@ export class QoderApiPipeline implements Pipeline {
   private running = false;
   private polling = false;
 
-  constructor(opts: QoderApiPipelineOptions) {
+  constructor(private readonly opts: QoderApiPipelineOptions) {
     this.config = opts.config;
     this.stateDir = opts.stateDir;
     this.failedLogDir = opts.failedLogDir;
@@ -81,6 +82,8 @@ export class QoderApiPipeline implements Pipeline {
       configName,
       failedLogDir: this.failedLogDir,
       dataDir: this.dataDir,
+      hostSn: this.opts.hostSn,
+      hostIdentityTags: this.opts.hostIdentityTags,
     });
 
     // 4. Start sender flush interval
@@ -150,7 +153,8 @@ export class QoderApiPipeline implements Pipeline {
       if (rows.length === 0) return;
 
       // 3. Enqueue into sender
-      const accepted = this.sender.enqueue(rows);
+      const allowed = this.opts.workspacePolicy?.filter(rows, 'qoder-api') ?? rows;
+      const accepted = allowed.length === 0 || this.sender.enqueue(allowed);
 
       if (accepted) {
         // 4a. Delivery accepted — advance the collection window.
@@ -160,16 +164,24 @@ export class QoderApiPipeline implements Pipeline {
         await this.input.confirmCycle();
       } else {
         // 4b. Buffer full — do NOT advance the window so data is re-collected
-        //     next cycle. Persist the dropped rows to failed-log for manual recovery.
+        //     next cycle. Persist only bounded failure metadata for diagnosis.
         this.logger.warn('sender buffer full, persisting rows to failed-log', {
           configName: this.config.configName,
           droppedRows: rows.length,
           bufferSize: this.sender.bufferSize(),
         });
+        const flusherConfig = this.config.flushers[0];
         await persistFailedLogs(
           this.failedLogDir,
           this.config.configName,
-          { __logs__: rows },
+          {
+            mode: 'webtracking',
+            project: flusherConfig.Project,
+            logstore: flusherConfig.Logstore,
+            kind: this.config.configName,
+            batchCount: rows.length,
+            batchBytes: estimateStringRecordBytes(rows),
+          },
           new Error('sender buffer full, window not advanced'),
         );
       }

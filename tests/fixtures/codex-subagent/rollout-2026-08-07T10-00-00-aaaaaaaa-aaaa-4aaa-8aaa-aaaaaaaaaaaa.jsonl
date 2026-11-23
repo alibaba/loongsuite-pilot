@@ -1,0 +1,14 @@
+{"timestamp":"2026-08-07T02:00:00.000Z","type":"session_meta","payload":{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","session_id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","timestamp":"2026-08-07T02:00:00.000Z","cwd":"/tmp/codex-subagent-fixture","originator":"Codex Desktop","source":"vscode","thread_source":"user","model_provider":"openai"}}
+{"timestamp":"2026-08-07T02:00:01.000Z","type":"turn_context","payload":{"turn_id":"parent-turn-1","model":"gpt-test","cwd":"/tmp/codex-subagent-fixture"}}
+{"timestamp":"2026-08-07T02:00:02.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"parent-turn-1"}}
+{"timestamp":"2026-08-07T02:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"delegate a synthetic task"}]}}
+{"timestamp":"2026-08-07T02:00:04.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call-subagent-1","name":"spawn_agent","arguments":"{\"task_name\":\"fixture_child\",\"message\":\"redacted\"}"}}
+{"timestamp":"2026-08-07T02:00:04.050Z","type":"response_item","payload":{"type":"function_call","call_id":"call-subagent-2","name":"spawn_agent","arguments":"{\"task_name\":\"fixture_child_2\",\"message\":\"redacted\"}"}}
+{"timestamp":"2026-08-07T02:00:04.100Z","type":"response_item","payload":{"type":"function_call","call_id":"call-subagent-3","name":"spawn_agent","arguments":"{\"task_name\":\"fixture_child_3\",\"message\":\"redacted\"}"}}
+{"timestamp":"2026-08-07T02:00:04.150Z","type":"response_item","payload":{"type":"function_call","call_id":"call-subagent-4","name":"spawn_agent","arguments":"{\"task_name\":\"fixture_child_4\",\"message\":\"redacted\"}"}}
+{"timestamp":"2026-08-07T02:00:04.200Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-subagent-1","output":"{\"task_name\":\"/root/fixture_child\"}"}}
+{"timestamp":"2026-08-07T02:00:04.250Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-subagent-2","output":"{\"task_name\":\"/root/fixture_child_2\"}"}}
+{"timestamp":"2026-08-07T02:00:04.300Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-subagent-3","output":"{\"task_name\":\"/root/fixture_child_3\"}"}}
+{"timestamp":"2026-08-07T02:00:04.350Z","type":"response_item","payload":{"type":"function_call_output","call_id":"call-subagent-4","output":"{\"task_name\":\"/root/fixture_child_4\"}"}}
+{"timestamp":"2026-08-07T02:00:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"output_tokens":10,"cached_input_tokens":0,"total_tokens":110}}}}
+{"timestamp":"2026-08-07T02:00:06.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"parent-turn-1","last_agent_message":"delegated"}}

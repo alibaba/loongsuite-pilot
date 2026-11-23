@@ -11,15 +11,14 @@ BOOTSTRAP_DIR="$CACHE_DIR/bin"
 PACKAGE_DIR="$CACHE_DIR/package"
 PID_FILE="$DATA_DIR/loongsuite-pilot.pid"
 UPDATER_PID_FILE="$DATA_DIR/loongsuite-pilot-updater.pid"
+LEGACY_MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
+LEGACY_DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
 LOG_DIR="$DATA_DIR/logs"
 LOG_FILE="$LOG_DIR/loongsuite-pilot-service.log"
 UPDATER_LOG_FILE="$LOG_DIR/loongsuite-pilot-updater.log"
-MONITOR_LOG_FILE="$LOG_DIR/loongsuite-pilot-monitor-process.log"
-DASHBOARD_LOG_FILE="$LOG_DIR/loongsuite-pilot-dashboard.log"
 CONFIG_FILE="$DATA_DIR/config.json"
-MONITOR_PID_FILE="$DATA_DIR/loongsuite-pilot-monitor.pid"
-DASHBOARD_PID_FILE="$DATA_DIR/loongsuite-pilot-dashboard.pid"
-MONITOR_DATA_DIR="$LOG_DIR/process-monitor"
+SPAN_ATTR_FILE="$DATA_DIR/span-attributes.json"
+OPEN_SOURCE_INSTALLER_URL="https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com/loongsuite-pilot/installer.sh"
 
 SERVICE_LABEL="com.loongsuite-pilot"
 UPDATER_LABEL="com.loongsuite-pilot.updater"
@@ -28,21 +27,45 @@ UPDATER_PLIST="$HOME/Library/LaunchAgents/${UPDATER_LABEL}.plist"
 SYSTEMD_SYSTEM_UNIT_DIR="/etc/systemd/system"
 LOONGSUITE_PILOT_BIN="$HOME/.local/bin/loongsuite-pilot"
 INIT_TYPE_FILE="$DATA_DIR/init-type"
+CURRENT_USER_ID="$(id -u)"
 
 validate_current_user() {
     whoami
 }
 
-check_sudo_access() {
+has_sudo_interactive() {
     [ "$(id -u)" -eq 0 ] && return 0
     if sudo -n true 2>/dev/null; then
         return 0
     elif sudo -v 2>/dev/null; then
         return 0
     else
-        echo "⚠️  No sudo access — cannot register system-level service." >&2
-        echo "   Falling back to user-level systemd service." >&2
         return 1
+    fi
+}
+
+has_sudo_noninteractive() {
+    [ "$(id -u)" -eq 0 ] && return 0
+    sudo -n true 2>/dev/null
+}
+
+# Run a privileged command, escalating only when needed.
+# As root: exec directly — sudo may be absent (e.g. container images) and is
+#   redundant anyway. As non-root: prefix with sudo (interactive escalation OK).
+maybe_sudo() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# Non-interactive variant for read-only checks that must never block on a prompt.
+maybe_sudo_n() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo -n "$@"
     fi
 }
 
@@ -58,6 +81,230 @@ resolve_user_home() {
 ensure_dirs() {
     mkdir -p "$LOG_DIR"
     mkdir -p "$BOOTSTRAP_DIR"
+}
+
+read_init_type() {
+    if [ -f "$INIT_TYPE_FILE" ]; then
+        cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]'
+    fi
+}
+
+# ============================================================
+# Restart failure diagnostics
+#
+# Mirror of the Windows implementation in scripts/loongsuite-pilot.ps1: every
+# non-success exit of cmd_restart_collector / cmd_restart_updater names a stage, prints
+# the reason, and leaves a breadcrumb that the calling collector/updater reads
+# (src/utils/restart-breadcrumb.ts) to enrich its alarm message. Stage labels are shared
+# with the .ps1 verbatim -- they are aggregation keys in the alarm stream.
+# ============================================================
+restart_failure_file() {
+    echo "$LOG_DIR/last-restart-failure-$1.json"
+}
+
+# Cleared at the start of every attempt, so a file that is present always describes the
+# most recent one.
+clear_restart_failure() {
+    rm -f "$(restart_failure_file "$1")" 2>/dev/null || true
+}
+
+# Minimal JSON string escaping. Newlines and tabs become spaces first: the breadcrumb is
+# hand-written (no jq dependency on a customer box), and a raw newline inside a JSON
+# string is a parse error, which the reader would silently degrade to "no diagnostics".
+# Remaining C0 controls (notably ESC from colorized log tails) are stripped: they are
+# not valid in JSON strings unless written as \u00XX, and a raw 0x1B makes JSON.parse fail.
+json_escape() {
+    printf '%s' "$1" | tr '\n\r\t' '   ' | tr -d '\000-\010\013\014\016-\037' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# Prints one `key=value` line per fact. Read-only: diagnostics must not change the state
+# they describe.
+collect_restart_diag() {
+    local target="$1"
+    local pid_file log_file unit sys_unit label
+    local target_user init_type
+    target_user=$(whoami)
+    init_type=$(read_init_type)
+    if [ "$target" = "updater" ]; then
+        pid_file="$UPDATER_PID_FILE"
+        log_file="$UPDATER_LOG_FILE"
+        unit="loongsuite-pilot-updater.service"
+        sys_unit="loongsuite-pilot-updater-${target_user}.service"
+        label="$UPDATER_LABEL"
+    else
+        pid_file="$PID_FILE"
+        log_file="$LOG_FILE"
+        unit="loongsuite-pilot.service"
+        sys_unit="loongsuite-pilot-${target_user}.service"
+        label="$SERVICE_LABEL"
+    fi
+
+    echo "os=$(uname -s)"
+    echo "user=$target_user"
+
+    local pid
+    if [ -f "$pid_file" ]; then
+        pid=$(cat "$pid_file" 2>/dev/null | tr -d '[:space:]')
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            echo "pid_state=pid=$pid running"
+        else
+            echo "pid_state=pid=$pid not running"
+        fi
+    else
+        echo "pid_state=no pid file"
+    fi
+
+    case "$(uname -s)" in
+        Darwin)
+            if launchctl list "$label" >/dev/null 2>&1; then
+                echo "service_state=$label loaded"
+            else
+                echo "service_state=$label not loaded"
+            fi
+            # `|| true` on every probe: this file runs under `set -euo pipefail`, and a
+            # grep that finds nothing would otherwise abort the collection halfway and
+            # throw away the facts that come after it.
+            local last_exit
+            last_exit=$(launchctl list "$label" 2>/dev/null | grep LastExitStatus | tr -dc '0-9-') || true
+            [ -n "$last_exit" ] && echo "last_exit_status=$last_exit" || true
+            ;;
+        Linux)
+            if command -v systemctl >/dev/null 2>&1; then
+                echo "unit_state=user active=$(systemctl --user is-active "$unit" 2>&1 | head -1) enabled=$(systemctl --user is-enabled "$unit" 2>&1 | head -1)"
+                echo "system_unit_state=active=$(maybe_sudo_n systemctl is-active "$sys_unit" 2>&1 | head -1) enabled=$(maybe_sudo_n systemctl is-enabled "$sys_unit" 2>&1 | head -1)"
+                echo "unit_result=$(systemctl --user show -p Result -p ExecMainStatus "$unit" 2>/dev/null | tr '\n' ' ')"
+            else
+                echo "unit_state=systemctl not available"
+            fi
+            if [ -f "$HOME/.config/systemd/user/$unit" ]; then
+                echo "unit_file=$HOME/.config/systemd/user/$unit"
+            elif [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ]; then
+                echo "unit_file=$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit"
+            else
+                echo "unit_file=none found"
+            fi
+            ;;
+    esac
+
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || node_bin=""
+    if [ -n "$node_bin" ]; then
+        echo "node_bin=$node_bin"
+    else
+        echo "node_bin=not found"
+    fi
+
+    if [ -f "$log_file" ]; then
+        echo "log_tail=$(tail -n 3 "$log_file" 2>/dev/null | tr '\n\r\t' '   ' | cut -c1-300)"
+    fi
+}
+
+# write_restart_failure <target> <stage> <detail> [extra key=value ...]
+#
+# Prints everything to stderr first (the caller surfaces stderr in its error message)
+# and only then writes the file, so a write failure cannot cost us the diagnosis. The
+# whole body is best-effort: diagnostics must never become a new failure source.
+write_restart_failure() {
+    local target="$1"
+    local stage="$2"
+    local detail="$3"
+    shift 3
+
+    local init_type
+    init_type=$(read_init_type)
+
+    local diag_lines extra
+    diag_lines=$(collect_restart_diag "$target" 2>/dev/null || true)
+    for extra in "$@"; do
+        [ -n "$extra" ] && diag_lines="$diag_lines
+$extra" || true
+    done
+
+    echo "[restart-failure] target=$target stage=$stage init_type=$init_type" >&2
+    [ -n "$detail" ] && echo "[restart-failure] reason=$detail" >&2 || true
+    printf '%s\n' "$diag_lines" | while IFS= read -r line; do
+        [ -n "$line" ] && echo "[restart-failure] $line" >&2 || true
+    done
+
+    ensure_dirs 2>/dev/null || true
+    local file tmp key value first
+    file=$(restart_failure_file "$target")
+    tmp="$file.tmp"
+    first=1
+    {
+        printf '{\n'
+        printf '  "schema": 1,\n'
+        printf '  "ts": %s,\n' "$(date -u +%s)"
+        printf '  "target": "%s",\n' "$(json_escape "$target")"
+        printf '  "stage": "%s",\n' "$(json_escape "$stage")"
+        printf '  "init_type": "%s",\n' "$(json_escape "$init_type")"
+        printf '  "detail": "%s",\n' "$(json_escape "$detail")"
+        printf '  "diag": {\n'
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            key="${line%%=*}"
+            value="${line#*=}"
+            [ -z "$key" ] && continue
+            if [ "$first" -eq 1 ]; then first=0; else printf ',\n'; fi
+            printf '    "%s": "%s"' "$(json_escape "$key")" "$(json_escape "$value")"
+        done <<EOF
+$diag_lines
+EOF
+        printf '\n  }\n}\n'
+    } > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null || true
+}
+
+# Bounded waits, replacing a single check one second after asking the service manager to
+# start: one second is not always enough for node to publish its pid file, and a false
+# "not running" verdict used to end in an unexplained restart failure.
+#
+# Read-only: is_running deletes a pid file whose cmdline has not yet become
+# collector-daemon.js, and wait would then fire that up to timeout times. Probe with
+# kill -0 / process_matches_installed_entry; stale-pid cleanup stays in stop/status.
+wait_for_collector_process() {
+    local timeout="${1:-15}"
+    local i=0
+    local pid=""
+    while [ "$i" -lt "$timeout" ]; do
+        if [ -f "$PID_FILE" ]; then
+            pid=$(cat "$PID_FILE" 2>/dev/null || true)
+            if process_matches_installed_entry "$pid" collector; then
+                return 0
+            fi
+        fi
+        pid=$(find_installed_collector_pid)
+        if process_matches_installed_entry "$pid" collector; then
+            return 0
+        fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+wait_for_updater_process() {
+    local timeout="${1:-15}"
+    local exclude_pid="${2:-}"
+    local i=0
+    local pid=""
+    while [ "$i" -lt "$timeout" ]; do
+        # Scoped to this install, unlike the shared liveness probe below, which ends in a
+        # machine-wide `pgrep -f loongsuite-pilot/bin/updater-daemon`: another data dir's
+        # daemon would confirm a restart that never happened. Measured -- a scratch-HOME run
+        # whose registration silently did nothing still reported "self-healed", because the
+        # real updater of this account was running. find_current_user_processes matches this
+        # install's exact bootstrap path, so it cannot be fooled that way.
+        # exclude_pid is the process that was alive before stop: SIGTERM may not have
+        # finished, and accepting that pid would report a successful restart of the old one.
+        pid=$(find_current_user_processes updater | head -n 1 || true)
+        if [ -z "$pid" ]; then
+            pid=$(find_current_user_processes updater-wrapper | head -n 1 || true)
+        fi
+        if [ -n "$pid" ] && [ "$pid" != "$exclude_pid" ]; then return 0; fi
+        sleep 1
+        i=$((i + 1))
+    done
+    return 1
 }
 
 sync_bootstrap_scripts() {
@@ -90,24 +337,234 @@ sync_installed_scripts_from_version() {
     mv -f "$LOONGSUITE_PILOT_BIN.tmp" "$LOONGSUITE_PILOT_BIN"
 }
 
+process_matches_installed_entry() {
+    local pid="$1"
+    local kind="$2"
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
+    local expected_entry=""
+    local expected_arg=""
+    local expected_process=""
+    case "$kind" in
+        collector)
+            expected_entry="$BOOTSTRAP_DIR/collector-daemon.js"
+            expected_process=node
+            ;;
+        updater)
+            expected_entry="$BOOTSTRAP_DIR/updater-daemon.js"
+            expected_process=node
+            ;;
+        collector-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run
+            expected_process=shell
+            ;;
+        updater-wrapper)
+            expected_entry="$LOONGSUITE_PILOT_BIN"
+            expected_arg=run-updater
+            expected_process=shell
+            ;;
+        *) return 1 ;;
+    esac
+
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    local process_name
+    if [ -r "/proc/$pid/status" ] && [ -r "/proc/$pid/comm" ]; then
+        # Linux procfs already contains the fields that ps reads. Read them in
+        # this shell so a large set of Node candidates does not spawn two ps
+        # processes per PID.
+        local status_key=""
+        local process_uid=""
+        while read -r status_key process_uid _; do
+            if [ "$status_key" = "Uid:" ]; then
+                break
+            fi
+            process_uid=""
+        done < "/proc/$pid/status"
+        [ "$process_uid" = "$current_user_id" ] || return 1
+        IFS= read -r process_name < "/proc/$pid/comm" || return 1
+    else
+        # macOS has no procfs. Keep the existing ps fallback, which also covers
+        # Linux installations where procfs is unavailable or restricted.
+        [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$current_user_id" ] || return 1
+        process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    fi
+    process_name="${process_name##*/}"
+    # Node 23+ sets /proc/pid/comm to MainThread, so ucomm is no longer "node".
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh|shell:loongsuite-pilot) ;;
+        *) return 1 ;;
+    esac
+
+    # Linux exposes the real NUL-separated argv. Require the bootstrap script
+    # to be Node argv[1] (or the installed shell script + exact subcommand), so
+    # a command which merely mentions the path cannot be mistaken for Pilot.
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_arg=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            case "$arg_index" in
+                1) argv_entry="$arg" ;;
+                2) argv_arg="$arg" ;;
+            esac
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "$argv_entry" = "$expected_entry" ] || return 1
+        if [ -n "$expected_arg" ]; then
+            [ "$argv_arg" = "$expected_arg" ] && [ "$argv_count" -eq 3 ]
+        else
+            [ "$argv_count" -eq 2 ]
+        fi
+        return
+    fi
+
+    # macOS has no /proc cmdline. Pair the exact final argv text with the
+    # process-name and uid checks above; -ww prevents path truncation.
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    local expected_suffix="$expected_entry"
+    [ -n "$expected_arg" ] && expected_suffix="$expected_suffix $expected_arg"
+    if [ "$expected_process" = shell ] && [ "$command_line" = "$expected_suffix" ]; then
+        return 0
+    fi
+    [[ "$command_line" == *" $expected_suffix" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#expected_suffix}-1}"
+    local command_executable="${command_prefix##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+find_current_user_processes() {
+    local kind="$1"
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
+    local pid=""
+    local process_name=""
+    while read -r pid process_name; do
+        process_name="${process_name##*/}"
+        case "$kind:$process_name" in
+            collector:node|collector:nodejs|collector:MainThread|updater:node|updater:nodejs|updater:MainThread|collector-wrapper:bash|collector-wrapper:sh|collector-wrapper:zsh|collector-wrapper:loongsuite-pilot|updater-wrapper:bash|updater-wrapper:sh|updater-wrapper:zsh|updater-wrapper:loongsuite-pilot) ;;
+            *) continue ;;
+        esac
+        process_matches_installed_entry "$pid" "$kind" && echo "$pid"
+    done < <(ps -U "$current_user_id" -o pid= -o ucomm= 2>/dev/null || true)
+}
+
+# Enumerate collector daemons and their shell wrappers from one process-table
+# snapshot. The generic helper above remains useful when callers need one kind,
+# but cleanup must not scan the same large process table once per kind.
+find_current_user_collector_processes() {
+    local current_user_id="${CURRENT_USER_ID:-$(id -u)}"
+    local pid=""
+    local process_name=""
+    local kind=""
+    while read -r pid process_name; do
+        process_name="${process_name##*/}"
+        case "$process_name" in
+            node|nodejs|MainThread) kind=collector ;;
+            bash|sh|zsh|loongsuite-pilot) kind=collector-wrapper ;;
+            *) continue ;;
+        esac
+        process_matches_installed_entry "$pid" "$kind" && printf '%s %s\n' "$pid" "$kind"
+    done < <(ps -U "$current_user_id" -o pid= -o ucomm= 2>/dev/null || true)
+}
+
+find_installed_collector_pid() {
+    find_current_user_processes collector | head -n 1
+}
+
 is_running() {
+    local pid=""
     if [ -f "$PID_FILE" ]; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
+        pid=$(cat "$PID_FILE" 2>/dev/null || true)
+        if process_matches_installed_entry "$pid" collector; then
             return 0
         fi
         rm -f "$PID_FILE"
     fi
+
+    # launchd may briefly start a duplicate wrapper which overwrites the PID
+    # file before the collector's single-instance lock makes it exit. Recover
+    # only the current user's process whose final argument is this install's
+    # exact bootstrap path; another checkout or a shell inspecting the path
+    # cannot match this suffix.
+    pid=$(find_installed_collector_pid)
+    if process_matches_installed_entry "$pid" collector; then
+        local pid_tmp="$PID_FILE.tmp.$$"
+        printf '%s\n' "$pid" > "$pid_tmp"
+        mv -f "$pid_tmp" "$PID_FILE"
+        return 0
+    fi
     return 1
+}
+
+stop_installed_collector_processes() {
+    local attempt
+    local pid
+    local matched
+    for attempt in 1 2 3 4 5; do
+        matched=false
+        local kind
+        while read -r pid kind; do
+            [ -n "$pid" ] || continue
+            if process_matches_installed_entry "$pid" "$kind"; then
+                matched=true
+                kill "$pid" 2>/dev/null || true
+            fi
+        done < <(find_current_user_collector_processes | sort -u)
+        [ "$matched" = true ] || return 0
+        sleep 0.2
+    done
+}
+
+stop_installed_updater_processes() {
+    local pid
+    local kind
+    local pids=""
+    while read -r pid kind; do
+        [ -n "$pid" ] || continue
+        if process_matches_installed_entry "$pid" "$kind"; then
+            kill "$pid" 2>/dev/null || true
+            pids="$pids $pid"
+        fi
+    done < <({
+        find_current_user_processes updater-wrapper | while read -r pid; do echo "$pid updater-wrapper"; done
+        find_current_user_processes updater | while read -r pid; do echo "$pid updater"; done
+    } | sort -u)
+
+    [ -n "$pids" ] || return 0
+
+    local count=0
+    local still
+    local p
+    while [ "$count" -lt 10 ]; do
+        still=false
+        for p in $pids; do
+            if kill -0 "$p" 2>/dev/null; then
+                still=true
+            fi
+        done
+        [ "$still" = true ] || return 0
+        sleep 1
+        count=$((count + 1))
+    done
+    for p in $pids; do
+        kill -9 "$p" 2>/dev/null || true
+    done
 }
 
 is_pid_file_running() {
     local pid_file="$1"
+    local kind="$2"
     if [ -f "$pid_file" ]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             return 0
         fi
         rm -f "$pid_file"
@@ -117,20 +574,91 @@ is_pid_file_running() {
 
 stop_pid_file() {
     local pid_file="$1"
-    if is_pid_file_running "$pid_file"; then
+    local kind="$2"
+    if is_pid_file_running "$pid_file" "$kind"; then
         local pid
         pid=$(cat "$pid_file")
-        kill "$pid" 2>/dev/null || true
+        process_matches_installed_entry "$pid" "$kind" && kill "$pid" 2>/dev/null || true
         local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+        while process_matches_installed_entry "$pid" "$kind" && [ $count -lt 10 ]; do
             sleep 1
             count=$((count + 1))
         done
-        if kill -0 "$pid" 2>/dev/null; then
+        if process_matches_installed_entry "$pid" "$kind"; then
             kill -9 "$pid" 2>/dev/null || true
         fi
     fi
     rm -f "$pid_file"
+}
+
+# One-way migration cleanup for releases that managed the old sampler and
+# dashboard as standalone processes. A stale PID can be reused, so a PID-file
+# process is stopped only when its command line still names the expected script.
+# The private cleanup must not be exposed as a new `monitor` CLI command.
+cleanup_legacy_monitor_process() {
+    local pid_file="$1"
+    local script_name="$2"
+    local pid=""
+    if [ -f "$pid_file" ]; then
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if legacy_monitor_process_matches "$pid" "$script_name"; then
+            kill "$pid" 2>/dev/null || true
+        fi
+        rm -f "$pid_file"
+    fi
+}
+
+legacy_monitor_process_matches() {
+    local pid="$1"
+    local script_name="$2"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u)" ] || return 1
+
+    local expected_process=""
+    case "$script_name" in
+        *.sh) expected_process=shell ;;
+        *.mjs) expected_process=node ;;
+        *) return 1 ;;
+    esac
+
+    local process_name
+    process_name=$(ps -p "$pid" -o ucomm= 2>/dev/null | tr -d '[:space:]')
+    process_name="${process_name##*/}"
+    case "$expected_process:$process_name" in
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) ;;
+        *) return 1 ;;
+    esac
+
+    if [ -r "/proc/$pid/cmdline" ]; then
+        local arg=""
+        local arg_index=0
+        local argv_entry=""
+        local argv_count=0
+        while IFS= read -r -d '' arg; do
+            [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+            arg_index=$((arg_index + 1))
+            argv_count=$arg_index
+        done < "/proc/$pid/cmdline"
+        [ "${argv_entry##*/}" = "$script_name" ] && [ "$argv_count" -eq 2 ]
+        return
+    fi
+
+    local command_line
+    command_line=$(ps -ww -p "$pid" -o command= 2>/dev/null || true)
+    [[ "$command_line" == *"/$script_name" ]] || return 1
+    local command_prefix="${command_line:0:${#command_line}-${#script_name}-1}"
+    local command_executable="${command_prefix%% *}"
+    command_executable="${command_executable##*/}"
+    case "$expected_process:$command_executable" in
+        node:node|node:nodejs|node:MainThread|shell:bash|shell:sh|shell:zsh) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+cleanup_legacy_monitor_processes() {
+    cleanup_legacy_monitor_process "$LEGACY_MONITOR_PID_FILE" "monitor-loongsuite-pilot.sh"
+    cleanup_legacy_monitor_process "$LEGACY_DASHBOARD_PID_FILE" "serve-loongsuite-pilot-monitor.mjs"
 }
 
 updater_process_exists() {
@@ -151,15 +679,17 @@ updater_process_exists() {
     pgrep -f "loongsuite-pilot/bin/updater-daemon" >/dev/null 2>&1
 }
 
+# Same rule as the installer: the node that launches the collector must load
+# node:sqlite. Major >= 18 or >= 22 still accepts Node 20 and 22.12.
+_node_supports_sqlite() {
+    "$1" -e "require('node:sqlite')" >/dev/null 2>&1
+}
+
 _node_is_suitable() {
     local bin="$1"
     [ -x "$bin" ] || return 1
     _node_is_app_bundle "$bin" && return 1
-    local ver
-    ver="$("$bin" --version 2>/dev/null)" || return 1
-    local major="${ver#v}"
-    major="${major%%.*}"
-    [[ "$major" =~ ^[0-9]+$ ]] && (( major >= 18 )) || return 1
+    _node_supports_sqlite "$bin" || return 1
     return 0
 }
 
@@ -181,6 +711,7 @@ _node_is_app_bundle() {
 NODE_PIN_FILE="$CACHE_DIR/node-bin"
 
 resolve_node() {
+    local persist_pin="${1:-true}"
     # 1. Pinned file
     if [ -f "$NODE_PIN_FILE" ]; then
         local pinned
@@ -220,8 +751,10 @@ resolve_node() {
             # Auto-heal: update pin file
             local resolved
             resolved=$(_resolve_realpath "$candidate")
-            mkdir -p "$(dirname "$NODE_PIN_FILE")" 2>/dev/null || true
-            echo "$resolved" > "$NODE_PIN_FILE" 2>/dev/null || true
+            if [ "$persist_pin" = "true" ]; then
+                mkdir -p "$(dirname "$NODE_PIN_FILE")" 2>/dev/null || true
+                echo "$resolved" > "$NODE_PIN_FILE" 2>/dev/null || true
+            fi
             echo "$candidate"
             return 0
         fi
@@ -229,35 +762,41 @@ resolve_node() {
     return 1
 }
 
+_detect_system_level_init() {
+    if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
+        echo "systemd-system"
+    elif [ -d /etc/init.d ]; then
+        echo "initd"
+    else
+        echo "none"
+    fi
+}
+
 detect_init_system() {
-    local system_service="${1:-false}"
+    local interactive="${1:-true}"
 
     if [ -f "$INIT_TYPE_FILE" ]; then
         local saved
         saved=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
-        if [ -n "$saved" ]; then
-            echo "$saved"
-            return
-        fi
+        case "$saved" in
+            launchd|systemd-user|systemd-system|initd)
+                echo "$saved"
+                return
+                ;;
+        esac
     fi
     case "$(uname -s)" in
         Darwin) echo "launchd" ;;
         Linux)
-            if [ "$system_service" = "true" ]; then
-                if [ "$(id -u)" -ne 0 ] && ! check_sudo_access; then
-                    echo "systemd-user"
-                    return
-                fi
-                if [ -d /run/systemd/system ] && command -v systemctl &>/dev/null; then
-                    echo "systemd-system"
-                elif [ -d /etc/init.d ]; then
-                    echo "initd"
-                else
-                    echo "systemd-user"
-                fi
+            if [ "$(id -u)" -eq 0 ]; then
+                _detect_system_level_init
             else
                 if command -v systemctl &>/dev/null && systemctl --user show-environment &>/dev/null 2>&1; then
                     echo "systemd-user"
+                elif [ "$interactive" = "true" ] && has_sudo_interactive; then
+                    _detect_system_level_init
+                elif [ "$interactive" = "false" ] && has_sudo_noninteractive; then
+                    _detect_system_level_init
                 else
                     echo "none"
                 fi
@@ -276,7 +815,7 @@ enable_linger() {
     else
         echo "⚠️  Cannot enable linger (requires polkit policy or root privilege)." >&2
         echo "   Service may stop when you log out." >&2
-        echo "   To fix: run 'sudo loginctl enable-linger $user' or use --system-service." >&2
+        echo "   To fix: run 'sudo loginctl enable-linger $user'." >&2
         return 1
     fi
 }
@@ -293,7 +832,7 @@ is_managed_by_systemd_system() {
     local user
     user=$(whoami)
     local unit_name="loongsuite-pilot-${user}.service"
-    [ -f "/etc/systemd/system/$unit_name" ] && sudo -n systemctl is-enabled "$unit_name" &>/dev/null
+    [ -f "/etc/systemd/system/$unit_name" ] && maybe_sudo_n systemctl is-enabled "$unit_name" &>/dev/null
 }
 
 is_managed_by_initd() {
@@ -318,6 +857,22 @@ resolve_current_version() {
         return 0
     fi
     return 1
+}
+
+build_edition() {
+    local version_dir
+    version_dir=$(resolve_current_version 2>/dev/null) || return 1
+
+    local probe="$version_dir/dist/cli-probe.cjs"
+    [ -f "$probe" ] || return 1
+
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" "$probe" --build-edition 2>/dev/null
+}
+
+is_opensource_build() {
+    [ "$(build_edition 2>/dev/null || true)" = "opensource" ]
 }
 
 resolve_previous_version() {
@@ -386,13 +941,13 @@ cmd_run_updater() {
     exec "$node_bin" "$BOOTSTRAP_DIR/updater-daemon.js"
 }
 
-# ---- User-facing commands ----
-
 cmd_start() {
-    local system_service="false"
+    cleanup_legacy_monitor_processes
     for arg in "$@"; do
         case "$arg" in
-            --system-service) system_service="true" ;;
+            --system-service)
+                echo "⚠️  --system-service is deprecated and ignored. Auto-detection is now the default." >&2
+                ;;
         esac
     done
 
@@ -404,55 +959,37 @@ cmd_start() {
     ensure_dirs
     sync_bootstrap_scripts
 
-    if autostart_install "$system_service" 2>/dev/null; then
+    if autostart_install "true"; then
         sleep 2
-        if is_managed_by_launchd || is_managed_by_systemd_user || is_managed_by_systemd_system || is_managed_by_initd; then
-            echo "✅ loongsuite-pilot started ($(detect_init_system))"
+        if is_running; then
+            local init_type
+            init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+            echo "✅ loongsuite-pilot started ($init_type)"
             return 0
         fi
+        local init_type
+        init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+        echo "⚠️  Service registered (${init_type:-unknown}) but collector process not found after 2s. Check logs: $LOG_FILE" >&2
+        echo "   Autostart is configured; the service manager will keep retrying." >&2
+        return 0
     fi
 
-    # Fallback to nohup
-    echo "⚠️  No service manager available — using nohup fallback." >&2
-    echo "   Service will NOT auto-start on boot or survive session logout." >&2
+    echo "❌ Failed to register system service." >&2
+    echo "   No supported init system could be configured." >&2
     case "$(uname -s)" in
         Linux)
-            echo "   To fix: use '--system-service' (requires sudo) or enable systemd user session." >&2
+            echo "   Tried: systemd-user, systemd-system, init.d" >&2
+            echo "   Possible causes:" >&2
+            echo "     - No systemd user session (XDG_RUNTIME_DIR not set)" >&2
+            echo "     - No sudo access for system-level service" >&2
+            echo "     - Container without init system or /etc/init.d" >&2
             ;;
     esac
-
-    local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-    if [ ! -f "$entry" ]; then
-        echo "❌ Bootstrap script missing"
-        exit 1
-    fi
-
-    local node_bin
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-    nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
-    local pid=$!
-    echo "$pid" > "$PID_FILE"
-    echo "nohup" > "$INIT_TYPE_FILE"
-    echo "✅ loongsuite-pilot started (PID $pid, nohup)"
-
-    # Also start the updater daemon if available
-    local updater_entry="$BOOTSTRAP_DIR/updater-daemon.js"
-    if [ -f "$updater_entry" ]; then
-        if ! is_pid_file_running "$UPDATER_PID_FILE"; then
-            nohup "$node_bin" "$updater_entry" >> "$UPDATER_LOG_FILE" 2>&1 &
-            echo "$!" > "$UPDATER_PID_FILE"
-            echo "✅ loongsuite-pilot updater started (PID $!)"
-        fi
-    fi
+    exit 1
 }
 
 cmd_stop() {
-    cmd_monitor_stop >/dev/null 2>&1 || true
+    cleanup_legacy_monitor_processes
     autostart_remove 2>/dev/null || true
 
     local target_user
@@ -474,111 +1011,217 @@ cmd_stop() {
                     systemctl --user stop loongsuite-pilot-updater.service &>/dev/null || true
                     ;;
                 systemd-system|systemd)
-                    sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
-                    sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
+                    maybe_sudo systemctl stop "loongsuite-pilot-${target_user}.service" &>/dev/null || true
+                    maybe_sudo systemctl stop "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
                     ;;
                 initd)
-                    [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
-                    [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+                    [ -f "/etc/init.d/loongsuite-pilot-${target_user}" ] && maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
+                    [ -f "/etc/init.d/loongsuite-pilot-updater-${target_user}" ] && maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
                     ;;
             esac
             ;;
     esac
 
-    # Stop PID-file tracked process
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-    fi
+    # Recover a missing/stale PID first, then signal only a verified collector.
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
 
     # Stop updater PID-file tracked process
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
 
-    # Kill any remaining orphan processes
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
+    # A launchd wrapper may still be between startup and exec after unload.
+    # Retry exact installed paths so it cannot later become an orphan collector.
+    stop_installed_collector_processes
+    stop_installed_updater_processes
 
     rm -f "$PID_FILE"
     echo "✅ loongsuite-pilot stopped"
 }
 
-cmd_process_monitor_start() {
-    if is_pid_file_running "$MONITOR_PID_FILE"; then
-        echo "✅ loongsuite-pilot process monitor is already running (PID $(cat "$MONITOR_PID_FILE"))"
-        return 0
-    fi
+start_collector_after_stop() {
+    local target_user
+    target_user=$(whoami)
+    local sys_unit="loongsuite-pilot-${target_user}.service"
+    local initd_script="/etc/init.d/loongsuite-pilot-${target_user}"
+    local init_type
+    init_type=$(read_init_type)
+    # Narrowed as the ladder proceeds so the exit names a cause.
+    local _stage="service-manager-refused"
+    local _detail="no restart path succeeded"
+    local _err=""
 
     ensure_dirs
-    local script
-    script=$(resolve_script "monitor-loongsuite-pilot.sh") || {
-        echo "❌ monitor script missing"
-        exit 1
-    }
+    sync_bootstrap_scripts
 
-    nohup bash "$script" >> "$MONITOR_LOG_FILE" 2>&1 &
-    echo "$!" > "$MONITOR_PID_FILE"
-    echo "✅ loongsuite-pilot process monitor started (PID $!)"
-}
-
-cmd_process_monitor_stop() {
-    stop_pid_file "$MONITOR_PID_FILE"
-    pkill -f "monitor-loongsuite-pilot\.sh" 2>/dev/null || true
-    echo "✅ loongsuite-pilot process monitor stopped"
-}
-
-cmd_dashboard_start() {
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then
-        echo "✅ loongsuite-pilot dashboard is already running (PID $(cat "$DASHBOARD_PID_FILE"))"
-        return 0
+    local _restarted=false
+    case "$(uname -s)" in
+        Darwin)
+            if launchctl list "$SERVICE_LABEL" &>/dev/null; then
+                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
+                echo "✅ collector started (launchd)"
+                _restarted=true
+            else
+                _stage="task-missing"
+                _detail="launchd job $SERVICE_LABEL is not loaded"
+                echo "⚠️  launchd job not loaded: $SERVICE_LABEL" >&2
+            fi
+            ;;
+        Linux)
+            case "$init_type" in
+                systemd-user)
+                    if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
+                        if _err=$(systemctl --user start loongsuite-pilot.service 2>&1); then
+                            echo "✅ collector started (systemd user-level)"
+                            _restarted=true
+                        else
+                            _stage="start-failed"
+                            _detail="systemctl --user start failed: $_err"
+                            echo "❌ systemctl --user start failed: $_err" >&2
+                        fi
+                    else
+                        _stage="task-missing"
+                        _detail="systemd user unit loongsuite-pilot.service is not enabled"
+                        echo "⚠️  systemd user unit not enabled: loongsuite-pilot.service" >&2
+                    fi
+                    ;;
+                systemd-system|systemd)
+                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
+                        if _err=$(maybe_sudo systemctl start "$sys_unit" 2>&1); then
+                            echo "✅ collector started (systemd system-level)"
+                            _restarted=true
+                        else
+                            _stage="start-failed"
+                            _detail="systemctl start $sys_unit failed: $_err"
+                            echo "❌ systemctl start $sys_unit failed: $_err" >&2
+                        fi
+                    else
+                        _stage="task-missing"
+                        _detail="system unit $sys_unit is missing or not enabled"
+                        echo "⚠️  system unit missing or not enabled: $sys_unit" >&2
+                    fi
+                    ;;
+                initd)
+                    if [ -f "$initd_script" ]; then
+                        maybe_sudo "$initd_script" start &>/dev/null
+                        echo "✅ collector started (init.d)"
+                        _restarted=true
+                    else
+                        _stage="task-missing"
+                        _detail="init.d script $initd_script does not exist"
+                        echo "⚠️  init.d script missing: $initd_script" >&2
+                    fi
+                    ;;
+                *)
+                    _stage="task-missing"
+                    _detail="no service manager registration for init_type=$init_type"
+                    ;;
+            esac
+            ;;
+    esac
+    if [ "$_restarted" = true ]; then
+        if ! wait_for_collector_process 20; then
+            _stage="not-running-after-start"
+            _detail="service manager reported success but no collector process appeared within 20s"
+            echo "⚠️  service manager reported success but collector process not found" >&2
+            _restarted=false
+        fi
+    fi
+    if [ "$_restarted" = false ]; then
+        # Self-heal, no longer gated on init_type -- see cmd_restart_updater.
+        local _new_init
+        _new_init=$(detect_init_system "false")
+        if [ "$_new_init" = "none" ]; then
+            _stage="selfheal-register-failed"
+            _detail="no usable init system detected for self-heal"
+            echo "⚠️  self-heal skipped: no usable init system detected" >&2
+        elif autostart_install_collector_only "false" 2>>"$LOG_FILE"; then
+            # Registration succeeded: remember the managed type in-memory so a wait
+            # failure cannot fall through to nohup and start a second unmanaged daemon.
+            init_type="$_new_init"
+            if wait_for_collector_process 20; then
+                echo "✅ collector self-healed: registered as $_new_init"
+                _restarted=true
+            else
+                _stage="selfheal-not-running"
+                _detail="self-heal registered ($_new_init) but no collector process appeared within 20s"
+                echo "⚠️  collector self-heal registered ($_new_init) but process not found" >&2
+            fi
+        else
+            _stage="selfheal-register-failed"
+            _detail="autostart_install_collector_only failed for $_new_init (details in $LOG_FILE)"
+            echo "❌ collector self-heal registration failed ($_new_init)" >&2
+        fi
+    fi
+    if [ "$_restarted" = false ]; then
+        case "$init_type" in
+            nohup|unknown|"")
+                local entry="$BOOTSTRAP_DIR/collector-daemon.js"
+                if [ ! -f "$entry" ]; then
+                    write_restart_failure collector "bootstrap-missing" \
+                        "collector-daemon.js not found at $entry"
+                    echo "❌ Bootstrap script missing" >&2
+                    return 1
+                fi
+                local node_bin
+                node_bin=$(resolve_node) || {
+                    write_restart_failure collector "node-missing" \
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
+                    echo "❌ node runtime not found" >&2
+                    return 1
+                }
+                export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+                nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
+                echo "$!" > "$PID_FILE"
+                echo "⚠️  collector started (nohup fallback after stage=$_stage: $_detail)" >&2
+                ;;
+            *)
+                write_restart_failure collector "$_stage" "$_detail"
+                echo "❌ Service manager failed to start collector (init_type=$init_type stage=$_stage): $_detail" >&2
+                return 1
+                ;;
+        esac
     fi
 
-    ensure_dirs
-    local script node_bin
-    script=$(resolve_script "serve-loongsuite-pilot-monitor.mjs") || {
-        echo "❌ dashboard script missing"
-        exit 1
-    }
-    node_bin=$(resolve_node) || {
-        echo "❌ node runtime not found" >&2
-        exit 1
-    }
-
-    nohup "$node_bin" "$script" >> "$DASHBOARD_LOG_FILE" 2>&1 &
-    echo "$!" > "$DASHBOARD_PID_FILE"
-    echo "✅ loongsuite-pilot dashboard started (PID $!)"
-    echo "   open http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
+    if ! wait_for_collector_process 10; then
+        write_restart_failure collector "not-running-after-start" \
+            "no collector process found after the start sequence completed (stage reached: $_stage)"
+        echo "❌ collector process not found after start" >&2
+        return 1
+    fi
 }
 
-cmd_dashboard_stop() {
-    stop_pid_file "$DASHBOARD_PID_FILE"
-    pkill -f "serve-loongsuite-pilot-monitor\.mjs" 2>/dev/null || true
-    echo "✅ loongsuite-pilot dashboard stopped"
+cmd_start_collector() {
+    if is_running; then
+        echo "✅ collector is already running (PID $(cat "$PID_FILE"))"
+        return 0
+    fi
+    start_collector_after_stop
 }
 
-cmd_monitor_start() {
-    cmd_process_monitor_start
-    cmd_dashboard_start
-    echo "✅ loongsuite-pilot monitor is running"
-    echo "   dashboard: http://127.0.0.1:${LOONGSUITE_PILOT_MONITOR_PORT:-8765}/"
-}
-
-cmd_monitor_stop() {
-    cmd_dashboard_stop
-    cmd_process_monitor_stop
-    echo "✅ loongsuite-pilot monitor stopped"
+schedule_updater_restart() {
+    # Run in a new process group so stopping the updater service cannot kill the
+    # delayed restart process along with its parent.
+    local restart_bin="$LOONGSUITE_PILOT_BIN"
+    local restart_log="$UPDATER_LOG_FILE"
+    if command -v setsid &>/dev/null; then
+        setsid bash -c 'sleep 10 && "$0" restart-updater' "$restart_bin" >> "$restart_log" 2>&1 &
+    else
+        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bash -c 'sleep 10 && "$0" restart-updater' "$restart_bin" >> "$restart_log" 2>&1 &
+    fi
 }
 
 # Restart only the collector (used by updater after deploying a new version)
 cmd_restart_collector() {
+    clear_restart_failure collector
+    cleanup_legacy_monitor_processes
+    local defer_updater_restart=false
+    if [ "${1:-}" = "--defer-updater-restart" ]; then
+        defer_updater_restart=true
+    elif [ -n "${1:-}" ]; then
+        write_restart_failure collector "service-manager-refused"             "Unknown restart-collector option: $1"
+        echo "Unknown restart-collector option: $1" >&2
+        return 1
+    fi
     local target_user
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-${target_user}.service"
@@ -599,100 +1242,30 @@ cmd_restart_collector() {
                     systemctl --user stop loongsuite-pilot.service &>/dev/null || true
                     ;;
                 systemd-system|systemd)
-                    sudo systemctl stop "$sys_unit" &>/dev/null || true
+                    maybe_sudo systemctl stop "$sys_unit" &>/dev/null || true
                     ;;
                 initd)
-                    [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+                    [ -f "$initd_script" ] && maybe_sudo "$initd_script" stop &>/dev/null || true
                     ;;
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/collector-daemon" 2>/dev/null || true
-
-    if is_running; then
-        local pid
-        pid=$(cat "$PID_FILE")
-        kill "$pid" 2>/dev/null || true
-        local count=0
-        while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
-            sleep 1
-            count=$((count + 1))
-        done
-        if kill -0 "$pid" 2>/dev/null; then
-            kill -9 "$pid" 2>/dev/null || true
-        fi
-        rm -f "$PID_FILE"
-    fi
+    is_running >/dev/null 2>&1 || true
+    stop_pid_file "$PID_FILE" collector
+    stop_installed_collector_processes
 
     sleep 1
+    start_collector_after_stop
 
-    ensure_dirs
-    sync_bootstrap_scripts
-
-    local _restarted=false
-    case "$(uname -s)" in
-        Darwin)
-            if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-                launchctl start "$SERVICE_LABEL" 2>/dev/null || true
-                echo "✅ collector restarted (launchd)"
-                _restarted=true
-            fi
-            ;;
-        Linux)
-            case "$init_type" in
-                systemd-user)
-                    if systemctl --user is-enabled loongsuite-pilot.service &>/dev/null; then
-                        systemctl --user start loongsuite-pilot.service &>/dev/null
-                        echo "✅ collector restarted (systemd user-level)"
-                        _restarted=true
-                    fi
-                    ;;
-                systemd-system|systemd)
-                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ collector restarted (systemd system-level)"
-                        _restarted=true
-                    fi
-                    ;;
-                initd)
-                    if [ -f "$initd_script" ]; then
-                        sudo "$initd_script" start &>/dev/null
-                        echo "✅ collector restarted (init.d)"
-                        _restarted=true
-                    fi
-                    ;;
-            esac
-            ;;
-    esac
-    if [ "$_restarted" = false ]; then
-        local entry="$BOOTSTRAP_DIR/collector-daemon.js"
-        if [ ! -f "$entry" ]; then
-            echo "❌ Bootstrap script missing"
-            exit 1
-        fi
-        local node_bin
-        node_bin=$(resolve_node) || {
-            echo "❌ node runtime not found" >&2
-            exit 1
-        }
-        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        nohup "$node_bin" "$entry" >> "$LOG_FILE" 2>&1 &
-        echo "$!" > "$PID_FILE"
-        echo "✅ collector restarted (PID $!)"
-    fi
-
-    # Schedule updater restart in a NEW process group so that
-    # "launchctl stop / systemctl stop" of the updater won't kill this subprocess.
-    local _restart_bin="$LOONGSUITE_PILOT_BIN"
-    local _restart_log="$UPDATER_LOG_FILE"
-    if command -v setsid &>/dev/null; then
-        setsid bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
-    else
-        perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' -- bash -c 'sleep 10 && "$0" restart-updater' "$_restart_bin" >> "$_restart_log" 2>&1 &
+    if [ "$defer_updater_restart" = false ]; then
+        schedule_updater_restart
     fi
 }
 
 cmd_restart_updater() {
+    # Any breadcrumb still on disk describes an older attempt.
+    clear_restart_failure updater
+
     local target_user
     target_user=$(whoami)
     local sys_unit="loongsuite-pilot-updater-${target_user}.service"
@@ -700,6 +1273,17 @@ cmd_restart_updater() {
     local init_type=""
     if [ -f "$INIT_TYPE_FILE" ]; then
         init_type=$(cat "$INIT_TYPE_FILE" 2>/dev/null | tr -d '[:space:]')
+    fi
+    # Most specific thing learned so far, so the exit at the bottom can name a cause
+    # instead of only echoing init_type. Narrowed as the ladder proceeds.
+    local _stage="service-manager-refused"
+    local _detail="no restart path succeeded"
+    local _err=""
+
+    local _old_pid=""
+    _old_pid=$(find_current_user_processes updater | head -n 1 || true)
+    if [ -z "$_old_pid" ]; then
+        _old_pid=$(find_current_user_processes updater-wrapper | head -n 1 || true)
     fi
 
     # Stop updater via service manager
@@ -713,16 +1297,16 @@ cmd_restart_updater() {
                     systemctl --user stop loongsuite-pilot-updater.service &>/dev/null || true
                     ;;
                 systemd-system|systemd)
-                    sudo systemctl stop "$sys_unit" &>/dev/null || true
+                    maybe_sudo systemctl stop "$sys_unit" &>/dev/null || true
                     ;;
                 initd)
-                    [ -f "$initd_script" ] && sudo "$initd_script" stop &>/dev/null || true
+                    [ -f "$initd_script" ] && maybe_sudo "$initd_script" stop &>/dev/null || true
                     ;;
             esac
             ;;
     esac
-    pkill -f "loongsuite-pilot/bin/updater-daemon" 2>/dev/null || true
-    stop_pid_file "$UPDATER_PID_FILE"
+    stop_pid_file "$UPDATER_PID_FILE" updater
+    stop_installed_updater_processes
 
     sleep 1
 
@@ -736,60 +1320,138 @@ cmd_restart_updater() {
             if launchctl list "$UPDATER_LABEL" &>/dev/null; then
                 launchctl start "$UPDATER_LABEL" 2>/dev/null || true
                 _restarted=true
+            else
+                # Used to fall through in silence, leaving the caller with nothing but the
+                # generic "service manager failed" line.
+                _stage="task-missing"
+                _detail="launchd job $UPDATER_LABEL is not loaded"
+                echo "⚠️  launchd job not loaded: $UPDATER_LABEL" >&2
             fi
             ;;
         Linux)
             case "$init_type" in
                 systemd-user)
                     if systemctl --user is-enabled loongsuite-pilot-updater.service &>/dev/null; then
-                        systemctl --user start loongsuite-pilot-updater.service &>/dev/null
-                        echo "✅ updater restarted (systemd user-level)"
-                        _restarted=true
+                        if _err=$(systemctl --user start loongsuite-pilot-updater.service 2>&1); then
+                            echo "✅ updater restarted (systemd user-level)"
+                            _restarted=true
+                        else
+                            _stage="start-failed"
+                            _detail="systemctl --user start failed: $_err"
+                            echo "❌ systemctl --user start failed: $_err" >&2
+                        fi
+                    else
+                        _stage="task-missing"
+                        _detail="systemd user unit loongsuite-pilot-updater.service is not enabled"
+                        echo "⚠️  systemd user unit not enabled: loongsuite-pilot-updater.service" >&2
                     fi
                     ;;
                 systemd-system|systemd)
-                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && sudo -n systemctl is-enabled "$sys_unit" &>/dev/null; then
-                        sudo systemctl start "$sys_unit" &>/dev/null
-                        echo "✅ updater restarted (systemd system-level)"
-                        _restarted=true
+                    if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$sys_unit" ] && maybe_sudo_n systemctl is-enabled "$sys_unit" &>/dev/null; then
+                        if _err=$(maybe_sudo systemctl start "$sys_unit" 2>&1); then
+                            echo "✅ updater restarted (systemd system-level)"
+                            _restarted=true
+                        else
+                            _stage="start-failed"
+                            _detail="systemctl start $sys_unit failed: $_err"
+                            echo "❌ systemctl start $sys_unit failed: $_err" >&2
+                        fi
+                    else
+                        _stage="task-missing"
+                        _detail="system unit $sys_unit is missing or not enabled"
+                        echo "⚠️  system unit missing or not enabled: $sys_unit" >&2
                     fi
                     ;;
                 initd)
                     if [ -f "$initd_script" ]; then
-                        sudo "$initd_script" start &>/dev/null
+                        maybe_sudo "$initd_script" start &>/dev/null
                         echo "✅ updater restarted (init.d)"
                         _restarted=true
+                    else
+                        _stage="task-missing"
+                        _detail="init.d script $initd_script does not exist"
+                        echo "⚠️  init.d script missing: $initd_script" >&2
                     fi
+                    ;;
+                *)
+                    _stage="task-missing"
+                    _detail="no service manager registration for init_type=$init_type"
                     ;;
             esac
             ;;
     esac
-    # Verify the service manager actually started the updater process
+    # Verify the service manager actually started the updater process. Bounded poll
+    # instead of a single check after one second.
     if [ "$_restarted" = true ]; then
-        sleep 1
-        if ! updater_process_exists; then
-            echo "⚠️  service manager reported success but updater process not found, falling back to nohup"
+        if ! wait_for_updater_process 15 "$_old_pid"; then
+            _stage="not-running-after-start"
+            _detail="service manager reported success but no updater process appeared within 15s"
+            echo "⚠️  service manager reported success but updater process not found" >&2
             _restarted=false
         fi
     fi
     if [ "$_restarted" = false ]; then
-        local entry="$BOOTSTRAP_DIR/updater-daemon.js"
-        if [ ! -f "$entry" ]; then
-            echo "❌ Updater bootstrap script missing"
-            return 1
+        # Self-heal, no longer gated on init_type (same change as in loongsuite-pilot.ps1):
+        # a systemd install whose unit had gone missing was not allowed to re-register
+        # itself and could only reach the failure exit below, every cycle, forever.
+        local _new_init
+        _new_init=$(detect_init_system "false")
+        if [ "$_new_init" = "none" ]; then
+            _stage="selfheal-register-failed"
+            _detail="no usable init system detected for self-heal"
+            echo "⚠️  self-heal skipped: no usable init system detected" >&2
+        elif autostart_install_updater_only "false" 2>>"$UPDATER_LOG_FILE"; then
+            init_type="$_new_init"
+            if wait_for_updater_process 15 "$_old_pid"; then
+                echo "✅ updater self-healed: registered as $_new_init"
+                _restarted=true
+            else
+                _stage="selfheal-not-running"
+                _detail="self-heal registered ($_new_init) but no updater process appeared within 15s"
+                echo "⚠️  updater self-heal registered ($_new_init) but process not found" >&2
+            fi
+        else
+            _stage="selfheal-register-failed"
+            _detail="autostart_install_updater_only failed for $_new_init (details in $UPDATER_LOG_FILE)"
+            echo "❌ updater self-heal registration failed ($_new_init)" >&2
         fi
-        local node_bin
-        node_bin=$(resolve_node) || {
-            echo "❌ node runtime not found" >&2
-            return 1
-        }
-        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
-        nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
-        echo "$!" > "$UPDATER_PID_FILE"
-        echo "✅ updater restarted (PID $!)"
+    fi
+    if [ "$_restarted" = false ]; then
+        case "$init_type" in
+            nohup|unknown|"")
+                local entry="$BOOTSTRAP_DIR/updater-daemon.js"
+                if [ ! -f "$entry" ]; then
+                    write_restart_failure updater "bootstrap-missing" \
+                        "updater-daemon.js not found at $entry"
+                    echo "❌ Updater bootstrap script missing" >&2
+                    return 1
+                fi
+                local node_bin
+                node_bin=$(resolve_node) || {
+                    write_restart_failure updater "node-missing" \
+                        "resolve_node found no node that can load node:sqlite (need 22.13+ or 23.4+, or the managed runtime)"
+                    echo "❌ node runtime not found" >&2
+                    return 1
+                }
+                export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+                nohup "$node_bin" "$entry" >> "$UPDATER_LOG_FILE" 2>&1 &
+                echo "$!" > "$UPDATER_PID_FILE"
+                echo "⚠️  updater restarted (nohup fallback after stage=$_stage: $_detail)" >&2
+                ;;
+            *)
+                # The nohup fallback stays restricted to installs that never had a service
+                # registration -- on a managed install it is a second unmanaged daemon that
+                # hides the real breakage rather than a repair. Skipping it is now reported.
+                write_restart_failure updater "$_stage" "$_detail"
+                echo "❌ Service manager failed to restart updater (init_type=$init_type stage=$_stage): $_detail" >&2
+                return 1
+                ;;
+        esac
     fi
 
-    if ! updater_process_exists; then
+    if ! wait_for_updater_process 10 "$_old_pid"; then
+        write_restart_failure updater "not-running-after-start" \
+            "no updater process found after the restart sequence completed (stage reached: $_stage)"
         echo "❌ updater process not found after restart" >&2
         return 1
     fi
@@ -799,6 +1461,112 @@ cmd_restart() {
     cmd_stop
     sleep 1
     cmd_start
+}
+
+interceptor_embedded_status() {
+    if ! is_running; then
+        echo "stopped"
+        return
+    fi
+    local runtime runtime_status
+    runtime="$DATA_DIR/interceptor/runtime.json"
+    if [ ! -f "$runtime" ]; then
+        echo "stopped"
+        return
+    fi
+    runtime_status=$(sed -n 's/^[[:space:]]*"status"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$runtime" | head -n 1)
+    if [ "$runtime_status" = "ok" ]; then
+        echo "running"
+        return
+    fi
+    echo "stopped"
+}
+
+dashboard_enabled() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const fs = require("node:fs");
+let enabled = false;
+try { enabled = JSON.parse(fs.readFileSync(process.argv[1], "utf8").replace(/^\uFEFF/, ""))?.dashboard?.enabled === true; } catch {}
+process.exit(enabled ? 0 : 1);
+' "$CONFIG_FILE" 2>/dev/null
+}
+
+dashboard_port() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo 8765
+        return
+    }
+    "$node_bin" -e '
+const fs = require("node:fs");
+const path = process.argv[1];
+let port;
+try { port = JSON.parse(fs.readFileSync(path, "utf8").replace(/^\uFEFF/, ""))?.dashboard?.port; } catch {}
+process.stdout.write(String(Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 8765));
+' "$CONFIG_FILE" 2>/dev/null || echo 8765
+}
+
+dashboard_data_dir() {
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || {
+        echo "$DATA_DIR"
+        return
+    }
+    LOONGSUITE_PILOT_LAUNCHER_DATA_DIR="$DATA_DIR" "$node_bin" -e '
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const configPath = process.argv[1];
+let configured;
+try { configured = JSON.parse(fs.readFileSync(configPath, "utf8"))?.dataDir; } catch {}
+let dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR || configured || process.env.LOONGSUITE_PILOT_LAUNCHER_DATA_DIR;
+if (dataDir === "~") dataDir = os.homedir();
+else if (dataDir.startsWith("~/")) dataDir = path.join(os.homedir(), dataDir.slice(2));
+process.stdout.write(dataDir);
+' "$CONFIG_FILE" 2>/dev/null || echo "$DATA_DIR"
+}
+
+dashboard_is_available() {
+    local port="$1"
+    local effective_data_dir
+    effective_data_dir=$(dashboard_data_dir)
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 1
+    "$node_bin" -e '
+const http = require("node:http");
+const crypto = require("node:crypto");
+const path = require("node:path");
+let finished = false;
+let timer;
+const finish = (code) => {
+  if (finished) return;
+  finished = true;
+  clearTimeout(timer);
+  process.exit(code);
+};
+const request = http.request({
+  host: "127.0.0.1",
+  port: Number(process.argv[1]),
+  path: "/metrics-summary.json",
+  method: "HEAD",
+}, (response) => {
+  response.resume();
+  const expectedInstance = crypto.createHash("sha256")
+    .update(path.resolve(process.argv[2]))
+    .digest("hex");
+  const isPilot = response.headers["x-loongsuite-pilot-dashboard"] === "metrics-summary-v1"
+    && response.headers["x-loongsuite-pilot-instance"] === expectedInstance;
+  finish(isPilot && (response.statusCode === 200 || response.statusCode === 503) ? 0 : 1);
+});
+request.on("error", () => finish(1));
+request.end();
+timer = setTimeout(() => {
+  request.destroy();
+  finish(1);
+}, 300);
+' "$port" "$effective_data_dir" >/dev/null 2>&1
 }
 
 cmd_status() {
@@ -813,26 +1581,30 @@ cmd_status() {
 
     if is_running; then
         local pid
+        local port
         pid=$(cat "$PID_FILE")
         echo "✅ loongsuite-pilot${ver_info} is running (PID $pid)"
+        if ! dashboard_enabled; then
+            echo "   dashboard: disabled"
+        elif port=$(dashboard_port) && dashboard_is_available "$port"; then
+            echo "   dashboard: http://127.0.0.1:${port}/"
+        else
+            echo "   dashboard: unavailable (http://127.0.0.1:${port:-8765}/)"
+        fi
     else
         echo "⚪ loongsuite-pilot${ver_info} is not running"
     fi
-    if is_pid_file_running "$UPDATER_PID_FILE"; then
+    if is_pid_file_running "$UPDATER_PID_FILE" updater; then
         echo "   updater: running (PID $(cat "$UPDATER_PID_FILE"))"
     else
         echo "   updater: stopped"
     fi
-    local sampler_pid=""
-    local dashboard_pid=""
-    if is_pid_file_running "$MONITOR_PID_FILE"; then sampler_pid=$(cat "$MONITOR_PID_FILE"); fi
-    if is_pid_file_running "$DASHBOARD_PID_FILE"; then dashboard_pid=$(cat "$DASHBOARD_PID_FILE"); fi
-    if [ -n "$sampler_pid" ] && [ -n "$dashboard_pid" ]; then
-        echo "   monitor: running (sampler PID $sampler_pid, dashboard PID $dashboard_pid)"
-    elif [ -n "$sampler_pid" ] || [ -n "$dashboard_pid" ]; then
-        echo "   monitor: partially running (sampler PID ${sampler_pid:-stopped}, dashboard PID ${dashboard_pid:-stopped})"
+    local interceptor_state
+    interceptor_state=$(interceptor_embedded_status)
+    if [ "$interceptor_state" = "stopped" ]; then
+        echo "   interceptor: stopped"
     else
-        echo "   monitor: stopped"
+        echo "   interceptor: running"
     fi
     autostart_status
 }
@@ -900,6 +1672,248 @@ cmd_worker() {
     exec "$node_bin" "$entry" worker "$@"
 }
 
+cmd_agent() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+    local subcommand="${1:-}"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    "$node_bin" "$entry" agent "$@" || return $?
+
+    # The command performs injection/removal synchronously. Restart only an
+    # already-running collector so it reloads definitions and watchdog targets;
+    # do not unexpectedly start a service the user intentionally stopped.
+    case "$subcommand" in
+        register|unregister)
+            if is_running; then
+                cmd_restart_collector
+            fi
+            ;;
+    esac
+}
+
+inject_failure() {
+    # Messages are fixed literals, so this works even when Node is unavailable.
+    local message="$1"
+    shift
+    echo "loongsuite-pilot inject: $message" >&2
+    local arg
+    for arg in "$@"; do
+        if [ "$arg" = "--json" ]; then
+            printf '{"status":"failed","error":"%s"}\n' "$message"
+            break
+        fi
+    done
+    return 1
+}
+
+cmd_inject() {
+    local node_bin version_dir
+    node_bin=$(resolve_node) || { inject_failure "Node runtime not found" "$@"; return 1; }
+    version_dir=$(resolve_current_version) || { inject_failure "No valid loongsuite-pilot version found" "$@"; return 1; }
+    [ -r "$version_dir/dist/index.js" ] || { inject_failure "Pilot entrypoint is missing or unreadable" "$@"; return 1; }
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$version_dir/dist/index.js" inject "$@"
+}
+
+cmd_hook() {
+    local node_bin version_dir entry
+    node_bin=$(resolve_node) || {
+        echo "loongsuite-pilot hook: Node runtime not found" >&2
+        return 1
+    }
+    version_dir=$(resolve_current_version) || {
+        echo "loongsuite-pilot hook: No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    # Prefer the sqlite-free bundle. Fall back to the daemon entry when an
+    # older install has not shipped hook-cli.cjs yet.
+    if [ -r "$version_dir/dist/hook-cli.cjs" ]; then
+        entry="$version_dir/dist/hook-cli.cjs"
+    else
+        entry="$version_dir/dist/index.js"
+        [ -r "$entry" ] || {
+            echo "loongsuite-pilot hook: Pilot entrypoint is missing or unreadable" >&2
+            return 1
+        }
+        export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+        export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+        export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+        exec "$node_bin" "$entry" hook "$@"
+    fi
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$entry" hook "$@"
+}
+
+cmd_deploy() {
+    ensure_dirs
+    sync_bootstrap_scripts
+
+    local node_bin
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    local version_dir
+    version_dir=$(resolve_current_version) || {
+        echo "❌ No valid loongsuite-pilot version found" >&2
+        return 1
+    }
+    local entry="$version_dir/dist/index.js"
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    # Deliberately no collector restart afterwards: this command exists for image
+    # builds, where nothing is running yet and starting a daemon inside a build
+    # layer would leave a half-written state file baked into the image. A running
+    # collector re-reads its deployment state on its own next cycle.
+    exec "$node_bin" "$entry" deploy "$@"
+}
+
+cmd_menubar() {
+    if [ "$(uname -s)" != "Darwin" ]; then
+        echo "❌ The menu bar app is only supported on macOS." >&2
+        return 1
+    fi
+
+    local repo_dir version_dir entry node_bin
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    # A source checkout must not send a new command to an older installed runtime.
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        version_dir="$repo_dir"
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || true
+    fi
+    if [ -z "$version_dir" ]; then
+        version_dir="$repo_dir"
+    fi
+    entry="$version_dir/dist/index.js"
+    if [ ! -f "$entry" ]; then
+        echo "❌ loongsuite-pilot runtime entry not found; build or install Pilot first" >&2
+        return 1
+    fi
+    if ! grep -Fq 'Usage: loongsuite-pilot menubar <start|stop>' "$entry"; then
+        echo "❌ loongsuite-pilot runtime does not support the menubar command; upgrade Pilot or run 'npm run build' first" >&2
+        return 1
+    fi
+    node_bin=$(resolve_node) || {
+        echo "❌ node runtime not found" >&2
+        return 1
+    }
+
+    export AGENT_DATA_COLLECTION_CONFIG="$CONFIG_FILE"
+    export LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR"
+    exec "$node_bin" "$entry" menubar "$@"
+}
+
+cmd_dashboard() {
+    case "${1:-}" in
+        start|stop)
+            local action="$1"; shift
+            local repo_dir version_dir entry node_bin port attempt
+            repo_dir="$(dirname "$SCRIPT_DIR")"
+            if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+                entry="$repo_dir/scripts/dashboard-config.mjs"
+            else
+                version_dir=$(resolve_current_version 2>/dev/null) || {
+                    echo "Pilot is not installed. Install Pilot before managing the Dashboard." >&2
+                    return 1
+                }
+                entry="$version_dir/scripts/dashboard-config.mjs"
+            fi
+            if [ ! -f "$entry" ]; then
+                echo "Dashboard command is missing. Upgrade or repair Pilot." >&2
+                return 1
+            fi
+            node_bin=$(resolve_node) || { echo "node runtime not found" >&2; return 1; }
+            "$node_bin" "$entry" "$CONFIG_FILE" "$action" "$@" || return 1
+            if is_running; then
+                cmd_restart
+            elif [ "$action" = start ]; then
+                cmd_start
+            fi
+            if [ "$action" = stop ]; then
+                if is_running; then
+                    echo "Dashboard stopped; collector remains running."
+                else
+                    echo "Dashboard stopped; collector remains stopped."
+                fi
+                return 0
+            fi
+            port=$(dashboard_port)
+            for attempt in {1..20}; do
+                if dashboard_is_available "$port"; then
+                    echo "Dashboard started: http://127.0.0.1:${port}/"
+                    return 0
+                fi
+                sleep 0.5
+            done
+            echo "Dashboard did not become available on port ${port}. Check $LOG_FILE" >&2
+            return 1
+            ;;
+        shortcut) shift ;;
+        --help|-h) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}"; return 0 ;;
+        *) echo "Usage: loongsuite-pilot dashboard start [port] | stop | shortcut {install|status|uninstall}" >&2; return 2 ;;
+    esac
+    local node_bin="" version_dir repo_dir entry config_path pin pinned
+    repo_dir="$(dirname "$SCRIPT_DIR")"
+    if [ -f "$repo_dir/package.json" ] && [ -d "$repo_dir/src" ]; then
+        entry="$repo_dir/scripts/dashboard-shortcut.mjs"
+    else
+        version_dir=$(resolve_current_version 2>/dev/null) || {
+            echo "Pilot is not installed. Install Pilot before managing Dashboard shortcuts." >&2
+            return 1
+        }
+        entry="$version_dir/scripts/dashboard-shortcut.mjs"
+    fi
+    if [ ! -f "$entry" ]; then
+        echo "Dashboard shortcut command is missing. Upgrade or repair Pilot." >&2
+        return 1
+    fi
+    config_path="${AGENT_DATA_COLLECTION_CONFIG:-}"
+    config_path="${config_path#"${config_path%%[![:space:]]*}"}"
+    config_path="${config_path%"${config_path##*[![:space:]]}"}"
+    config_path="${config_path:-$CONFIG_FILE}"
+    case "$config_path" in '~') config_path="$HOME" ;; '~/'*) config_path="$HOME/${config_path#\~/}" ;; esac
+    # A custom --data-dir installer pins Node next to config.json, not the cache.
+    # Preserve spaces in the pinned path; never rewrite the pin on this path.
+    for pin in "$(dirname "$config_path")/node-bin" "$NODE_PIN_FILE"; do
+        if [ -r "$pin" ]; then
+            IFS= read -r pinned < "$pin" || true
+            if _node_is_suitable "$pinned"; then node_bin="$pinned"; break; fi
+        fi
+    done
+    if [ -z "$node_bin" ]; then
+        node_bin=$(resolve_node false) || {
+            echo "Pilot Node.js runtime not found. Repair the Pilot installation." >&2
+            return 1
+        }
+    fi
+    export AGENT_DATA_COLLECTION_CONFIG="$config_path"
+    exec "$node_bin" "$entry" "$@"
+}
+
 cmd_token_usage() {
     ensure_dirs
 
@@ -940,6 +1954,130 @@ cmd_token_usage() {
     exec "$node_bin" "$entry" token-usage "$@"
 }
 
+print_upgrade_usage() {
+    echo "Usage: loongsuite-pilot upgrade [--version <version>]"
+    echo ""
+    echo "Upgrade the open-source edition to the latest release, or to a specific version."
+}
+
+cmd_upgrade() {
+    local version=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version)
+                if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+                    echo "❌ --version requires a value" >&2
+                    return 1
+                fi
+                version="$2"
+                shift 2
+                ;;
+            --version=*)
+                version="${1#*=}"
+                if [ -z "$version" ]; then
+                    echo "❌ --version requires a value" >&2
+                    return 1
+                fi
+                shift
+                ;;
+            help|--help|-h)
+                print_upgrade_usage
+                return 0
+                ;;
+            *)
+                echo "Unknown upgrade option: $1" >&2
+                print_upgrade_usage >&2
+                return 1
+                ;;
+        esac
+    done
+
+    if [ -n "$version" ] && ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+        echo "❌ Invalid version: $version (expected e.g. 1.6.0)" >&2
+        return 1
+    fi
+
+    # The published Unix installer still stores version pointers and packages
+    # under the default ~/.loongsuite-pilot tree. Passing a custom cache env to
+    # it would either upgrade a stale default install or report success without
+    # changing the version this CLI actually uses, so fail closed until the
+    # installer supports a custom cache directory end to end.
+    local default_cache_dir="$HOME/.loongsuite-pilot"
+    if [ "$CACHE_DIR" != "$default_cache_dir" ]; then
+        echo "❌ Manual upgrade does not yet support a custom cache directory on macOS/Linux." >&2
+        echo "   Current cache directory: $CACHE_DIR" >&2
+        echo "   Supported cache directory: $default_cache_dir" >&2
+        return 1
+    fi
+
+    local installer_file
+    installer_file=$(mktemp "${TMPDIR:-/tmp}/loongsuite-pilot-installer.XXXXXX") || {
+        echo "❌ Failed to create temporary installer file" >&2
+        return 1
+    }
+
+    local download_ok=0
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$OPEN_SOURCE_INSTALLER_URL" -o "$installer_file" && download_ok=1
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q "$OPEN_SOURCE_INSTALLER_URL" -O "$installer_file" && download_ok=1
+    else
+        echo "❌ curl or wget is required to download the installer" >&2
+    fi
+
+    if [ "$download_ok" -ne 1 ]; then
+        rm -f "$installer_file"
+        echo "❌ Failed to download the open-source installer" >&2
+        return 1
+    fi
+
+    local result=0
+    if [ -n "$version" ]; then
+        LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR" \
+            bash "$installer_file" upgrade --data-dir "$DATA_DIR" --version "$version" || result=$?
+    else
+        LOONGSUITE_PILOT_DATA_DIR="$DATA_DIR" \
+        LOONGSUITE_PILOT_CACHE_DIR="$CACHE_DIR" \
+            bash "$installer_file" upgrade --data-dir "$DATA_DIR" || result=$?
+    fi
+    rm -f "$installer_file"
+    return "$result"
+}
+
+cleanup_hermes_for_rollback() {
+    local target_version_dir="$1"
+    [ -f "$target_version_dir/agents.d/hermes-agent.json" ] && return 0
+
+    local node_bin
+    node_bin=$(resolve_node 2>/dev/null) || return 0
+    "$node_bin" -e '
+const fs = require("fs");
+const path = require("path");
+const stateFile = process.argv[1];
+const fallback = path.join(process.env.HERMES_HOME || path.join(process.env.HOME || "", ".hermes"), "plugins", "loongsuite-pilot");
+let state = {};
+try { state = JSON.parse(fs.readFileSync(stateFile, "utf8")); } catch {}
+const recorded = state?.["hermes-agent"]?.targetDir;
+const target = typeof recorded === "string" && path.isAbsolute(recorded) ? recorded : fallback;
+const marker = path.join(target, ".loongsuite-pilot-managed.json");
+try {
+  const meta = JSON.parse(fs.readFileSync(marker, "utf8"));
+  if (meta.owner !== "loongsuite-pilot" || meta.agentId !== "hermes-agent") process.exit(0);
+  fs.rmSync(target, { recursive: true, force: true });
+  if (state && typeof state === "object" && state["hermes-agent"]) {
+    delete state["hermes-agent"];
+    const tmp = stateFile + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
+    fs.renameSync(tmp, stateFile);
+  }
+  process.stdout.write(target + "\n");
+} catch {}
+' "$DATA_DIR/deployed-agents.json" | while IFS= read -r removed; do
+        [ -n "$removed" ] && echo "   Removed Hermes plugin not supported by rollback target: $removed"
+    done
+}
+
 cmd_rollback() {
     if [ ! -f "$PREVIOUS_FILE" ]; then
         echo "❌ No previous version to roll back to"
@@ -976,6 +2114,8 @@ cmd_rollback() {
         echo "❌ Failed to sync scripts for rollback target: $prev_dir"
         exit 1
     fi
+
+    cleanup_hermes_for_rollback "$VERSIONS_DIR/$prev_dir"
 
     echo "✅ Rolled back to version: $prev_dir"
     echo "   Restarting service..."
@@ -1077,9 +2217,9 @@ _write_systemd_system_unit() {
     local unit_name="loongsuite-pilot-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
-    sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
+    maybe_sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
     ensure_dirs
-    sudo tee "$unit_path" > /dev/null << UNITEOF
+    maybe_sudo tee "$unit_path" > /dev/null << UNITEOF
 [Unit]
 Description=LoongSuite Pilot (${target_user})
 After=network.target
@@ -1151,9 +2291,9 @@ _write_systemd_system_updater_unit() {
     local unit_name="loongsuite-pilot-updater-${target_user}.service"
     local unit_path="$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name"
 
-    sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
+    maybe_sudo mkdir -p "$SYSTEMD_SYSTEM_UNIT_DIR"
     ensure_dirs
-    sudo tee "$unit_path" > /dev/null << UNITEOF
+    maybe_sudo tee "$unit_path" > /dev/null << UNITEOF
 [Unit]
 Description=LoongSuite Pilot Auto-Updater (${target_user})
 After=network.target
@@ -1212,12 +2352,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/collector-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1226,6 +2402,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1236,6 +2414,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1250,20 +2430,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1274,7 +2454,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi
@@ -1304,7 +2484,7 @@ INITEOF
         "$tmp_script"
     rm -f "${tmp_script}.bak"
 
-    sudo install -m 755 "$tmp_script" "$script_path"
+    maybe_sudo install -m 755 "$tmp_script" "$script_path"
     rm -f "$tmp_script"
 }
 
@@ -1344,12 +2524,48 @@ DAEMON_NAME="DAEMON_NAME_PLACEHOLDER"
 PID_FILE="PID_PLACEHOLDER"
 LOG_FILE="LOG_PLACEHOLDER"
 CONFIG_FILE="CONFIG_PLACEHOLDER"
+DAEMON_COMMAND="run-updater"
+DAEMON_ENTRY="$DAEMON_HOME/.loongsuite-pilot/bin/updater-daemon.js"
+
+pid_matches_daemon() {
+    local pid="$1"
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+    kill -0 "$pid" 2>/dev/null || return 1
+    [ -r "/proc/$pid/cmdline" ] && [ -r "/proc/$pid/environ" ] || return 1
+    [ "$(ps -p "$pid" -o uid= 2>/dev/null | tr -d '[:space:]')" = "$(id -u "$DAEMON_USER")" ] || return 1
+
+    local env_value=""
+    local identity_bin=false
+    local identity_command=false
+    while IFS= read -r -d '' env_value; do
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_BIN=$DAEMON_BIN" ] && identity_bin=true
+        [ "$env_value" = "LOONGSUITE_PILOT_INITD_COMMAND=$DAEMON_COMMAND" ] && identity_command=true
+    done < "/proc/$pid/environ"
+    [ "$identity_bin" = true ] && [ "$identity_command" = true ] || return 1
+
+    local arg=""
+    local arg_index=0
+    local argv_entry=""
+    local argv_command=""
+    local argv_count=0
+    while IFS= read -r -d '' arg; do
+        [ "$arg_index" -eq 1 ] && argv_entry="$arg"
+        [ "$arg_index" -eq 2 ] && argv_command="$arg"
+        arg_index=$((arg_index + 1))
+        argv_count=$arg_index
+    done < "/proc/$pid/cmdline"
+    if [ "$argv_entry" = "$DAEMON_BIN" ]; then
+        [ "$argv_command" = "$DAEMON_COMMAND" ] && [ "$argv_count" -eq 3 ]
+    else
+        [ "$argv_entry" = "$DAEMON_ENTRY" ] && [ "$argv_count" -eq 2 ]
+    fi
+}
 
 do_start() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is already running (PID $pid)"
             return 0
         fi
@@ -1358,6 +2574,8 @@ do_start() {
 
     echo -n "Starting $DAEMON_NAME... "
     mkdir -p "$(dirname "$LOG_FILE")" "$(dirname "$PID_FILE")"
+    export LOONGSUITE_PILOT_INITD_BIN="$DAEMON_BIN"
+    export LOONGSUITE_PILOT_INITD_COMMAND="$DAEMON_COMMAND"
 
     if command -v start-stop-daemon &>/dev/null; then
         start-stop-daemon --start --chuid "$DAEMON_USER" \
@@ -1368,6 +2586,8 @@ do_start() {
     else
         su - "$DAEMON_USER" -c "
             export AGENT_DATA_COLLECTION_CONFIG='$CONFIG_FILE'
+            export LOONGSUITE_PILOT_INITD_BIN='$DAEMON_BIN'
+            export LOONGSUITE_PILOT_INITD_COMMAND='$DAEMON_COMMAND'
             nohup '$DAEMON_BIN' run-updater >> '$LOG_FILE' 2>&1 &
             echo \$! > '$PID_FILE'
         "
@@ -1382,20 +2602,20 @@ do_stop() {
     fi
     local pid
     pid=$(cat "$PID_FILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    if ! pid_matches_daemon "$pid"; then
         rm -f "$PID_FILE"
         echo "$DAEMON_NAME is not running"
         return 0
     fi
 
     echo -n "Stopping $DAEMON_NAME... "
-    kill "$pid" 2>/dev/null || true
+    pid_matches_daemon "$pid" && kill "$pid" 2>/dev/null || true
     local count=0
-    while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
+    while pid_matches_daemon "$pid" && [ $count -lt 10 ]; do
         sleep 1
         count=$((count + 1))
     done
-    if kill -0 "$pid" 2>/dev/null; then
+    if pid_matches_daemon "$pid"; then
         kill -9 "$pid" 2>/dev/null || true
     fi
     rm -f "$PID_FILE"
@@ -1406,7 +2626,7 @@ do_status() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE" 2>/dev/null)
-        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        if pid_matches_daemon "$pid"; then
             echo "$DAEMON_NAME is running (PID $pid)"
             return 0
         fi
@@ -1436,16 +2656,16 @@ INITEOF
         "$tmp_script"
     rm -f "${tmp_script}.bak"
 
-    sudo install -m 755 "$tmp_script" "$script_path"
+    maybe_sudo install -m 755 "$tmp_script" "$script_path"
     rm -f "$tmp_script"
 }
 
 _register_initd_boot() {
     local name="$1"
     if command -v chkconfig &>/dev/null; then
-        sudo chkconfig --add "$name" &>/dev/null || true
+        maybe_sudo chkconfig --add "$name" &>/dev/null || true
     elif command -v update-rc.d &>/dev/null; then
-        sudo update-rc.d "$name" defaults &>/dev/null || true
+        maybe_sudo update-rc.d "$name" defaults &>/dev/null || true
     else
         echo "⚠️  Neither chkconfig nor update-rc.d found, boot registration skipped for $name"
     fi
@@ -1454,22 +2674,98 @@ _register_initd_boot() {
 _unregister_initd_boot() {
     local name="$1"
     if command -v chkconfig &>/dev/null; then
-        sudo chkconfig --del "$name" &>/dev/null || true
+        maybe_sudo chkconfig --del "$name" &>/dev/null || true
     elif command -v update-rc.d &>/dev/null; then
-        sudo update-rc.d "$name" remove &>/dev/null || true
+        maybe_sudo update-rc.d "$name" remove &>/dev/null || true
     fi
 }
 
-autostart_install() {
-    local system_service="${1:-false}"
-
-    # Root users have no user session — auto-escalate to system-level
-    if [ "$(id -u)" -eq 0 ]; then
-        system_service="true"
-    fi
+autostart_install_collector_only() {
+    local interactive="${1:-true}"
 
     local init_system
-    init_system=$(detect_init_system "$system_service")
+    init_system=$(detect_init_system "$interactive")
+    local target_user
+    target_user=$(whoami)
+
+    case "$init_system" in
+        launchd)
+            launchctl unload -w "$LAUNCHD_PLIST" 2>/dev/null || true
+            _write_launchd_plist
+            launchctl load -w "$LAUNCHD_PLIST"
+            echo "launchd" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-user)
+            _write_systemd_user_unit
+            systemctl --user daemon-reload &>/dev/null
+            systemctl --user enable --now loongsuite-pilot.service &>/dev/null
+            enable_linger || true
+            echo "systemd-user" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-system)
+            _write_systemd_system_unit "$target_user"
+            maybe_sudo systemctl daemon-reload &>/dev/null
+            maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
+            echo "systemd-system" > "$INIT_TYPE_FILE"
+            ;;
+        initd)
+            _write_initd_script "$target_user"
+            _register_initd_boot "loongsuite-pilot-${target_user}"
+            maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
+            echo "initd" > "$INIT_TYPE_FILE"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+autostart_install_updater_only() {
+    local interactive="${1:-true}"
+
+    local init_system
+    init_system=$(detect_init_system "$interactive")
+    local target_user
+    target_user=$(whoami)
+
+    case "$init_system" in
+        launchd)
+            launchctl unload -w "$UPDATER_PLIST" 2>/dev/null || true
+            _write_launchd_updater_plist
+            launchctl load -w "$UPDATER_PLIST"
+            echo "launchd" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-user)
+            _write_systemd_user_updater_unit
+            systemctl --user daemon-reload &>/dev/null
+            systemctl --user enable --now loongsuite-pilot-updater.service &>/dev/null
+            enable_linger || true
+            echo "systemd-user" > "$INIT_TYPE_FILE"
+            ;;
+        systemd-system)
+            _write_systemd_system_updater_unit "$target_user"
+            maybe_sudo systemctl daemon-reload &>/dev/null
+            maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
+            echo "systemd-system" > "$INIT_TYPE_FILE"
+            ;;
+        initd)
+            _write_initd_updater_script "$target_user"
+            _register_initd_boot "loongsuite-pilot-updater-${target_user}"
+            maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
+            echo "initd" > "$INIT_TYPE_FILE"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+
+autostart_install() {
+    local interactive="${1:-true}"
+
+    local init_system
+    init_system=$(detect_init_system "$interactive")
     local target_user
     target_user=$(whoami)
 
@@ -1503,21 +2799,21 @@ autostart_install() {
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 _write_systemd_system_updater_unit "$target_user"
             fi
-            sudo systemctl daemon-reload &>/dev/null
-            sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
+            maybe_sudo systemctl daemon-reload &>/dev/null
+            maybe_sudo systemctl enable --now "loongsuite-pilot-${target_user}.service" &>/dev/null
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
-                sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
+                maybe_sudo systemctl enable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null
             fi
             echo "systemd-system" > "$INIT_TYPE_FILE"
             ;;
         initd)
             _write_initd_script "$target_user"
             _register_initd_boot "loongsuite-pilot-${target_user}"
-            sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
+            maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" start &>/dev/null || true
             if [ -f "$BOOTSTRAP_DIR/updater-daemon.js" ]; then
                 _write_initd_updater_script "$target_user"
                 _register_initd_boot "loongsuite-pilot-updater-${target_user}"
-                sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
+                maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" start &>/dev/null || true
             fi
             echo "initd" > "$INIT_TYPE_FILE"
             ;;
@@ -1529,7 +2825,7 @@ autostart_install() {
 
 autostart_remove() {
     local init_system
-    init_system=$(detect_init_system)
+    init_system=$(detect_init_system "false")
     local target_user
     target_user=$(whoami)
 
@@ -1548,19 +2844,19 @@ autostart_remove() {
             systemctl --user daemon-reload &>/dev/null || true
             ;;
         systemd-system|systemd)
-            sudo systemctl disable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
-            sudo systemctl disable --now "loongsuite-pilot-${target_user}.service" &>/dev/null || true
-            sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-${target_user}.service"
-            sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-updater-${target_user}.service"
-            sudo systemctl daemon-reload &>/dev/null || true
+            maybe_sudo systemctl disable --now "loongsuite-pilot-updater-${target_user}.service" &>/dev/null || true
+            maybe_sudo systemctl disable --now "loongsuite-pilot-${target_user}.service" &>/dev/null || true
+            maybe_sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-${target_user}.service"
+            maybe_sudo rm -f "$SYSTEMD_SYSTEM_UNIT_DIR/loongsuite-pilot-updater-${target_user}.service"
+            maybe_sudo systemctl daemon-reload &>/dev/null || true
             ;;
         initd)
-            sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
-            sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
+            maybe_sudo "/etc/init.d/loongsuite-pilot-${target_user}" stop &>/dev/null || true
+            maybe_sudo "/etc/init.d/loongsuite-pilot-updater-${target_user}" stop &>/dev/null || true
             _unregister_initd_boot "loongsuite-pilot-${target_user}"
             _unregister_initd_boot "loongsuite-pilot-updater-${target_user}"
-            sudo rm -f "/etc/init.d/loongsuite-pilot-${target_user}"
-            sudo rm -f "/etc/init.d/loongsuite-pilot-updater-${target_user}"
+            maybe_sudo rm -f "/etc/init.d/loongsuite-pilot-${target_user}"
+            maybe_sudo rm -f "/etc/init.d/loongsuite-pilot-updater-${target_user}"
             ;;
         *)
             ;;
@@ -1595,7 +2891,7 @@ autostart_status() {
             ;;
         systemd-system|systemd)
             local unit_name="loongsuite-pilot-${target_user}.service"
-            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name" ] && sudo -n systemctl is-enabled "$unit_name" &>/dev/null; then
+            if [ -f "$SYSTEMD_SYSTEM_UNIT_DIR/$unit_name" ] && maybe_sudo_n systemctl is-enabled "$unit_name" &>/dev/null; then
                 echo "   autostart: enabled (systemd system-level)"
             else
                 echo "   autostart: disabled"
@@ -1608,12 +2904,67 @@ autostart_status() {
                 echo "   autostart: disabled"
             fi
             ;;
-        nohup)
-            echo "   autostart: disabled (nohup fallback, no service manager)"
+        none)
+            echo "   autostart: not available"
             ;;
         *)
             echo "   autostart: not available"
             ;;
+    esac
+}
+
+# Manage ~/.loongsuite-pilot/span-attributes.json — user-defined attributes
+# injected into trace spans (not the event log). The collector re-reads the
+# file per turn, so changes take effect without a restart.
+_span_attr_run() {
+    local node_bin
+    node_bin=$(resolve_node) || { echo "[span-attr] node runtime not found" >&2; exit 1; }
+    "$node_bin" -e '
+const fs = require("fs");
+const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
+const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
+function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
+function write(o) { const tmp = file + ".tmp"; fs.writeFileSync(tmp, JSON.stringify(o, null, 2) + "\n"); fs.renameSync(tmp, file); }
+if (op === "set") {
+  if (!key || value === undefined) { console.error("usage: span-attr set <key> <value>"); process.exit(1); }
+  if (isReserved(key)) { console.error("refused: \"" + key + "\" uses a reserved prefix (gen_ai./git./workspace./event./trace_/user./cost_/agent./...)"); process.exit(1); }
+  const o = read(); o[key] = String(value); write(o); console.log("set " + key + "=" + o[key]);
+} else if (op === "unset") {
+  if (!key) { console.error("usage: span-attr unset <key>"); process.exit(1); }
+  const o = read(); if (Object.prototype.hasOwnProperty.call(o, key)) { delete o[key]; write(o); console.log("unset " + key); } else { console.log("(no such key: " + key + ")"); }
+} else if (op === "list") {
+  const o = read(); const ks = Object.keys(o);
+  if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
+}
+' "$SPAN_ATTR_FILE" "$@"
+}
+
+cmd_span_attr() {
+    local sub="${1:-}"
+    case "$sub" in
+        set)   shift; _span_attr_run set "$@" ;;
+        unset) shift; _span_attr_run unset "$@" ;;
+        list)  _span_attr_run list ;;
+        clear)
+            rm -f "$SPAN_ATTR_FILE"
+            echo "cleared custom span attributes ($SPAN_ATTR_FILE)"
+            ;;
+        ""|help|-h|--help)
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
+            echo ""
+            echo "  set <key> <value>   Set a custom trace span attribute"
+            echo "  unset <key>         Remove a custom attribute"
+            echo "  list                Show current custom attributes"
+            echo "  clear               Remove all custom attributes"
+            echo ""
+            echo "Attributes are injected into trace spans only (not the event log)."
+            echo "Reserved-prefix keys (gen_ai./git./workspace./event./trace_/user./cost_/agent./...) are rejected."
+            echo "Changes take effect on the next turn — no restart needed." ;;
+        *)
+            echo "Unknown span-attr command: $sub" >&2
+            echo "Usage: loongsuite-pilot span-attr <set|unset|list|clear>" >&2
+            exit 1 ;;
     esac
 }
 
@@ -1626,26 +2977,27 @@ cmd_help() {
     echo "  restart         Restart the collector service"
     echo "  status          Show service status (default)"
     echo "  info            Show version and config info"
+    echo "  hook install    Install hooks before the agent starts"
+    echo "  hook status     Check whether installed hooks are still present"
+    echo "  inject --agents=claude-code [--config-dir PATH] [--json]"
+    echo "                  Prepare session hooks once (Linux/macOS)"
+    echo "  deploy [opts]   Deploy hooks/plugins once and exit (for image builds)"
+    echo "                    --require <ids>  comma-separated agent ids that must deploy"
+    echo "                    --json           machine-readable result"
     echo "  token-usage     Show token usage TUI"
-    echo "  monitor start   Start process resource monitor"
-    echo "  monitor stop    Stop process resource monitor"
+    echo "  menubar start   Enable and start the macOS menu bar app without restarting the collector"
+    echo "  menubar stop    Disable and stop only the macOS menu bar app (keep the collector running)"
+    echo "  dashboard start [port]  Enable Dashboard and start it (restarts a running collector)"
+    echo "  dashboard stop          Disable Dashboard (restarts a running collector)"
+    echo "  dashboard shortcut {install|status|uninstall}  Optional macOS Dock shortcut"
+    echo "  agent ...       Register/list/diagnose PI SDK Agents"
+    echo "  span-attr ...   Manage custom trace span attributes (set/unset/list/clear)"
     echo "  worker ...      Manage local remote-controlled workers"
+    if is_opensource_build; then
+        echo "  upgrade [opts]  Upgrade to latest or --version <version> (open-source only)"
+    fi
     echo "  rollback        Roll back to the previous version"
     echo "  help            Show this help message"
-    echo ""
-    echo "Options:"
-    echo "  --system-service  Use system-level service registration (requires sudo)"
-}
-
-cmd_monitor() {
-    case "${1:-}" in
-        start) cmd_monitor_start ;;
-        stop)  cmd_monitor_stop ;;
-        *)
-            echo "Unknown monitor command: ${1:-}"
-            echo "Usage: loongsuite-pilot monitor <start|stop>"
-            exit 1 ;;
-    esac
 }
 
 # ---- Dispatch ----
@@ -1656,12 +3008,30 @@ case "${1:-status}" in
     restart)     cmd_restart ;;
     status)      cmd_status ;;
     info)        cmd_info ;;
+    inject)      shift; cmd_inject "$@" ;;
+    hook)        shift; cmd_hook "$@" ;;
+    deploy)      shift; cmd_deploy "$@" ;;
+    dashboard)   shift; cmd_dashboard "$@" ;;
     token-usage) shift; cmd_token_usage "$@" ;;
     tokens)      shift; cmd_token_usage "$@" ;;
-    monitor)             cmd_monitor "${2:-}" ;;
+    menubar)     shift; cmd_menubar "$@" ;;
+    span-attr)   shift; cmd_span_attr "$@" ;;
     worker)              shift; cmd_worker "$@" ;;
+    agent)               shift; cmd_agent "$@" ;;
+    upgrade)
+        shift
+        if is_opensource_build; then
+            cmd_upgrade "$@"
+        else
+            echo "Unknown command: upgrade"
+            cmd_help
+            exit 1
+        fi
+        ;;
     rollback)            cmd_rollback ;;
-    restart-collector)   cmd_restart_collector ;;
+    start-collector)     cmd_start_collector ;;
+    restart-collector)   shift; cmd_restart_collector "$@" ;;
+    schedule-updater-restart) schedule_updater_restart ;;
     restart-updater)     cmd_restart_updater ;;
     run)                 cmd_run ;;
     run-updater)         cmd_run_updater ;;

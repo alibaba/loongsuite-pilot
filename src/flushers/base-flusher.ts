@@ -1,4 +1,13 @@
 import type { AgentActivityEntry } from '../types/index.js';
+import type { TraceRuntimeSnapshot } from '../metrics/trace-runtime-types.js';
+
+/** A Codex cursor must not advance until its configured log output accepts the batch. */
+export class CodexOutputDurabilityError extends Error {
+  constructor(output: string) {
+    super(`${output} did not acknowledge Codex events`);
+    this.name = 'CodexOutputDurabilityError';
+  }
+}
 
 /**
  * Abstract base for all data output flushers.
@@ -7,10 +16,21 @@ import type { AgentActivityEntry } from '../types/index.js';
 export abstract class BaseFlusher {
   abstract readonly name: string;
 
-  abstract send(entry: AgentActivityEntry): Promise<void>;
-  abstract sendBatch(entries: AgentActivityEntry[]): Promise<void>;
+  abstract send(entry: AgentActivityEntry, logicalBytes?: number): Promise<void>;
+  abstract sendBatch(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): Promise<void>;
+  /** Retain the returned attempt for one dispatch so fan-out can track accepted targets across retries. */
+  createBatchDelivery(entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal): () => Promise<void> {
+    return () => signal ? this.sendBatch(entries, logicalBytes, signal) : this.sendBatch(entries, logicalBytes);
+  }
   abstract flush(): Promise<void>;
   abstract shutdown(): Promise<void>;
+
+  getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] { return []; }
+
+  hasDurableTraceJournal(_agentType: string): boolean { return false; }
+
+  /** Protect raw producer files while a recoverable Hermes turn still needs them. */
+  hasPendingHermesSource(_sourceToken: string): boolean { return false; }
 
   async start(): Promise<void> {
     // Subclasses can override to perform async initialisation.

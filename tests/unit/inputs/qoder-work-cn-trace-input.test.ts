@@ -1,11 +1,24 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { ClientType } from '../../../src/types/index.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 import { QoderWorkTraceInput } from '../../../src/inputs/qoder-work-log/qoder-work-trace-input.js';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+
+let beforeOpen: ((file: unknown) => Promise<void>) | undefined;
+vi.mock('node:fs/promises', async importOriginal => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    async open(...args: Parameters<typeof actual.open>) {
+      await beforeOpen?.(args[0]);
+      return actual.open(...args);
+    },
+  };
+});
 
 describe('QoderWorkTraceInput (CN variant)', () => {
   let tmpRoot: string;
@@ -27,6 +40,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
   });
 
   afterEach(async () => {
+    beforeOpen = undefined;
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });
 
@@ -57,6 +71,92 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(input.agentType).toBe(ClientType.QoderWorkCN);
   });
 
+  it('keeps a split SDK record unread until its newline arrives', async () => {
+    const now = Date.now();
+    const rows = buildFullSessionLines({ sessionId: 'split', messageId: 'msg', startMs: now,
+      endMs: now + 1000, stopReason: 'end_turn', inputTokens: 1, outputTokens: 2, text: 'response' });
+    const split = 30;
+    await fs.writeFile(logFile, rows[0].slice(0, split));
+    seedOffset(0);
+    const input = makeInput();
+    expect(await collectOnce(input)).toEqual([]);
+    expect(stateStore.getOffset(`qoder-work-cn-trace:${logFile}`)).toBe(0);
+    await fs.appendFile(logFile, [rows[0].slice(split), ...rows.slice(1)].join('\n') + '\n');
+    expect((await collectOnce(input)).some(entry => entry['event.name'] === 'llm.response')).toBe(true);
+  });
+
+  it('collects a smaller replacement log after in-place truncation', async () => {
+    const now = Date.now();
+    await fs.writeFile(logFile, 'old log\n'.repeat(1024));
+    seedOffset((await fs.stat(logFile)).size);
+    const input = makeInput();
+    expect(await collectOnce(input)).toEqual([]);
+    const rows = buildFullSessionLines({ sessionId: 'after-truncate', messageId: 'msg', startMs: now,
+      endMs: now + 1000, stopReason: 'end_turn', inputTokens: 1, outputTokens: 2, text: 'response' });
+    await fs.writeFile(logFile, rows.join('\n') + '\n');
+    expect((await collectOnce(input)).some(entry => entry['gen_ai.session.id'] === 'after-truncate')).toBe(true);
+  });
+
+  it.each(['replace', 'remove'] as const)('keeps earlier sessions when a later SDK file undergoes %s before open', async race => {
+    const now = Date.now();
+    const rows = (sessionId: string) => buildFullSessionLines({ sessionId, messageId: sessionId,
+      startMs: now, endMs: now + 1000, stopReason: 'end_turn', inputTokens: 1, outputTokens: 2, text: 'response' })
+      .join('\n') + '\n';
+    const later = path.join(logsDir, 'zz-later', 'main.log');
+    await fs.mkdir(path.dirname(later), { recursive: true });
+    await fs.writeFile(logFile, rows('first'));
+    await fs.writeFile(later, rows('old-later'));
+    seedOffset(0);
+    const laterKey = `qoder-work-cn-trace:${later}`;
+    stateStore.setOffset(laterKey, 0);
+
+    beforeOpen = async file => {
+      if (file === later) {
+        if (race === 'replace') {
+          await fs.writeFile(later + '.new', rows('replacement'));
+          await fs.rename(later + '.new', later);
+        } else {
+          await fs.unlink(later);
+        }
+      }
+    };
+    const input = makeInput();
+    try {
+      const entries = await collectOnce(input);
+      expect(new Set(entries.map(entry => entry['gen_ai.session.id']))).toEqual(new Set(['first']));
+      expect(stateStore.getOffset(laterKey)).toBe(0);
+    } finally {
+      beforeOpen = undefined;
+    }
+    if (race === 'remove') await fs.writeFile(later, rows('replacement'));
+    const resumed = await collectOnce(input);
+    expect(new Set(resumed.map(entry => entry['gen_ai.session.id']))).toEqual(new Set(['replacement']));
+  });
+
+  it.each(['empty', 'partial'] as const)('clears the persisted model when a truncated log is %s', async initial => {
+    const store = new StateStore(path.join(tmpRoot, 'input-state.json'));
+    const key = `qoder-work-cn-trace:${logFile}`;
+    await fs.writeFile(logFile, 'old log\n'.repeat(1024));
+    const stat = await fs.stat(logFile);
+    store.set(key, { lastOffset: stat.size, extra: {
+      inode: stat.ino, modelPolicy: { chat: 'old-model', compact: '', scene: '' },
+    } });
+    const input = new QoderWorkTraceInput({ stateStore: store, dataRoot: tmpRoot, agentType: ClientType.QoderWorkCN });
+    const now = Date.now();
+    const rows = [
+      sdkLine(now, 'INFO', 'system', { subtype: 'init', session_id: 'new', model: 'new-model' }),
+      ...turnLines('new', 'msg', now, now + 1000, 'end_turn', 1, 2, { text: 'response' }),
+      resultLine(now + 1100, 'new'),
+    ].join('\n') + '\n';
+    const split = initial === 'empty' ? 0 : 30;
+    await fs.writeFile(logFile, rows.slice(0, split));
+    expect(await collectOnce(input)).toEqual([]);
+    expect(store.get(key).extra?.modelPolicy).toBeNull();
+    await fs.appendFile(logFile, rows.slice(split));
+    const entries = await collectOnce(input);
+    expect(entries.find(entry => entry['event.name'] === 'llm.response')?.['gen_ai.response.model']).toBe('new-model');
+  });
+
   it('emits span tree with BigInt nanosecond timestamps', async () => {
     const startMs = 1717950000123;
     const endMs = 1717950005456;
@@ -80,9 +180,10 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     // so the round-tripped ms value may differ from the original due to
     // timezone handling. Verify the nanos are 6 zeros + ms digits (BigInt format).
     const entryRequest = entries.find(
-      e => e['event.name'] === 'other' && !e['gen_ai.step.id'],
+      e => e['event.name'] === 'other',
     );
     expect(entryRequest).toBeDefined();
+    expect(entryRequest!['gen_ai.step.id']?.toString()).toMatch(/:s1$/);
     const startNano = entryRequest!.time_unix_nano;
     expect(startNano).toMatch(/^\d{16,}$/);
     // Verify it ends with 000000 (BigInt ms×1_000_000n always does)
@@ -134,7 +235,7 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(toolResultNano).toBeLessThan(step2StartNano);
   });
 
-  it('includes tool results in input.messages_delta for subsequent steps', async () => {
+  it('includes assistant tool calls before tool results in subsequent input deltas', async () => {
     const lines = buildTwoTurnSession({
       sessionId: 'sess-toolmsg',
       turn1: {
@@ -161,7 +262,18 @@ describe('QoderWorkTraceInput (CN variant)', () => {
 
     const inputMessages = step2Request!['gen_ai.input.messages_delta'] as Array<Record<string, unknown>>;
     expect(inputMessages).toBeDefined();
-    expect(inputMessages.length).toBeGreaterThan(0);
+    expect(inputMessages.map(message => message.role)).toEqual(['assistant', 'tool']);
+
+    const assistantMsg = inputMessages[0];
+    expect(assistantMsg).toMatchObject({
+      role: 'assistant',
+      parts: [{
+        type: 'tool_call',
+        id: 'tc-1',
+        name: 'Read',
+        arguments: { path: '/tmp/x.txt' },
+      }],
+    });
 
     const toolMsg = inputMessages.find(m => m.role === 'tool');
     expect(toolMsg).toBeDefined();
@@ -195,6 +307,44 @@ describe('QoderWorkTraceInput (CN variant)', () => {
     expect(stepResponse!['gen_ai.usage.input_tokens']).toBe(1234);
     expect(stepResponse!['gen_ai.usage.output_tokens']).toBe(567);
     expect(stepResponse!['gen_ai.usage.total_tokens']).toBe(1801);
+  });
+
+  it('emits later result windows in the same session with distinct turn ids', async () => {
+    const firstLines = buildFullSessionLines({
+      sessionId: 'sess-repeat',
+      messageId: 'msg-first',
+      startMs: 1000,
+      endMs: 2000,
+      stopReason: 'end_turn',
+      inputTokens: 10,
+      outputTokens: 2,
+      text: 'first',
+    });
+    await fs.appendFile(logFile, firstLines.join('\n') + '\n', 'utf-8');
+    seedOffset(0);
+
+    const first = await collectOnce(makeInput());
+    expect(first.length).toBeGreaterThan(0);
+    const firstTurnId = first.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'];
+    expect(firstTurnId).toBe('sess-repeat:t1');
+
+    const secondLines = buildFullSessionLines({
+      sessionId: 'sess-repeat',
+      messageId: 'msg-second',
+      startMs: 3000,
+      endMs: 4000,
+      stopReason: 'end_turn',
+      inputTokens: 20,
+      outputTokens: 4,
+      text: 'second',
+    });
+    await fs.appendFile(logFile, secondLines.join('\n') + '\n', 'utf-8');
+
+    const second = await collectOnce(makeInput());
+    expect(second.length).toBeGreaterThan(0);
+    const secondTurnId = second.find(e => e['gen_ai.turn.id'])?.['gen_ai.turn.id'];
+    expect(secondTurnId).toBe('sess-repeat:t2');
+    expect(secondTurnId).not.toBe(firstTurnId);
   });
 
   it('resolves model from set_model_policy', async () => {

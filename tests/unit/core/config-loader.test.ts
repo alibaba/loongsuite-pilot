@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 const mockReadJsonFile = vi.fn().mockResolvedValue(null);
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   readJsonFile: (...args: unknown[]) => mockReadJsonFile(...args),
@@ -9,7 +10,7 @@ vi.mock('../../../src/utils/fs-utils.js', () => ({
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
-    info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
+    info: vi.fn(), debug: vi.fn(), warn: mockLoggerWarn, error: vi.fn(),
   }),
 }));
 
@@ -19,12 +20,96 @@ function clearSlsEnv() {
   delete process.env.LOONGSUITE_SLS_MODE;
   delete process.env.LOONGSUITE_SLS_ACCESS_KEY_ID;
   delete process.env.LOONGSUITE_SLS_ACCESS_KEY_SECRET;
+  delete process.env.LOONGSUITE_SLS_API_KEY;
   delete process.env.LOONGSUITE_SLS_ENDPOINT;
   delete process.env.LOONGSUITE_SLS_PROJECT;
   delete process.env.LOONGSUITE_SLS_LOGSTORE;
 }
 
 describe('ConfigLoader', () => {
+  it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds)
+      .toEqual(['space-a', 'space-b']);
+
+    mockReadJsonFile.mockResolvedValueOnce({ listeners: {
+      'qwen-work-cn-collaboration': { includeConversationIds: 'space-a' },
+    } });
+    expect((await loadConfig()).listeners['qwen-work-cn-collaboration'].includeConversationIds).toEqual([]);
+  });
+
+  it('defaults Multica collection to off', async () => {
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: true, mode: 'off'});
+  });
+
+  it('allows environment mode overrides while preserving the Multica hard disable', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_MULTICA_ENABLED', 'false');
+    expect((await loadConfig()).pipeline.multica).toEqual({enabled: false, mode: 'on'});
+  });
+
+  it('discovers a local daemon with only Multica enabled and respects an explicit pipeline disable', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'on');
+    vi.stubEnv('LOONGSUITE_PILOT_PIPELINE_ENABLED', '');
+    vi.stubEnv('LOONGSUITE_PILOT_FILE_COLLECTION_ENABLED', '');
+    mockReadJsonFile.mockResolvedValueOnce({});
+    expect((await loadConfig()).pipeline).toMatchObject({enabled: false, multica: {discoverLocalSources: true}});
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {enabled: false}});
+    expect((await loadConfig()).pipeline.multica?.discoverLocalSources).toBeUndefined();
+  });
+
+  it('disables Multica when its collection mode is invalid', async () => {
+    vi.stubEnv('LOONGSUITE_PILOT_MULTICA_COLLECTION_MODE', 'typo');
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+    expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Multica collection mode; collection disabled');
+  });
+
+  it('reads the configured Multica mode', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({pipeline: {multica: {mode: 'off'}}});
+    expect((await loadConfig()).pipeline.multica?.mode).toBe('off');
+  });
+
+  it('loads workspace exclusions and rejects invalid privacy rules', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['/private-project'] } });
+    expect((await loadConfig()).privacy?.excludeWorkspaces).toEqual(['/private-project']);
+    mockReadJsonFile.mockResolvedValueOnce({ privacy: { excludeWorkspaces: ['relative'] } });
+    await expect(loadConfig()).rejects.toThrow('absolute local directories');
+  });
+
+  it('resolves span enrichers relative to config, home and PILOT_DATA, deduplicating paths', async () => {
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/config.json');
+    mockReadJsonFile.mockResolvedValueOnce({
+      dataDir: '/data/pilot', collectTrace: true,
+      otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: [
+        './skill.mjs', '/custom/skill.mjs', '~/home.mjs', '$PILOT_DATA/plugins/skill.mjs', 42, 'bad.ts',
+      ] },
+    });
+    const config = await loadConfig();
+    expect(buildOtlpTraceConfig(config)?.spanEnricherPaths).toEqual([
+      '/custom/skill.mjs', '/home/test/home.mjs', '/data/pilot/plugins/skill.mjs',
+    ]);
+  });
+
+  it('ignores malformed span enricher config without disabling trace export', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true, otlpTrace: { endpoint: 'http://localhost:4318', spanEnrichers: 'bad.mjs' },
+    });
+    expect(buildOtlpTraceConfig(await loadConfig())?.spanEnricherPaths).toEqual([]);
+  });
+
+  it('limits plugin count and supports CMS-only trace destinations', async () => {
+    mockReadJsonFile.mockResolvedValueOnce({
+      collectTrace: true,
+      cms: { licenseKey: 'test', endpoint: 'http://localhost:4318' },
+      otlpTrace: { spanEnrichers: Array.from({ length: 20 }, (_, i) => `/plugins/${i}.mjs`) },
+    });
+    const config = buildOtlpTraceConfig(await loadConfig());
+    expect(config?.spanEnricherPaths).toHaveLength(16);
+    expect(config?.endpoints).toHaveLength(1);
+  });
   beforeEach(() => {
     vi.clearAllMocks();
     vi.unstubAllEnvs();
@@ -36,6 +121,30 @@ describe('ConfigLoader', () => {
   });
 
   describe('three-layer priority (T025)', () => {
+    it.each([
+      [undefined, false], [false, false], [true, true], ['true', false], [1, false],
+    ])('only enables the dashboard for boolean true: %s', async (enabled, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(enabled === undefined ? {} : { dashboard: { enabled } });
+      expect((await loadConfig()).dashboard.enabled).toBe(expected);
+    });
+
+    it.each([
+      [undefined, 8765],
+      [1, 1],
+      [8765, 8765],
+      [65535, 65535],
+      [0, 8765],
+      [65536, 8765],
+      [-1, 8765],
+      [1.5, 8765],
+      ['9000', 8765],
+      [Number.NaN, 8765],
+    ])('validates dashboard.port=%s as %s', async (port, expected) => {
+      mockReadJsonFile.mockResolvedValueOnce(port === undefined ? {} : { dashboard: { port } });
+      const config = await loadConfig();
+      expect(config.dashboard.port).toBe(expected);
+    });
+
     it('env vars override config file values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         dataDir: '/from/file',
@@ -61,6 +170,7 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
       expect(config.autoStart).toBe(true);
+      expect(config.dashboard).toEqual({ enabled: false, port: 8765 });
     });
 
     it('loads configured userId from env over config file', async () => {
@@ -98,7 +208,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.enabled).toBe(true);
-      expect(config.flushers.jsonl?.enabled).toBe(true);
+      expect(config.flushers.jsonl?.enabled).toBe(false);
     });
   });
 
@@ -128,6 +238,41 @@ describe('ConfigLoader', () => {
         logstore: 'legacy-logstore',
       });
       expect(config.flushers.sls?.enabled).toBe(true);
+    });
+
+    it('tags inner SLS endpoints with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'user-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      // second read = configs/inner/data_config.json
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const eps = config.flushers.sls!.endpoints;
+      const user = eps.find(e => e.project === 'up')!;
+      const inner = eps.find(e => e.project === 'ip')!;
+      // user backend inherits the shared prefix (no override); inner carries its own
+      expect(user.serviceName).toBeUndefined();
+      expect(inner.serviceName).toBe('managed-svc');
+    });
+
+    it('leaves inner SLS serviceName unset when inner prefix equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: { endpoint: 'https://user.log.aliyuncs.com', project: 'up', logstore: 'ul' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        sls: [{ name: 'inner', endpoint: 'https://inner.log.aliyuncs.com', project: 'ip', logstore: 'il' }],
+      });
+
+      const config = await loadConfig();
+      const inner = config.flushers.sls!.endpoints.find(e => e.project === 'ip')!;
+      expect(inner.serviceName).toBeUndefined();
     });
 
     it('uses env SLS destination over file values', async () => {
@@ -197,7 +342,20 @@ describe('ConfigLoader', () => {
       expect(config.flushers.http?.url).toBe('https://api.example.com');
     });
 
-    it('resolves JSONL enabled from env', async () => {
+    it('enables JSONL only when explicitly requested in the config file or environment', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: false } });
+      vi.stubEnv('JSONL_ENABLED', 'true');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ jsonl: { enabled: true } });
+      vi.stubEnv('JSONL_ENABLED', 'false');
+      expect((await loadConfig()).flushers.jsonl?.enabled).toBe(false);
+    });
+
+    it('resolves JSONL disabled from env', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('JSONL_ENABLED', 'false');
 
@@ -221,23 +379,95 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.listeners.qoder).toBeDefined();
       expect(config.listeners.qoder.enabled).toBe(true);
-      expect(config.listeners['qoder-sqlite'].enabled).toBe(true);
+      expect(config.listeners['qoder-trace'].enabled).toBe(true);
       expect(config.listeners['qoder-work'].enabled).toBe(true);
-      expect(config.listeners['qoder-cli-session'].enabled).toBe(true);
+      expect(config.listeners['qoder-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qoder-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-hook']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-trace']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-sqlite']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['qwen-work-cn-collaboration']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['cursor-hook'].enabled).toBe(true);
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['grok-build-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('resolves the passive Doubao source override without changing other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: { 'doubao-work': { enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' } },
+      });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: false, pollInterval: 1200, logDir: '/synthetic/doubao/logs' });
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('preserves the explicitly selected Doubao client without affecting other listeners', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.doubao.enabled).toBe(false);
+      expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('keeps explicit legacy selection while allowing an independent App listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao-work' },
+        doubao: { enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' });
+      expect(config.listeners['doubao-work'].client).toBe('doubao-work');
+    });
+
+    it.each([false, true])('does not add App to a prior installer selection with Work enabled=%s', async enabled => {
+      mockReadJsonFile.mockResolvedValueOnce({ agents: { 'doubao-work': { enabled } } });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(false);
+    });
+
+    it('honors an explicit App agent selection independently of Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: { 'doubao-work': { enabled: false }, doubao: { enabled: true } },
+      });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(true);
+    });
+
+    it('does not redirect the independent App listener to Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { doubao: { client: 'doubao-work' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao.enabled).toBe(false);
+      expect(config.listeners['doubao-work'].enabled).toBe(true);
+    });
+
+    it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'typo' } } });
+      const config = await loadConfig();
+      expect(config.listeners['doubao-work'].enabled).toBe(false);
+      expect(config.listeners.workbuddy.enabled).toBe(true);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Invalid Doubao client; disabling this listener', {
+        valueType: 'string', allowedValues: ['doubao-work', 'doubao'],
+      });
     });
 
     it('merges file-level listener overrides', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         listeners: {
           qoder: { enabled: false, pollInterval: 120000 },
+          'opencode-log': { pollInterval: 1000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
         },
       });
 
       const config = await loadConfig();
       expect(config.listeners.qoder.enabled).toBe(false);
       expect(config.listeners.qoder.pollInterval).toBe(120000);
+      expect(config.listeners['opencode-log']).toEqual({ enabled: true, pollInterval: 1000 });
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
     it('migrates a legacy codex-log listener override to codex-transcript', async () => {
@@ -250,14 +480,65 @@ describe('ConfigLoader', () => {
       expect(config.listeners['codex-transcript']).toEqual({ enabled: false, pollInterval: 45_000 });
     });
 
-    it('applies Qoder poll interval env override to SQLite listener', async () => {
+    it('applies Qoder poll interval env override to the trace listener', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
       vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
 
       const config = await loadConfig();
       expect(config.listeners.qoder.pollInterval).toBe(45000);
-      expect(config.listeners['qoder-sqlite'].pollInterval).toBe(45000);
-      expect(config.listeners['qoder-cli-session'].pollInterval).toBe(45000);
+      // qoder-trace is the only Qoder CLI collector left, so the knob has to point
+      // at it; leaving it on the removed sqlite/session listeners would make the
+      // env var silently inert.
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(45000);
+    });
+
+    it('applies one poll interval env to every listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          qoder: { enabled: false, pollInterval: 120_000 },
+          'kiro-cli-session': { enabled: true, pollInterval: 60_000 },
+          'copilot-log': { enabled: false, pollInterval: 45_000 },
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '3000');
+      vi.stubEnv('QODER_ANALYTICS_POLL_INTERVAL', '45000');
+
+      const config = await loadConfig();
+
+      expect(config.listeners.qoder).toEqual({ enabled: false, pollInterval: 3000 });
+      expect(config.listeners['qoder-trace'].pollInterval).toBe(3000);
+      expect(config.listeners['cursor-hook'].pollInterval).toBe(3000);
+      expect(config.listeners['codex-transcript'].pollInterval).toBe(3000);
+      expect(config.listeners['copilot-log']).toEqual({ enabled: false, pollInterval: 3000 });
+      expect(config.listeners['hermes-agent-log'].pollInterval).toBe(3000);
+      expect(config.listeners['kiro-cli-session']).toEqual({ enabled: true, pollInterval: 3000 });
+      expect(config.listeners.workbuddy.pollInterval).toBe(3000);
+    });
+
+    it('ignores a non-positive or non-numeric unified poll interval', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '0');
+
+      const zero = await loadConfig();
+      expect(zero.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', 'nope');
+
+      const invalid = await loadConfig();
+      expect(invalid.listeners['cursor-hook'].pollInterval).toBe(10_000);
+
+      for (const raw of ['0.4', '3', '1e5', '0x10', '2147483648']) {
+        mockReadJsonFile.mockResolvedValueOnce(null);
+        vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', raw);
+        const ignored = await loadConfig();
+        expect(ignored.listeners['cursor-hook'].pollInterval).toBe(10_000);
+      }
+
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_POLL_INTERVAL_MS', '1000');
+      const accepted = await loadConfig();
+      expect(accepted.listeners['cursor-hook'].pollInterval).toBe(1_000);
     });
   });
 
@@ -273,6 +554,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(7);
       expect(config.retention.outputDays).toBe(7);
       expect(config.retention.slsFailedDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(7);
+      expect(config.retention.metricAlarmDays).toBe(7);
     });
 
     it('uses config file values over defaults', async () => {
@@ -280,6 +563,8 @@ describe('ConfigLoader', () => {
         retention: {
           hookHistoryDays: 60,
           hookDebugDays: 14,
+          otlpFailedDays: 3,
+          metricAlarmDays: 14,
         },
       });
 
@@ -287,6 +572,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookHistoryDays).toBe(60);
       expect(config.retention.hookDebugDays).toBe(14);
       expect(config.retention.hookErrorDays).toBe(7);
+      expect(config.retention.otlpFailedDays).toBe(3);
+      expect(config.retention.metricAlarmDays).toBe(14);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_DAYS overrides all defaults', async () => {
@@ -299,6 +586,8 @@ describe('ConfigLoader', () => {
       expect(config.retention.hookDebugDays).toBe(10);
       expect(config.retention.outputDays).toBe(10);
       expect(config.retention.slsFailedDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('config file values take precedence over unified env var', async () => {
@@ -310,6 +599,8 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.retention.hookHistoryDays).toBe(90);
       expect(config.retention.hookErrorDays).toBe(10);
+      expect(config.retention.otlpFailedDays).toBe(10);
+      expect(config.retention.metricAlarmDays).toBe(10);
     });
 
     it('LOONGSUITE_PILOT_LOG_RETENTION_ENABLED disables retention', async () => {
@@ -398,10 +689,10 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents.cursor.captureMessageContent).toBe(false);
       expect(config.agents.qoder.captureMessageContent).toBe(true);
-      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['codex-transcript']).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
-    it('parses string boolean captureMessageContent values', async () => {
+    it('parses string captureMessageContent values', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         agents: {
           cursor: { captureMessageContent: 'false' },
@@ -462,6 +753,810 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.agents).toEqual({});
     });
+
+    it('parses per-agent multimodal nested config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'all' },
+          },
+          cursor: { captureMessageContent: true },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex).toEqual({
+        captureMessageContent: true,
+        multimodal: { uploadMode: 'all' },
+      });
+      expect(config.agents.cursor).toEqual({ captureMessageContent: true });
+    });
+
+    it('parses agent multimodal allowedRootPaths and expands ~', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          qoder: {
+            captureMessageContent: true,
+            multimodal: {
+              uploadMode: 'all',
+              allowedRootPaths: ['~/workspace/loongsuite-pilot', '/tmp/extra'],
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.qoder.multimodal?.uploadMode).toBe('all');
+      expect(config.agents.qoder.multimodal?.allowedRootPaths).toEqual([
+        '/home/test/workspace/loongsuite-pilot',
+        '/tmp/extra',
+      ]);
+    });
+
+    it('defaults agent multimodal uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: {},
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'none',
+      });
+    });
+
+    it('keeps multimodal config for any agent id (runtime capability gate applies later)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'all' },
+          },
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'all' },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents.cursor.multimodal).toEqual({
+        uploadMode: 'all',
+      });
+      expect(config.agents.codex.multimodal).toEqual({
+        uploadMode: 'all',
+      });
+    });
+  });
+
+  describe('multimodal infra config', () => {
+    it('is undefined when multimodal block is absent', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({});
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('loads oss storage without uploadMode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'oss',
+          target: {
+            endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            storageBasePath: 'oss://bucket/mm',
+          },
+          auth: {
+            mode: 'ak',
+            accessKeyId: 'ak',
+            accessKeySecret: 'sk',
+          },
+        },
+        storageBasePath: 'oss://bucket/mm',
+      });
+    });
+
+    it('disables sls storage when logstore is omitted', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('loads sls apiKey auth without access keys', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: {
+              mode: 'apiKey',
+              apiKey: 'sls-api-key',
+            },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: {
+            mode: 'apiKey',
+            apiKey: 'sls-api-key',
+          },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('loads explicit anonymous auth for sls without credentials', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: { mode: 'anonymous' },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('disables anonymous sls auth when credentials are also present', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous', apiKey: 'must-not-be-used' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
+    });
+
+    it('loads delegatedOss with apiKey auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'delegatedOss',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'my-project',
+            logstore: 'mm-store',
+          },
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://my-project/mm-store',
+      });
+    });
+
+    it('disables anonymous auth for delegatedOss', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'delegatedOss',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
+    });
+
+    it('infers auth.mode=ak when mode is omitted and both access keys exist', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: {
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage.auth).toEqual({
+        mode: 'ak',
+        accessKeyId: 'ak',
+        accessKeySecret: 'sk',
+      });
+    });
+
+    it('infers auth.mode=apiKey when mode is omitted and only apiKey exists', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+              logstore: 'mm-store',
+            },
+            auth: {
+              apiKey: 'sls-api-key',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage.auth).toEqual({
+        mode: 'apiKey',
+        apiKey: 'sls-api-key',
+      });
+    });
+
+    it('disables multimodal when apiKey and access keys coexist', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+              apiKey: 'sls-api-key',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when auth.mode cannot be inferred', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              accessKeyId: 'ak',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when auth.mode is unsupported', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'webtracking',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when storage.type is invalid', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: { storage: { type: 's3' } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss storageBasePath is not oss://', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 's3://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when oss credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when type=oss uses apiKey auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: {
+              mode: 'apiKey',
+              apiKey: 'edge-key',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when type=oss uses anonymous auth', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'oss',
+            target: {
+              endpoint: 'https://oss-cn-hangzhou.aliyuncs.com',
+              storageBasePath: 'oss://bucket/mm',
+            },
+            auth: { mode: 'anonymous' },
+          },
+        },
+      });
+
+      expect((await loadConfig()).multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls credentials are incomplete', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+              project: 'my-project',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables multimodal when sls project is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            },
+            auth: {
+              mode: 'ak',
+              accessKeyId: 'ak',
+              accessKeySecret: 'sk',
+            },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('falls back unknown agent uploadMode to none', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'unknown' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'none' });
+    });
+
+    it('accepts input, output, and all uploadMode values', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: {
+          codex: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'input' },
+          },
+          cursor: {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'all' },
+          },
+          'claude-code': {
+            captureMessageContent: true,
+            multimodal: { uploadMode: 'output' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.agents.codex.multimodal).toEqual({ uploadMode: 'input' });
+      expect(config.agents.cursor.multimodal).toEqual({ uploadMode: 'all' });
+      expect(config.agents['claude-code'].multimodal).toEqual({ uploadMode: 'output' });
+    });
+  });
+
+  describe('multimodal sls auth reuse', () => {
+    const slsApiKey = {
+      enabled: true,
+      endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+      project: 'user-proj',
+      logstore: 'user-store',
+      mode: 'apiKey' as const,
+      apiKey: 'sls-api-key',
+    };
+    const mmAuth = { mode: 'apiKey' as const, apiKey: 'mm-key' };
+    const explicitTarget = {
+      endpoint: slsApiKey.endpoint,
+      project: slsApiKey.project,
+      logstore: slsApiKey.logstore,
+    };
+
+    it('does not reuse an incomplete storage target', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: { storage: { type: 'sls', target: { logstore: 'multimodal' } } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('does not fill a missing project from sls', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables upload when project is blank', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { endpoint: slsApiKey.endpoint, project: '  ', logstore: 'mm-store' },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('disables upload when project conflicts with a qualified host', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+              project: 'other-proj',
+              logstore: 'mm-store',
+            },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+    it('regionalizes an explicit project-qualified multimodal endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+              project: 'mm-proj',
+              logstore: 'mm-store',
+            },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'mm-proj',
+            logstore: 'mm-store',
+          },
+          auth: mmAuth,
+        },
+        storageBasePath: 'sls://mm-proj/mm-store',
+      });
+    });
+
+    it('extracts project from a project-qualified multimodal endpoint', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: {
+              endpoint: 'https://mm-proj.cn-hangzhou.log.aliyuncs.com',
+              logstore: 'mm-store',
+            },
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: {
+            endpoint: 'https://cn-hangzhou.log.aliyuncs.com',
+            project: 'mm-proj',
+            logstore: 'mm-store',
+          },
+          auth: mmAuth,
+        },
+        storageBasePath: 'sls://mm-proj/mm-store',
+      });
+    });
+    it('reuses the apiKey of the explicit target when auth is omitted', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: { storage: { type: 'sls', target: explicitTarget } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toEqual({
+        storage: {
+          type: 'sls',
+          target: explicitTarget,
+          auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+        },
+        storageBasePath: 'sls://user-proj/user-store',
+      });
+    });
+
+    it('reuses the matching apiKey when another destination also has an apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          { name: 'one', ...slsApiKey },
+          {
+            name: 'two',
+            endpoint: 'https://cn-shanghai.log.aliyuncs.com',
+            project: 'p2',
+            logstore: 'l2',
+            mode: 'apiKey' as const,
+            apiKey: 'key-2',
+          },
+        ],
+        multimodal: { storage: { type: 'sls', target: explicitTarget } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toMatchObject({
+        auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+      });
+    });
+
+    it('reuses the apiKey when the flusher host is project-qualified', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          ...slsApiKey,
+          endpoint: 'https://user-proj.cn-hangzhou.log.aliyuncs.com',
+        },
+        multimodal: { storage: { type: 'sls', target: explicitTarget } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toMatchObject({
+        target: explicitTarget,
+        auth: { mode: 'apiKey', apiKey: 'sls-api-key' },
+      });
+    });
+
+    it('does not reuse an apiKey for a different logstore', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: { ...explicitTarget, logstore: 'multimodal' },
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('does not reuse auth when the matching destination is not apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: {
+          ...slsApiKey,
+          mode: 'ak' as const,
+          accessKeyId: 'sls-ak',
+          accessKeySecret: 'sls-sk',
+          apiKey: undefined,
+        },
+        multimodal: { storage: { type: 'sls', target: explicitTarget } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('does not reuse when the same destination has conflicting apiKeys', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: [
+          { name: 'one', ...slsApiKey, apiKey: 'key-1' },
+          { name: 'two', ...slsApiKey, apiKey: 'key-2' },
+        ],
+        multimodal: { storage: { type: 'sls', target: explicitTarget } },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal).toBeUndefined();
+    });
+
+    it('keeps explicit auth instead of the matching flusher apiKey', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        sls: slsApiKey,
+        multimodal: {
+          storage: {
+            type: 'sls',
+            target: explicitTarget,
+            auth: mmAuth,
+          },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.multimodal?.storage).toMatchObject({ auth: mmAuth });
+    });
   });
 
   describe('mask config', () => {
@@ -469,7 +1564,11 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('defaults to none when mask.mode is missing', async () => {
@@ -478,7 +1577,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('loads all mode and ignores types', async () => {
@@ -490,21 +1593,45 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('loads custom mode with supported types only', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         mask: {
           mode: 'custom',
-          types: ['apiKey', 'cloudAccessKey', 'pii', 'databaseUrl'],
+          types: [
+            'apiKey',
+            'cloudAccessKey',
+            'pii',
+            'databaseUrl',
+            'idCard',
+            'phone',
+            'email',
+            'ipAddress',
+            'bankCard',
+          ],
         },
       });
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['apiKey', 'cloudAccessKey', 'databaseUrl'],
+        replacementMode: 'preview',
+        types: [
+          'apiKey',
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
     });
 
@@ -517,7 +1644,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'none', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'none',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('custom mode with empty or omitted types enables no mask types', async () => {
@@ -526,7 +1657,11 @@ describe('ConfigLoader', () => {
       });
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'custom', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('uses mask mode env over config file', async () => {
@@ -539,7 +1674,11 @@ describe('ConfigLoader', () => {
       vi.stubEnv('LOONGSUITE_PILOT_MASK_MODE', 'all');
 
       const config = await loadConfig();
-      expect(config.mask).toEqual({ mode: 'all', types: [] });
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'preview',
+      });
     });
 
     it('uses mask types env for custom mode and filters unsupported values', async () => {
@@ -549,13 +1688,119 @@ describe('ConfigLoader', () => {
           types: ['apiKey'],
         },
       });
-      vi.stubEnv('LOONGSUITE_PILOT_MASK_TYPES', 'cloudAccessKey,pii,databaseUrl');
+      vi.stubEnv(
+        'LOONGSUITE_PILOT_MASK_TYPES',
+        'cloudAccessKey,pii,databaseUrl,idCard,phone,email,ipAddress,bankCard',
+      );
 
       const config = await loadConfig();
       expect(config.mask).toEqual({
         mode: 'custom',
-        types: ['cloudAccessKey', 'databaseUrl'],
+        replacementMode: 'preview',
+        types: [
+          'cloudAccessKey',
+          'databaseUrl',
+          'idCard',
+          'phone',
+          'email',
+          'ipAddress',
+          'bankCard',
+        ],
       });
+    });
+
+    it('loads preview replacement mode from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'all',
+        types: [],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('uses placeholder only when explicitly configured', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: 'placeholder' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('uses preview for an empty replacement mode in the config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all', replacementMode: '' },
+      });
+
+      expect((await loadConfig()).mask.replacementMode).toBe('preview');
+    });
+
+    it.each([
+      false,
+      42,
+      {},
+      [],
+      null,
+    ])('uses preview for non-string replacement mode %j even when masking is off', async raw => {
+      for (const mode of ['all', 'none']) {
+        mockReadJsonFile.mockResolvedValueOnce({
+          mask: { mode, replacementMode: raw },
+        });
+        const config = await loadConfig();
+        expect(config.mask.mode).toBe(mode);
+        expect(config.mask.replacementMode).toBe('preview');
+      }
+    });
+
+    it('uses replacement mode env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'placeholder',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'preview');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('accepts an explicit placeholder environment override', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ mask: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', 'placeholder');
+
+      expect((await loadConfig()).mask.replacementMode).toBe('placeholder');
+    });
+
+    it('treats an empty replacement mode env as unset', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'preview',
+        },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_MASK_REPLACEMENT_MODE', '');
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
+    });
+
+    it('falls back to preview for an invalid replacement mode', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: {
+          mode: 'all',
+          replacementMode: 'fingerprint',
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.mask.replacementMode).toBe('preview');
     });
   });
 
@@ -597,15 +1842,22 @@ describe('ConfigLoader', () => {
     });
   });
 
-  describe('collectLog, collectTrace, serviceNamePrefix, cms', () => {
+  describe('collectLog, collectTrace, serviceName, serviceNamePrefix, cms', () => {
     it('defaults when config file is missing', async () => {
       mockReadJsonFile.mockResolvedValueOnce(null);
 
       const config = await loadConfig();
       expect(config.collectLog).toBe(true);
       expect(config.collectTrace).toBe(true);
+      expect(config.serviceName).toBeUndefined();
       expect(config.serviceNamePrefix).toBe('loongsuite-pilot');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBeUndefined();
       expect(config.cms).toEqual({ enabled: false, licenseKey: '', endpoint: '', workspace: '', debug: false });
+    });
+
+    it('honors an explicit Multica environment even when it matches the built-in Pilot prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceNamePrefix: 'loongsuite-pilot' });
+      expect((await loadConfig()).pipeline.multica?.serviceNamePrefix).toBe('loongsuite-pilot');
     });
 
     it('reads values from config file', async () => {
@@ -620,6 +1872,7 @@ describe('ConfigLoader', () => {
       expect(config.collectLog).toBe(false);
       expect(config.collectTrace).toBe(false);
       expect(config.serviceNamePrefix).toBe('my-team');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('my-team');
       expect(config.cms).toEqual({
         enabled: true,
         licenseKey: 'key123',
@@ -670,6 +1923,28 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.serviceNamePrefix).toBe('from-env');
+      expect(config.pipeline.multica?.serviceNamePrefix).toBe('from-env');
+    });
+
+    it('loads an exact serviceName from env over config and passes it to SLS', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceName: 'from-file',
+        serviceNamePrefix: 'legacy-prefix',
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_SERVICE_NAME', 'shared-service');
+
+      const config = await loadConfig();
+      expect(config.serviceName).toBe('shared-service');
+      expect(config.flushers.sls?.serviceName).toBe('shared-service');
+      expect(config.serviceNamePrefix).toBe('legacy-prefix');
+    });
+
+    it('treats an empty exact serviceName env as unset and falls back to config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ serviceName: 'from-file' });
+      vi.stubEnv('LOONGSUITE_PILOT_SERVICE_NAME', '   ');
+
+      const config = await loadConfig();
+      expect(config.serviceName).toBe('from-file');
     });
   });
 
@@ -700,7 +1975,7 @@ describe('ConfigLoader', () => {
       expect(config.otlpTrace).toBeUndefined();
     });
 
-    it('buildOtlpTraceConfig uses new path when otlpTrace.endpoint present', async () => {
+    it('buildOtlpTraceConfig builds a single endpoint from otlpTrace', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         otlpTrace: {
@@ -717,13 +1992,39 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://jaeger:4318');
-      expect(result!.headers).toEqual({ 'X-Custom': 'val' });
+      expect(result!.endpoints).toHaveLength(1);
+      expect(result!.endpoints[0]).toEqual({
+        name: 'user-otlp',
+        endpoint: 'http://jaeger:4318',
+        headers: { 'X-Custom': 'val' },
+        compression: undefined,
+      });
       expect(result!.resourceAttributes).toEqual({ 'team': 'infra' });
       expect(result!.serviceName).toBe('my-svc');
       expect(result!.debug).toBe(true);
       expect(result!.turnIdleTimeoutMs).toBe(5000);
       expect(result!.resourceAttributeKeys).toEqual([]);
+    });
+
+    it('does not turn a per-agent content policy into a global Trace policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        agents: { 'claude-code': { captureMessageContent: false }, cursor: {} },
+        otlpTrace: { endpoint: 'http://localhost:4318' },
+      });
+
+      const config = await loadConfig();
+      expect(config.agents['claude-code'].captureMessageContent).toBe(false);
+      expect(config.agents.cursor.captureMessageContent).toBe(true);
+      expect(buildOtlpTraceConfig(config)?.captureMessageContent).toBe(true);
+    });
+
+    it('keeps an explicit global Trace content policy', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://localhost:4318', captureMessageContent: false },
+      });
+      expect(buildOtlpTraceConfig(await loadConfig())?.captureMessageContent).toBe(false);
     });
 
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
@@ -742,7 +2043,34 @@ describe('ConfigLoader', () => {
       expect(result!.resourceAttributeKeys).toEqual(['agentteams.worker.name', 'custom.attr']);
     });
 
-    it('buildOtlpTraceConfig falls back to cms path when no otlpTrace', async () => {
+    it('buildOtlpTraceConfig defaults spanAttributePassthroughPrefixes to []', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://jaeger:4318' },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual([]);
+    });
+
+    it('buildOtlpTraceConfig trims and de-dups spanAttributePassthroughPrefixes', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: {
+          endpoint: 'http://jaeger:4318',
+          spanAttributePassthroughPrefixes: ['multica.', 'multica.', ' custom. ', ' '],
+        },
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.spanAttributePassthroughPrefixes).toEqual(['multica.', 'custom.']);
+    });
+
+    it('buildOtlpTraceConfig expands cms into an arms endpoint', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         cms: { licenseKey: 'key123', endpoint: 'https://arms.cn-hangzhou.arms.aliyuncs.com', workspace: 'ws1' },
@@ -752,17 +2080,18 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
-      expect(result!.headers).toEqual({
+      expect(result!.endpoints).toHaveLength(1);
+      expect(result!.endpoints[0]!.name).toBe('user-cms');
+      expect(result!.endpoints[0]!.endpoint).toBe('https://arms.cn-hangzhou.arms.aliyuncs.com');
+      expect(result!.endpoints[0]!.headers).toEqual({
         'x-arms-license-key': 'key123',
         'x-arms-project': 'arms',
         'x-cms-workspace': 'ws1',
       });
       expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
-      expect(result!.resourceAttributeKeys).toEqual([]);
     });
 
-    it('buildOtlpTraceConfig prefers otlpTrace over cms', async () => {
+    it('buildOtlpTraceConfig unions otlpTrace AND cms (both sent)', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,
         cms: { licenseKey: 'key', endpoint: 'https://arms.example.com', workspace: 'ws' },
@@ -773,9 +2102,175 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://tempo:4318');
-      expect(result!.headers).toBeUndefined();
-      expect(result!.resourceAttributes).toBeUndefined();
+      expect(result!.endpoints).toHaveLength(2);
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp', 'user-cms']);
+      expect(result!.endpoints[0]!.endpoint).toBe('http://tempo:4318');
+      expect(result!.endpoints[1]!.endpoint).toBe('https://arms.example.com');
+      // arms resource attribute is shared across all backends
+      expect(result!.resourceAttributes).toEqual({ 'acs.arms.service.feature': 'genai_app' });
+    });
+
+    it('buildOtlpTraceConfig adds inner otlp[] and cms[] backends (union)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      // second read = configs/inner/data_config.json
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318', headers: { 'x-token': 't' } }],
+        cms: [{ name: 'managed-arms', endpoint: 'https://managed.arms.aliyuncs.com', licenseKey: 'lk', project: 'proj', workspace: 'wksp' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp', 'managed-otlp', 'managed-arms']);
+      const arms = result!.endpoints.find(e => e.name === 'managed-arms')!;
+      expect(arms.headers).toEqual({
+        'x-arms-license-key': 'lk',
+        'x-arms-project': 'proj',
+        'x-cms-workspace': 'wksp',
+      });
+    });
+
+    it('buildOtlpTraceConfig tags inner backends with inner serviceNamePrefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+        cms: [{ name: 'managed-arms', endpoint: 'https://managed.arms.aliyuncs.com', licenseKey: 'lk' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // top-level serviceName stays the user prefix
+      expect(result!.serviceName).toBe('user-svc');
+      // user backend leaves serviceName unset (inherits top-level)
+      expect(result!.endpoints.find(e => e.name === 'user-otlp')!.serviceName).toBeUndefined();
+      // both inner backends carry the managed serviceName
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBe('managed-svc');
+      expect(result!.endpoints.find(e => e.name === 'managed-arms')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig uses one exact serviceName for user and managed backends', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceName: 'shared-service',
+        serviceNamePrefix: 'user-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318', serviceName: 'legacy-otlp-svc' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result!.serviceName).toBe('shared-service');
+      expect(result!.appendAgentTypeToServiceName).toBe(false);
+      expect(result!.endpoints.every(endpoint => endpoint.serviceName === undefined)).toBe(true);
+    });
+
+    it('buildOtlpTraceConfig leaves inner serviceName unset when it equals the user prefix', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'same-svc',
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'same-svc',
+        otlp: [{ name: 'managed-otlp', endpoint: 'http://collector.internal:4318' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      // no differentiation needed -> inner endpoint inherits the top-level name
+      expect(result!.endpoints.find(e => e.name === 'managed-otlp')!.serviceName).toBeUndefined();
+    });
+
+    it('buildOtlpTraceConfig keeps same-url backends split by inner serviceName', async () => {
+      // user + inner point at the same ARMS url with the same license, but the
+      // inner backend has a distinct serviceName -> both must be kept.
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        serviceNamePrefix: 'user-svc',
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        serviceNamePrefix: 'managed-svc',
+        cms: [{ name: 'managed-dup', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w' }],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'managed-dup']);
+      expect(result!.endpoints.find(e => e.name === 'managed-dup')!.serviceName).toBe('managed-svc');
+    });
+
+    it('buildOtlpTraceConfig dedups by url + license-key + project', async () => {
+      // user-cms: project is extracted from the hostname ('a'), license 'lk'
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: [
+          // same url + same license + same (extracted) project 'a' -> dropped
+          { name: 'dup', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w' },
+          // same url, different license -> kept
+          { name: 'other-tenant', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk2', workspace: 'w2' },
+        ],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-tenant']);
+    });
+
+    it('buildOtlpTraceConfig keeps same-url/license/project backends that differ only by workspace', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        cms: { licenseKey: 'lk', endpoint: 'https://a.arms.aliyuncs.com', workspace: 'w1' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        cms: [
+          // same url + same license + same project, only workspace differs -> kept
+          { name: 'other-workspace', endpoint: 'https://a.arms.aliyuncs.com', licenseKey: 'lk', workspace: 'w2' },
+        ],
+      });
+
+      const config = await loadConfig();
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-cms', 'other-workspace']);
+    });
+
+    it('buildOtlpTraceConfig ignores malformed (non-array) inner otlp/cms without throwing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://tempo:4318' },
+      });
+      // control-plane serialization error: otlp/cms are objects, not arrays
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: { endpoint: 'http://oops:4318' },
+        cms: 'not-an-array',
+      });
+
+      const config = await loadConfig();
+      // must not throw — a bad managed push cannot brick flusher construction
+      const result = buildOtlpTraceConfig(config);
+
+      expect(result).toBeDefined();
+      expect(result!.endpoints.map(e => e.name)).toEqual(['user-otlp']);
     });
 
     it('buildOtlpTraceConfig returns undefined when collectTrace is false', async () => {
@@ -800,7 +2295,7 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.endpoint).toBe('http://from-env:4318');
+      expect(result!.endpoints[0]!.endpoint).toBe('http://from-env:4318');
     });
 
     it('env var LOONGSUITE_PILOT_OTLP_HEADERS overrides file headers', async () => {
@@ -817,7 +2312,7 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.headers).toEqual({ from: 'env' });
+      expect(result!.endpoints[0]!.headers).toEqual({ from: 'env' });
     });
 
     it('new path with empty headers produces undefined headers', async () => {
@@ -830,7 +2325,205 @@ describe('ConfigLoader', () => {
       const result = buildOtlpTraceConfig(config);
 
       expect(result).toBeDefined();
-      expect(result!.headers).toBeUndefined();
+      expect(result!.endpoints[0]!.headers).toBeUndefined();
+    });
+  });
+
+  describe('globalSpanAttributes', () => {
+    afterEach(() => {
+      delete process.env.OTEL_SPAN_ATTRIBUTES;
+    });
+
+    it('reads from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'prod' });
+    });
+
+    it('OTEL_SPAN_ATTRIBUTES env overrides config on collision', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ globalSpanAttributes: { team: 'infra', env: 'prod' } });
+      vi.stubEnv('OTEL_SPAN_ATTRIBUTES', 'env=staging,extra=v');
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', env: 'staging', extra: 'v' });
+    });
+
+    it('drops reserved-prefix keys and non-strings from config', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        globalSpanAttributes: { team: 'infra', 'git.repo': 'x', num: 5, obj: { a: 1 } },
+      });
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({ team: 'infra', num: '5' });
+    });
+
+    it('is empty when neither config nor env set', async () => {
+      const config = await loadConfig();
+      expect(config.globalSpanAttributes).toEqual({});
+    });
+  });
+
+  describe('upstreamLink config', () => {
+    it('is disabled by default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '');
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+      expect(config.upstreamLink.propagateToTools).toBe(false);
+      expect(config.upstreamLink.propagateToLlm).toBe(false);
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(false);
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('enables via env and reads ttl from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { ttlMs: 3_600_000 } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', 'true');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(true);
+      expect(config.upstreamLink.ttlMs).toBe(3_600_000);
+    });
+
+    it('enables downstream tool propagation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, propagateToTools: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.propagateToTools).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.propagateToTools).toBe(true);
+    });
+
+    it('enables LLM gateway propagation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, propagateToLlm: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.propagateToLlm).toBe(true);
+    });
+
+    it('enables local trace generation from config or env', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        upstreamLink: { enabled: true, generateTraceWhenMissing: true },
+      });
+      let config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
+
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true } });
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING', '1');
+      config = await loadConfig();
+      expect(config.upstreamLink.generateTraceWhenMissing).toBe(true);
+    });
+
+    it('treats an empty-string enable env as unset (not "true")', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK', '');
+      const config = await loadConfig();
+      expect(config.upstreamLink.enabled).toBe(false);
+    });
+
+    it('clamps ttlMs=0 to the 24h default (would delete all files otherwise)', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ upstreamLink: { enabled: true, ttlMs: 0 } });
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+
+    it('clamps a negative ttlMs env to the 24h default', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      vi.stubEnv('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', '-5');
+      const config = await loadConfig();
+      expect(config.upstreamLink.ttlMs).toBe(86_400_000);
+    });
+  });
+
+  describe('interceptor config', () => {
+    it('defaults to none when interceptor config is missing', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+    });
+
+    it('treats interceptor custom mode as none and does not expand mask', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: {
+          mode: 'custom',
+          types: ['apiKey', 'idCard', 'cloudAccessKey'],
+        },
+      });
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask.mode).toBe('none');
+    });
+
+    it('uses interceptor env over config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        interceptor: { mode: 'none', types: ['apiKey'] },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'all');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'all' });
+      expect(config.mask).toMatchObject({
+        mode: 'custom', types: ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'],
+      });
+    });
+
+    it('leaves mask mode all unchanged when interceptor is enabled', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        mask: { mode: 'all' },
+        interceptor: { mode: 'all' },
+      });
+      const config = await loadConfig();
+      expect(config.mask.mode).toBe('all');
+    });
+
+    it('merges custom mask types and preserves replacement mode when interceptor is enabled', async () => {
+      const mask = { mode: 'custom', types: ['email', 'apiKey', 'email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      const config = await loadConfig();
+      expect(config.mask).toEqual({
+        mode: 'custom',
+        types: ['email', 'apiKey', 'cloudAccessKey', 'privateKey', 'databaseUrl'],
+        replacementMode: 'preview',
+      });
+    });
+
+    it('does not expand mask when an interceptor environment override disables interception', async () => {
+      const mask = { mode: 'custom', types: ['email'], replacementMode: 'preview' };
+      mockReadJsonFile.mockResolvedValueOnce({ mask, interceptor: { mode: 'all' } });
+      vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', 'none');
+      const config = await loadConfig();
+      expect(config.interceptor).toEqual({ mode: 'none' });
+      expect(config.mask).toEqual(mask);
+    });
+  });
+
+  describe('Antigravity family default listeners', () => {
+    it('enables the shared App and IDE listener and the CLI listener with 30-second polling', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners).not.toHaveProperty('antigravity-ide');
+    });
+
+    it('respects per-variant Antigravity listener overrides from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          antigravity: { enabled: false },
+          'antigravity-cli': { enabled: true, pollInterval: 5_000 },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: false, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 5_000 });
     });
   });
 });

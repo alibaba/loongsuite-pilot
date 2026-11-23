@@ -5,8 +5,9 @@ import {
   persistFailedLogs,
   type SlsTransportConfig,
 } from '../../../flushers/sls-transport.js';
-import { LOCAL_IP, buildUserAgent } from '../../../utils/network-utils.js';
+import { LOCAL_MAC, buildUserAgent } from '../../../utils/network-utils.js';
 import { createLogger } from '../../../utils/logger.js';
+import { estimateStringRecordBytes } from '../../../flushers/sls-failure-log-writer.js';
 
 const logger = createLogger('QoderApiSlsSender');
 
@@ -22,6 +23,8 @@ export interface QoderApiSlsSenderOptions {
   configName: string;
   failedLogDir: string;
   dataDir: string;
+  hostSn?: string;
+  hostIdentityTags?: boolean;
 }
 
 /**
@@ -29,7 +32,7 @@ export interface QoderApiSlsSenderOptions {
  *
  * Buffers flat-string log rows in a single array (no per-file buckets) and
  * flushes them to SLS via webtracking on a 2-second interval. On send failure
- * the batch is persisted to a local failed-log directory for later inspection.
+ * bounded diagnostic metadata is persisted to a local failed-log directory.
  */
 export class QoderApiSlsSender {
   private readonly transportConfig: SlsTransportConfig;
@@ -37,6 +40,9 @@ export class QoderApiSlsSender {
   private readonly failedLogDir: string;
   private readonly userAgent: string;
   private readonly hostname: string;
+  private readonly mac: string;
+  private readonly sn: string;
+  private readonly hostIdentityTags: boolean;
   private buffer: Record<string, string>[] = [];
   private flushTimer: ReturnType<typeof setInterval> | null = null;
   private flushing = false;
@@ -55,6 +61,9 @@ export class QoderApiSlsSender {
     this.failedLogDir = opts.failedLogDir;
     this.userAgent = buildUserAgent(opts.dataDir);
     this.hostname = os.hostname();
+    this.mac = LOCAL_MAC;
+    this.sn = opts.hostSn?.trim() ?? '';
+    this.hostIdentityTags = opts.hostIdentityTags !== false;
   }
 
   start(): void {
@@ -103,6 +112,8 @@ export class QoderApiSlsSender {
               source: this.hostname,
               tags: {
                 __hostname__: this.hostname,
+                ...(this.hostIdentityTags && this.mac ? { __mac__: this.mac } : {}),
+                ...(this.hostIdentityTags && this.sn ? { __sn__: this.sn } : {}),
                 pipeline_type: 'qoder-api',
               },
               userAgent: this.userAgent,
@@ -127,16 +138,22 @@ export class QoderApiSlsSender {
             await persistFailedLogs(
               this.failedLogDir,
               this.configName,
-              { __logs__: tasks[i].batch },
+              {
+                mode: 'webtracking',
+                project: this.transportConfig.project,
+                logstore: this.transportConfig.logstore,
+                kind: this.configName,
+                batchCount: tasks[i].batch.length,
+                batchBytes: estimateStringRecordBytes(tasks[i].batch),
+              },
               err,
             );
           }
         }
 
-        // Note: splice runs after persistFailedLogs, so if persistFailedLogs throws,
-        // successfully-sent batches remain in the buffer and will be re-sent on the
-        // next flush cycle. This is safe because event_id dedup at SLS is load-bearing
-        // for correctness — it prevents duplicate delivery, not just an optimization.
+        // Failed payloads are not retained locally. The lightweight failed-log only
+        // records bounded diagnostic metadata; event_id still protects any retry path
+        // from duplicate delivery.
         this.buffer.splice(0, sliceEnd);
         if (hasFailure) break;
 
@@ -187,7 +204,14 @@ export class QoderApiSlsSender {
       await persistFailedLogs(
         this.failedLogDir,
         this.configName,
-        { __logs__: remaining },
+        {
+          mode: 'webtracking',
+          project: this.transportConfig.project,
+          logstore: this.transportConfig.logstore,
+          kind: this.configName,
+          batchCount: remaining.length,
+          batchBytes: estimateStringRecordBytes(remaining),
+        },
         new Error('shutdown drain incomplete'),
       );
     }

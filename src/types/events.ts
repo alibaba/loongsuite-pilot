@@ -16,8 +16,15 @@ export type AgentEventName =
   | 'llm.response'
   | 'tool.call'
   | 'tool.result'
+  | 'gen_ai.model.request'
+  | 'gen_ai.model.response'
+  | 'gen_ai.tool.call'
+  | 'gen_ai.tool.result'
+  | 'gen_ai.agent.invoke'
+  | 'gen_ai.agent.result'
   | 'skill.use'
   | 'tool.approve'
+  | 'agent.input'
   | 'other';
 
 export type JsonValue =
@@ -41,6 +48,8 @@ export interface AgentActivityEntry {
   observed_time_unix_nano?: string;
   'event.id': string;
   'user.id': string;
+  'user.name'?: string;
+  'user.email'?: string;
   'event.name': AgentEventName;
   trace_id?: string;
   span_id?: string;
@@ -51,15 +60,34 @@ export interface AgentActivityEntry {
   'gen_ai.session.id': string;
   'gen_ai.turn.id'?: string;
   'gen_ai.step.id'?: string;
+  'gen_ai.turn.start'?: boolean;
+  'gen_ai.turn.end'?: boolean;
   'gen_ai.response.id'?: string;
   'gen_ai.agent.type': string;
   'gen_ai.agent.id'?: string;
+  /** Upstream Agent identity when observed; this is not a session join key. */
+  'gen_ai.agent.parent.id'?: string;
+  /** The directly interacting Agent, e.g. the target of an invoke. */
+  'gen_ai.agent.peer.id'?: string;
+  /** Outgoing delegation described by this event. Stable across replay. */
+  'gen_ai.agent.invocation.id'?: string;
+  /** Incoming delegation for this event's work, independently of outgoing calls. */
+  'gen_ai.agent.parent.invocation.id'?: string;
   'gen_ai.agent.name'?: string;
-  'gen_ai.provider.name': string;
+  'gen_ai.agent.description'?: string;
+  'gen_ai.data_source.id'?: string;
+  /** Required except for explicitly scoped Agent-only turn observations. */
+  'gen_ai.provider.name'?: string;
+  /** The source observes turn boundaries/input, not model or tool invocations. */
+  'loongsuite.observation.scope'?: 'agent_turn';
   'gen_ai.request.id'?: string;
+  /** HTTP response status captured at the model transport boundary. */
+  'http.response.status_code'?: number;
   'gen_ai.request.model'?: string;
   'gen_ai.response.model'?: string;
   'gen_ai.response.finish_reasons'?: string[];
+  /** Request-to-first-native-output latency in nanoseconds. */
+  'gen_ai.response.time_to_first_token'?: number;
   'gen_ai.usage.input_tokens'?: number;
   'gen_ai.usage.output_tokens'?: number;
   'gen_ai.usage.cache_read.input_tokens'?: number;
@@ -73,25 +101,43 @@ export interface AgentActivityEntry {
   'gen_ai.input.messages_hash'?: string;
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;
+  'gen_ai.input.multimodal_metadata'?: JsonValue;
+  'gen_ai.input.multimodal_metadata_delta'?: JsonValue;
   'gen_ai.output.messages'?: JsonValue;
+  'gen_ai.output.multimodal_metadata'?: JsonValue;
   'gen_ai.tool.name'?: string;
   'gen_ai.tool.call.id'?: string;
   'gen_ai.tool.call.exec.id'?: string;
   'gen_ai.tool.call.arguments'?: JsonValue;
   'gen_ai.tool.call.result'?: JsonValue;
   'gen_ai.tool.call.duration'?: number;
+  /** Host-observed guardrail verdict for this tool phase. */
+  'gen_ai.guardrail.triggered'?: boolean;
+  /** Enforced block, logged match, or other known verdict, respectively. */
+  'gen_ai.guardrail.action'?: 'block' | 'log' | 'allow';
+  'gen_ai.guardrail.fail_open'?: boolean;
+  /** Final blocking rule or first audit match. */
+  'gen_ai.guardrail.rule_id'?: string;
+  /** `rules[].version` from the managed document. */
+  'gen_ai.guardrail.rule_version'?: string;
+  'agent.workbuddy.usage.credit'?: number;
   'tool.result.status'?: string;
+  /** Grok execution evidence used to associate a tool declaration with its result. */
+  'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';
+  /** Grok clock selected for the event after transcript/updates/unified fusion. */
+  'loongsuite.grok.timing.source'?: 'unified' | 'updates' | 'hook';
   'gen_ai.skill.name'?: string;
+  'gen_ai.skill.id'?: string;
+  'gen_ai.skill.description'?: string;
+  'gen_ai.skill.version'?: string;
   /**
-   * 模型的 system instructions（MessagePart[] 数组形式），数据源为 codex transcript 的
-   * `session_meta.payload.base_instructions.text` + `turn_context.payload.developer_instructions`。
-   * 仅 Codex 端有值；Claude transcript 不含此数据。
+   * 模型的 system instructions（MessagePart[] 数组形式）。不同 Agent 从各自真实的
+   * transcript、Hook 或 provider 请求中采集；未暴露时不应根据普通会话消息推断。
    */
   'gen_ai.system_instructions'?: JsonValue;
   /**
-   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式），数据源为 codex transcript
-   * 的 `session_meta.payload.dynamic_tools[]`。仅 Codex 端有值；codex 的核心工具（shell/apply_patch
-   * 等）是嵌入 system prompt 的伪工具，不在此字段中，但在 `gen_ai.system_instructions` 中可见。
+   * 模型可用的工具定义集合（FunctionToolDefinition[] 数组形式）。不同 Agent 从各自真实的
+   * 模型请求、Hook 或 transcript 工具快照中采集；未暴露完整定义时不应根据 tool.call 反推。
    */
   'gen_ai.tool.definitions'?: JsonValue;
   /** Canonical repository identity for source attribution, e.g. sls/loongsuite-pilot. */
@@ -104,6 +150,8 @@ export interface AgentActivityEntry {
   'git.domain'?: string;
   /** Selected workspace root for path normalization/repo attribution. */
   'workspace.current_root'?: string;
+  /** Absolute working directory the agent ran in (process cwd), independent of git. */
+  'workspace.path'?: string;
   'error.type'?: string;
   'error.message'?: string;
   /** Dynamic OTLP resource attributes emitted by hook processors. */

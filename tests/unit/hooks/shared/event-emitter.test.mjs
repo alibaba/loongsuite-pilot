@@ -1,3 +1,8 @@
+import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   INITIAL_HASH,
@@ -59,5 +64,47 @@ describe('event-emitter trace/span id', () => {
   it('successive calls return different ids', () => {
     expect(generateTraceId()).not.toBe(generateTraceId());
     expect(generateSpanId()).not.toBe(generateSpanId());
+  });
+});
+
+describe('writeJsonlRecords concurrency', () => {
+  it('keeps every line valid JSON when two sessions append together', async () => {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), 'grok-jsonl-'));
+    const emitter = fileURLToPath(new URL('../../../../assets/hooks/shared/event-emitter.mjs', import.meta.url));
+    const lines = 40;
+    const pad = 'x'.repeat(2048);
+
+    function writeSession(session) {
+      const code = `
+        import { writeJsonlRecords } from ${JSON.stringify(emitter)};
+        const records = [];
+        for (let i = 0; i < ${lines}; i++) {
+          records.push({ session: ${JSON.stringify(session)}, i, pad: ${JSON.stringify(pad)} });
+        }
+        writeJsonlRecords(${JSON.stringify(logDir)}, 'grok-build', records);
+      `;
+      return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+          stdio: ['ignore', 'inherit', 'inherit'],
+        });
+        child.on('exit', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`${session} exited ${code}`));
+        });
+      });
+    }
+
+    try {
+      await Promise.all([writeSession('session-a'), writeSession('session-b')]);
+      const files = fs.readdirSync(logDir).filter((name) => name.endsWith('.jsonl'));
+      expect(files).toHaveLength(1);
+      const rows = fs.readFileSync(path.join(logDir, files[0]), 'utf8').split('\n').filter(Boolean);
+      expect(rows).toHaveLength(lines * 2);
+      const parsed = rows.map((line) => JSON.parse(line));
+      expect(parsed.filter((row) => row.session === 'session-a')).toHaveLength(lines);
+      expect(parsed.filter((row) => row.session === 'session-b')).toHaveLength(lines);
+    } finally {
+      fs.rmSync(logDir, { recursive: true, force: true });
+    }
   });
 });

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { convertEventLogToReadableSpans } from '@loongsuite/otel-util-genai';
 import { describe, expect, it } from 'vitest';
 import { assembleTurn } from '../../../assets/hooks/cursor/react-assembler.mjs';
 
@@ -13,6 +14,38 @@ function ns(ms: number): string {
 }
 
 describe('Cursor react assembler', () => {
+  it('propagates Cursor CLI workspace roots to every parent record', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+        model: 'composer-cli',
+        prompt: 'inspect the workspace',
+        workspace_roots: ['C:\\Users\\alice\\project'],
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+        model: 'composer-cli',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'stop',
+        conversation_id: 'conv-cli-workspace',
+        generation_id: 'turn-cli-workspace',
+      },
+    ], { stopConversationId: 'conv-cli-workspace', variant: 'cursor-cli' });
+
+    expect(records.length).toBeGreaterThan(0);
+    expect(records.every(record => record['gen_ai.agent.type'] === 'cursor-cli')).toBe(true);
+    expect(records.every(record => record['agent.cursor-cli.cwd'] === 'C:\\Users\\alice\\project')).toBe(true);
+  });
+
   it('derives LLM and tool span timing from hook captured time and duration', () => {
     const { records } = assembleTurn([
       {
@@ -157,6 +190,515 @@ describe('Cursor react assembler', () => {
       time_unix_nano: ns(1000),
       observed_time_unix_nano: ns(1000),
     });
+  });
+
+  it('deduplicates exact base/suffixed afterAgentThought pairs without a timing window', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        model: 'gpt-5.4',
+        prompt: 'inspect the file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        model: 'gpt-5.4',
+        text: 'I will read the file.',
+        duration_ms: 80,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        tool_name: 'Read',
+        tool_use_id: 'call-thought-dedupe',
+        tool_input: { path: 'a.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        tool_name: 'Read',
+        tool_use_id: 'call-thought-dedupe',
+        tool_output: 'file contents',
+        duration_ms: 100,
+      },
+      {
+        // The duplicate is intentionally delayed well beyond 100ms.
+        _journal_ts: iso(5000),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe-0-rgr9',
+        model: 'gpt-5.4',
+        text: 'I will read the file.',
+        duration_ms: 80,
+      },
+      {
+        _journal_ts: iso(5200),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        model: 'gpt-5.4',
+        text: 'Now I can answer.',
+        duration_ms: 100,
+      },
+      {
+        _journal_ts: iso(5300),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(5400),
+        hook_event: 'stop',
+        conversation_id: 'conv-thought-dedupe',
+        generation_id: 'turn-thought-dedupe',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-thought-dedupe' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    const secondResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-thought-dedupe:s2'
+    );
+    const reasoningParts = secondResponse?.['gen_ai.output.messages']?.[0]?.parts
+      ?.filter((part: Record<string, unknown>) => part.type === 'reasoning') ?? [];
+
+    expect(requests).toHaveLength(2);
+    expect(reasoningParts).toEqual([
+      { type: 'reasoning', content: 'Now I can answer.' },
+    ]);
+  });
+
+  it('does not deduplicate identical base afterAgentThought events without a suffixed pair', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-base-thoughts',
+        generation_id: 'turn-base-thoughts',
+        model: 'gpt-5.4',
+        prompt: 'continue',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-base-thoughts',
+        generation_id: 'turn-base-thoughts',
+        model: 'gpt-5.4',
+        text: 'Same text can be emitted by two real callbacks.',
+        duration_ms: 80,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-base-thoughts',
+        generation_id: 'turn-base-thoughts',
+        model: 'gpt-5.4',
+        text: 'Same text can be emitted by two real callbacks.',
+        duration_ms: 80,
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'stop',
+        conversation_id: 'conv-base-thoughts',
+        generation_id: 'turn-base-thoughts',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-base-thoughts' });
+
+    const response = records.find(record => record['event.name'] === 'llm.response');
+    const reasoningParts = response?.['gen_ai.output.messages']?.[0]?.parts
+      ?.filter((part: Record<string, unknown>) => part.type === 'reasoning') ?? [];
+
+    expect(reasoningParts).toHaveLength(2);
+  });
+
+  it('does not open a new step while a synchronous tool is still active', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        model: 'gpt-5.4',
+        prompt: 'inspect the file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        model: 'gpt-5.4',
+        text: 'I will inspect it.',
+        duration_ms: 80,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        tool_name: 'Read',
+        tool_use_id: 'call-active-read',
+        tool_input: { path: 'a.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        model: 'gpt-5.4',
+        text: 'This callback arrived before the read result.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        tool_name: 'Read',
+        tool_use_id: 'call-active-read',
+        tool_output: 'file contents',
+        duration_ms: 300,
+      },
+      {
+        _journal_ts: iso(700),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        model: 'gpt-5.4',
+        text: 'Now the result is available.',
+        duration_ms: 100,
+      },
+      {
+        _journal_ts: iso(800),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(900),
+        hook_event: 'stop',
+        conversation_id: 'conv-active-tool',
+        generation_id: 'turn-active-tool',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-active-tool' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    const firstResponse = records.find(record =>
+      record['event.name'] === 'llm.response' &&
+      record['gen_ai.step.id'] === 'turn-active-tool:s1'
+    );
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-active-tool:s2'
+    );
+    const firstReasoning = firstResponse?.['gen_ai.output.messages']?.[0]?.parts
+      ?.filter((part: Record<string, unknown>) => part.type === 'reasoning')
+      ?.map((part: Record<string, unknown>) => part.content);
+
+    expect(requests).toHaveLength(2);
+    expect(firstReasoning).toEqual([
+      'I will inspect it.',
+      'This callback arrived before the read result.',
+    ]);
+    expect(BigInt(secondRequest!.time_unix_nano)).toBeGreaterThanOrEqual(BigInt(ns(500)));
+    expect(secondRequest?.['gen_ai.input.messages_delta']?.map((message: Record<string, unknown>) => message.role))
+      .toEqual(['assistant', 'tool']);
+  });
+
+  it('recovers the next step when a synchronous tool completion hook is missing', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        prompt: 'inspect and continue',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'I will inspect the file.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Read',
+        tool_use_id: 'call-result-never-arrives',
+        tool_input: { path: 'missing.ts' },
+      },
+      {
+        _journal_ts: iso(400),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'I can continue despite the missing completion hook.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Shell',
+        tool_use_id: 'call-normal-shell',
+        tool_input: { command: 'echo ok' },
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'postToolUse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        tool_name: 'Shell',
+        tool_use_id: 'call-normal-shell',
+        tool_output: 'ok',
+      },
+      {
+        _journal_ts: iso(800),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'The normal tool completed.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(900),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(1000),
+        hook_event: 'stop',
+        conversation_id: 'conv-missing-tool-result',
+        generation_id: 'turn-missing-tool-result',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-missing-tool-result' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    const responses = records.filter(record => record['event.name'] === 'llm.response');
+    const secondRequest = requests.find(record =>
+      record['gen_ai.step.id'] === 'turn-missing-tool-result:s2'
+    );
+    const thirdRequest = requests.find(record =>
+      record['gen_ai.step.id'] === 'turn-missing-tool-result:s3'
+    );
+
+    expect(requests).toHaveLength(3);
+    expect(responses).toHaveLength(3);
+    expect(secondRequest?.['gen_ai.input.messages_delta']).toBeUndefined();
+    const thirdDelta = thirdRequest?.['gen_ai.input.messages_delta'] ?? [];
+    expect(thirdDelta.map((message: Record<string, unknown>) => message.role))
+      .toEqual(['assistant', 'tool']);
+    expect(thirdDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
+      type: 'tool_call',
+      id: 'call-normal-shell',
+      name: 'Shell',
+    });
+    expect(thirdDelta[1]?.parts).toEqual([
+      {
+        type: 'tool_call_response',
+        id: 'call-normal-shell',
+        response: 'ok',
+      },
+    ]);
+  });
+
+  it('drains active synchronous tools on postToolUseFailure', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        prompt: 'read a missing file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'I will read it.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        tool_name: 'Read',
+        tool_use_id: 'call-failing-read',
+        tool_input: { path: 'missing.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'postToolUseFailure',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        tool_name: 'Read',
+        tool_use_id: 'call-failing-read',
+        error_message: 'File not found',
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'The read failed, so I will recover.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'afterAgentResponse',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        model: 'gpt-5.4',
+        text: 'done',
+      },
+      {
+        _journal_ts: iso(700),
+        hook_event: 'stop',
+        conversation_id: 'conv-tool-failure',
+        generation_id: 'turn-tool-failure',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-tool-failure' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+    const secondDelta = requests[1]?.['gen_ai.input.messages_delta'] ?? [];
+    expect(secondDelta.map((message: Record<string, unknown>) => message.role))
+      .toEqual(['assistant', 'tool']);
+    expect(secondDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
+      type: 'tool_call',
+      id: 'call-failing-read',
+    });
+    expect(secondDelta[1]?.parts).toEqual([
+      {
+        type: 'tool_call_response',
+        id: 'call-failing-read',
+        response: 'File not found',
+      },
+    ]);
+  });
+
+  it('falls back to tool name when a completion hook omits tool_use_id', () => {
+    const { records } = assembleTurn([
+      {
+        _journal_ts: iso(0),
+        hook_event: 'beforeSubmitPrompt',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        prompt: 'read a file',
+      },
+      {
+        _journal_ts: iso(100),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        text: 'I will read it.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(200),
+        hook_event: 'preToolUse',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        tool_name: 'Read',
+        tool_use_id: 'call-read-with-id',
+        tool_input: { path: 'a.ts' },
+      },
+      {
+        _journal_ts: iso(300),
+        hook_event: 'postToolUseFailure',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        tool_name: 'Read',
+        error_message: 'File not found',
+      },
+      {
+        _journal_ts: iso(500),
+        hook_event: 'afterAgentThought',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        model: 'gpt-5.4',
+        text: 'The completion omitted its id, but the next step must recover.',
+        duration_ms: 50,
+      },
+      {
+        _journal_ts: iso(600),
+        hook_event: 'stop',
+        conversation_id: 'conv-result-without-id',
+        generation_id: 'turn-result-without-id',
+        status: 'completed',
+      },
+    ], { stopConversationId: 'conv-result-without-id' });
+
+    const requests = records.filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(2);
+  });
+
+  it('only pairs tool calls and results when both have non-empty ids', () => {
+    const base = {
+      conversation_id: 'conv-null-id-pairing',
+      generation_id: 'turn-null-id-pairing',
+    };
+    const { records } = assembleTurn([
+      { ...base, _journal_ts: iso(0), hook_event: 'beforeSubmitPrompt', prompt: 'inspect files' },
+      { ...base, _journal_ts: iso(100), hook_event: 'afterAgentThought', text: 'Inspecting.', duration_ms: 50 },
+      { ...base, _journal_ts: iso(200), hook_event: 'preToolUse', tool_name: 'Read', tool_use_id: 'call-read', tool_input: {} },
+      { ...base, _journal_ts: iso(210), hook_event: 'preToolUse', tool_name: 'Shell', tool_input: {} },
+      { ...base, _journal_ts: iso(220), hook_event: 'preToolUse', tool_name: 'Grep', tool_use_id: 'call-grep', tool_input: {} },
+      { ...base, _journal_ts: iso(300), hook_event: 'postToolUse', tool_name: 'Read', tool_output: 'read without id' },
+      { ...base, _journal_ts: iso(310), hook_event: 'postToolUse', tool_name: 'Grep', tool_use_id: 'call-grep', tool_output: 'grep with id' },
+      { ...base, _journal_ts: iso(320), hook_event: 'postToolUse', tool_name: 'Shell', tool_output: 'shell without id' },
+      { ...base, _journal_ts: iso(500), hook_event: 'afterAgentThought', text: 'Done inspecting.', duration_ms: 50 },
+      { ...base, _journal_ts: iso(600), hook_event: 'stop', status: 'completed' },
+    ], { stopConversationId: base.conversation_id });
+
+    const secondRequest = records.find(record =>
+      record['event.name'] === 'llm.request' &&
+      record['gen_ai.step.id'] === 'turn-null-id-pairing:s2'
+    );
+    const toolParts = (secondRequest?.['gen_ai.input.messages_delta'] ?? [])
+      .filter((message: Record<string, unknown>) => message.role === 'tool')
+      .map((message: { parts: Array<Record<string, unknown>> }) => message.parts[0]);
+
+    expect(toolParts.map((part: Record<string, unknown>) => part.id))
+      .toEqual(['call-grep', undefined, undefined]);
+    expect(toolParts.map((part: Record<string, unknown>) => part.response))
+      .toEqual(['grep with id', 'read without id', 'shell without id']);
   });
 
   it('guards LLM spans by moving start before the earliest buffered tool call', () => {
@@ -382,22 +924,349 @@ describe('Cursor react assembler', () => {
         'agent.cursor.hook_event_name': 'subagent_result_synthesized',
         'gen_ai.tool.call.result': { summary: 'child final result' },
       });
-      // Delta on s2 = the tool result that arrived since s1
-      expect(secondStepDelta).toHaveLength(1);
-      expect(secondStepDelta[0]).toMatchObject({ role: 'tool' });
-      expect(secondStepDelta[0]?.parts).toHaveLength(1);
-      expect(secondStepDelta[0]?.parts?.[0]).toMatchObject({
+      // Delta on s2 preserves the assistant call immediately before its result.
+      expect(secondStepDelta).toHaveLength(2);
+      expect(secondStepDelta.map(message => message.role)).toEqual(['assistant', 'tool']);
+      expect(secondStepDelta[0]?.parts?.find(part => part.type === 'tool_call')).toMatchObject({
+        type: 'tool_call',
+        id: 'call-subagent',
+        name: 'Subagent',
+      });
+      expect(secondStepDelta[1]?.parts).toHaveLength(1);
+      expect(secondStepDelta[1]?.parts?.[0]).toMatchObject({
         type: 'tool_call_response',
         id: 'call-subagent',
         response: 'child final result',
       });
-      // Full = cumulative user prompt + tool result
-      expect(secondStepFull).toHaveLength(2);
+      // Full = cumulative user prompt + assistant call + tool result.
+      expect(secondStepFull).toHaveLength(3);
       expect(secondStepFull[0]).toMatchObject({
         role: 'user',
         parts: [{ type: 'text', content: 'delegate this' }],
       });
-      expect(secondStepFull[1]).toMatchObject({ role: 'tool' });
+      expect(secondStepFull[1]).toMatchObject({ role: 'assistant' });
+      expect(secondStepFull[2]).toMatchObject({ role: 'tool' });
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not consume a pre-collected Subagent result before its endTs', () => {
+    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-subagent-causality-'));
+    try {
+      const parentTranscriptPath = path.join(transcriptDir, 'parent.jsonl');
+      const subagentDir = path.join(transcriptDir, 'subagents');
+      const childConvId = 'child-causality';
+      fs.mkdirSync(subagentDir, { recursive: true });
+      fs.writeFileSync(path.join(subagentDir, `${childConvId}.jsonl`), '', 'utf-8');
+
+      const { records } = assembleTurn([
+        {
+          _journal_ts: iso(0),
+          hook_event: 'beforeSubmitPrompt',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          model: 'gpt-5.4',
+          prompt: 'delegate this',
+        },
+        {
+          _journal_ts: iso(100),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          model: 'gpt-5.4',
+          text: 'I will delegate this.',
+          duration_ms: 80,
+        },
+        {
+          _journal_ts: iso(200),
+          hook_event: 'preToolUse',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          tool_name: 'Task',
+          tool_use_id: 'call-subagent-causality',
+          tool_input: { prompt: 'inspect details' },
+        },
+        {
+          _journal_ts: iso(300),
+          hook_event: 'afterAgentThought',
+          conversation_id: childConvId,
+          generation_id: 'child-turn-causality',
+          model: 'gpt-5.4',
+          text: 'Child is working.',
+          duration_ms: 50,
+        },
+        {
+          // This is a distinct callback, but it is earlier than the child endTs.
+          _journal_ts: iso(400),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          model: 'gpt-5.4',
+          text: 'The child has not finished yet.',
+          duration_ms: 100,
+        },
+        {
+          _journal_ts: iso(800),
+          hook_event: 'afterAgentResponse',
+          conversation_id: childConvId,
+          generation_id: 'child-turn-causality',
+          model: 'gpt-5.4',
+          text: 'child final result',
+        },
+        {
+          // duration_ms backdates the raw request start to 500ms. The request
+          // must still be clamped to the child result endTs at 800ms.
+          _journal_ts: iso(900),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          model: 'gpt-5.4',
+          text: 'Now I can use the child result.',
+          duration_ms: 400,
+        },
+        {
+          _journal_ts: iso(950),
+          hook_event: 'afterAgentResponse',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          model: 'gpt-5.4',
+          text: 'done',
+        },
+        {
+          _journal_ts: iso(1000),
+          hook_event: 'stop',
+          conversation_id: 'parent-causality',
+          generation_id: 'turn-subagent-causality',
+          transcript_path: parentTranscriptPath,
+          status: 'completed',
+        },
+      ], { stopConversationId: 'parent-causality', transcriptPath: parentTranscriptPath });
+
+      const parentRequests = records.filter(record =>
+        record['event.name'] === 'llm.request' &&
+        !record['gen_ai.agent.scope']
+      );
+      const firstResponse = records.find(record =>
+        record['event.name'] === 'llm.response' &&
+        record['gen_ai.step.id'] === 'turn-subagent-causality:s1'
+      );
+      const secondRequest = records.find(record =>
+        record['event.name'] === 'llm.request' &&
+        record['gen_ai.step.id'] === 'turn-subagent-causality:s2'
+      );
+      const firstReasoning = firstResponse?.['gen_ai.output.messages']?.[0]?.parts
+        ?.filter((part: Record<string, unknown>) => part.type === 'reasoning')
+        ?.map((part: Record<string, unknown>) => part.content);
+
+      expect(parentRequests).toHaveLength(2);
+      expect(firstReasoning).toEqual([
+        'I will delegate this.',
+        'The child has not finished yet.',
+      ]);
+      expect(secondRequest).toMatchObject({
+        time_unix_nano: ns(800),
+        observed_time_unix_nano: ns(800),
+        'agent.cursor.llm_request_time_source': 'previous_tool_result_end',
+      });
+      const secondDelta = secondRequest?.['gen_ai.input.messages_delta'] ?? [];
+      expect(secondDelta.map((message: Record<string, unknown>) => message.role))
+        .toEqual(['assistant', 'tool']);
+      expect(secondDelta[1]?.parts?.[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'call-subagent-causality',
+        response: 'child final result',
+      });
+    } finally {
+      fs.rmSync(transcriptDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps parallel Task calls from a duplicated thought in the same parent step', () => {
+    const transcriptDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-parallel-subagents-'));
+    try {
+      const parentTranscriptPath = path.join(transcriptDir, 'parent.jsonl');
+      const subagentDir = path.join(transcriptDir, 'subagents');
+      fs.mkdirSync(subagentDir, { recursive: true });
+      fs.writeFileSync(path.join(subagentDir, 'child-task-1.jsonl'), '', 'utf-8');
+      fs.writeFileSync(path.join(subagentDir, 'child-task-2.jsonl'), '', 'utf-8');
+
+      const { records } = assembleTurn([
+        {
+          _journal_ts: iso(0),
+          hook_event: 'beforeSubmitPrompt',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          model: 'composer-2.5-fast',
+          prompt: 'run two subagents in parallel',
+        },
+        {
+          _journal_ts: iso(100),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          model: 'composer-2.5-fast',
+          text: 'I will launch both tasks in parallel.',
+          duration_ms: 80,
+        },
+        {
+          _journal_ts: iso(200),
+          hook_event: 'preToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Task',
+          tool_use_id: 'call-task-1',
+          tool_input: { prompt: 'solve task 1' },
+        },
+        {
+          _journal_ts: iso(210),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel-0-rgr9',
+          model: 'composer-2.5-fast',
+          text: 'I will launch both tasks in parallel.',
+          duration_ms: 80,
+        },
+        {
+          _journal_ts: iso(220),
+          hook_event: 'preToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Task',
+          tool_use_id: 'call-task-2',
+          tool_input: { prompt: 'solve task 2' },
+        },
+        {
+          _journal_ts: iso(300),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'child-task-1',
+          generation_id: 'child-turn-1',
+          model: 'composer-2.5-fast',
+          text: 'working on task 1',
+          duration_ms: 40,
+        },
+        {
+          _journal_ts: iso(320),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'child-task-2',
+          generation_id: 'child-turn-2',
+          model: 'composer-2.5-fast',
+          text: 'working on task 2',
+          duration_ms: 40,
+        },
+        {
+          _journal_ts: iso(500),
+          hook_event: 'afterAgentResponse',
+          conversation_id: 'child-task-1',
+          generation_id: 'child-turn-1',
+          model: 'composer-2.5-fast',
+          text: 'task 1 result',
+        },
+        {
+          _journal_ts: iso(600),
+          hook_event: 'afterAgentResponse',
+          conversation_id: 'child-task-2',
+          generation_id: 'child-turn-2',
+          model: 'composer-2.5-fast',
+          text: 'task 2 result',
+        },
+        {
+          _journal_ts: iso(700),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          model: 'composer-2.5-fast',
+          text: 'Both tasks finished; I will verify them.',
+          duration_ms: 60,
+        },
+        {
+          _journal_ts: iso(710),
+          hook_event: 'preToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Shell',
+          tool_use_id: 'call-verify-1',
+          tool_input: { command: 'verify task 1' },
+        },
+        {
+          _journal_ts: iso(720),
+          hook_event: 'preToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Shell',
+          tool_use_id: 'call-verify-2',
+          tool_input: { command: 'verify task 2' },
+        },
+        {
+          _journal_ts: iso(800),
+          hook_event: 'postToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Shell',
+          tool_use_id: 'call-verify-1',
+          tool_output: 'ok 1',
+          duration_ms: 90,
+        },
+        {
+          _journal_ts: iso(810),
+          hook_event: 'postToolUse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          tool_name: 'Shell',
+          tool_use_id: 'call-verify-2',
+          tool_output: 'ok 2',
+          duration_ms: 90,
+        },
+        {
+          _journal_ts: iso(900),
+          hook_event: 'afterAgentThought',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          model: 'composer-2.5-fast',
+          text: 'Everything passed.',
+          duration_ms: 50,
+        },
+        {
+          _journal_ts: iso(950),
+          hook_event: 'afterAgentResponse',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          model: 'composer-2.5-fast',
+          text: 'done',
+        },
+        {
+          _journal_ts: iso(1000),
+          hook_event: 'stop',
+          conversation_id: 'parent-parallel',
+          generation_id: 'turn-parallel',
+          transcript_path: parentTranscriptPath,
+          status: 'completed',
+        },
+      ], { stopConversationId: 'parent-parallel', transcriptPath: parentTranscriptPath });
+
+      const parentRecords = records.filter(record => !record['gen_ai.agent.scope']);
+      const parentRequests = parentRecords.filter(record => record['event.name'] === 'llm.request');
+      const firstStepTaskCalls = parentRecords.filter(record =>
+        record['event.name'] === 'tool.call' &&
+        record['gen_ai.step.id'] === 'turn-parallel:s1' &&
+        record['gen_ai.tool.name'] === 'Task'
+      );
+      const secondRequest = parentRecords.find(record =>
+        record['event.name'] === 'llm.request' &&
+        record['gen_ai.step.id'] === 'turn-parallel:s2'
+      );
+      const secondStepDelta = secondRequest?.['gen_ai.input.messages_delta'] ?? [];
+
+      expect(parentRequests).toHaveLength(3);
+      expect(firstStepTaskCalls).toHaveLength(2);
+      expect(secondStepDelta.map((message: Record<string, unknown>) => message.role))
+        .toEqual(['assistant', 'tool', 'tool']);
+      expect(secondStepDelta[0]?.parts
+        ?.filter((part: Record<string, unknown>) => part.type === 'tool_call')).toHaveLength(2);
+      expect(secondStepDelta.slice(1).every((message: Record<string, unknown>) =>
+        Array.isArray(message.parts) && message.parts.length === 1
+      )).toBe(true);
+      expect(BigInt(secondRequest!.time_unix_nano)).toBeGreaterThanOrEqual(BigInt(ns(600)));
     } finally {
       fs.rmSync(transcriptDir, { recursive: true, force: true });
     }
@@ -475,22 +1344,28 @@ describe('Cursor react assembler', () => {
       'agent.cursor.hook_event_name': 'postToolUse',
       'gen_ai.tool.call.result': 'cursor fallback result',
     });
-    // Delta on s2 = only the new tool result added since s1's llm.request.
-    expect(secondStepDelta).toHaveLength(1);
-    expect(secondStepDelta[0]).toMatchObject({ role: 'tool' });
-    expect(secondStepDelta[0]?.parts).toHaveLength(1);
-    expect(secondStepDelta[0]?.parts?.[0]).toMatchObject({
+    // Delta on s2 preserves the assistant call immediately before its result.
+    expect(secondStepDelta).toHaveLength(2);
+    expect(secondStepDelta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(secondStepDelta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
+      type: 'tool_call',
+      id: 'call-subagent-fallback',
+      name: 'Subagent',
+    });
+    expect(secondStepDelta[1]?.parts).toHaveLength(1);
+    expect(secondStepDelta[1]?.parts?.[0]).toMatchObject({
       type: 'tool_call_response',
       id: 'call-subagent-fallback',
       response: 'cursor fallback result',
     });
-    // Full = cumulative user prompt + tool result.
-    expect(secondStepFull).toHaveLength(2);
+    // Full = cumulative user prompt + assistant call + tool result.
+    expect(secondStepFull).toHaveLength(3);
     expect(secondStepFull[0]).toMatchObject({
       role: 'user',
       parts: [{ type: 'text', content: 'delegate without child transcript' }],
     });
-    expect(secondStepFull[1]).toMatchObject({ role: 'tool' });
+    expect(secondStepFull[1]).toMatchObject({ role: 'assistant' });
+    expect(secondStepFull[2]).toMatchObject({ role: 'tool' });
   });
 
   // Skip: requires stopGenerationId generation-level isolation (not in this branch)
@@ -704,7 +1579,7 @@ describe('Cursor react assembler', () => {
     expect(s2Response?.time_unix_nano).toBe(ns(800));
   });
 
-  it('emits delta + full messages on llm.request: s1 has user prompt, s2 has tool result + cumulative', () => {
+  it('emits assistant tool-call history before the matching result in raw events and the final LLM span', async () => {
     const { records } = assembleTurn([
       {
         _journal_ts: iso(0),
@@ -771,28 +1646,63 @@ describe('Cursor react assembler', () => {
       { role: 'user', parts: [{ type: 'text', content: 'list files' }] },
     ]);
 
-    // s2: delta = [tool result], full = [user prompt, tool result]
+    // s2: delta = [assistant tool call, tool result].
     const s2Delta = llmRequests[1]!['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Delta).toHaveLength(1);
-    expect(s2Delta[0]).toMatchObject({ role: 'tool' });
-    expect(s2Delta[0]?.parts?.[0]).toMatchObject({
+    expect(s2Delta.map(message => message.role)).toEqual(['assistant', 'tool']);
+    expect(s2Delta[0]?.parts?.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
+      type: 'tool_call',
+      id: 'call-1',
+      name: 'ls',
+      arguments: { path: '.' },
+    });
+    expect(s2Delta[1]?.parts?.[0]).toMatchObject({
       type: 'tool_call_response',
       id: 'call-1',
       response: 'a.txt b.txt',
     });
 
     const s2Full = llmRequests[1]!['gen_ai.input.messages'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Full).toHaveLength(2);
+    expect(s2Full.map(message => message.role)).toEqual(['user', 'assistant', 'tool']);
     expect(s2Full[0]).toMatchObject({
       role: 'user',
       parts: [{ type: 'text', content: 'list files' }],
     });
-    expect(s2Full[1]).toMatchObject({ role: 'tool' });
-    expect(s2Full[1]?.parts?.[0]).toMatchObject({
+    expect(s2Full[1]).toMatchObject({ role: 'assistant' });
+    expect(s2Full[2]).toMatchObject({ role: 'tool' });
+    expect(s2Full[2]?.parts?.[0]).toMatchObject({
       type: 'tool_call_response',
       id: 'call-1',
       response: 'a.txt b.txt',
     });
+
+    const previousStability = process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+    const previousCapture = process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+    process.env.OTEL_SEMCONV_STABILITY_OPT_IN = 'gen_ai_latest_experimental';
+    process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
+    try {
+      const conversion = await convertEventLogToReadableSpans(records);
+      expect(conversion.warnings).toEqual([]);
+      const llmSpans = conversion.spans
+        .filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+      const convertedInput = JSON.parse(String(
+        llmSpans[1]?.attributes['gen_ai.input.messages'],
+      ));
+      expect(convertedInput.map((message: Record<string, unknown>) => message.role))
+        .toEqual(['user', 'assistant', 'tool']);
+      expect(convertedInput[1].parts.find((part: Record<string, unknown>) => part.type === 'tool_call')).toMatchObject({
+        type: 'tool_call',
+        id: 'call-1',
+      });
+      expect(convertedInput[2].parts[0]).toMatchObject({
+        type: 'tool_call_response',
+        id: 'call-1',
+      });
+    } finally {
+      if (previousStability === undefined) delete process.env.OTEL_SEMCONV_STABILITY_OPT_IN;
+      else process.env.OTEL_SEMCONV_STABILITY_OPT_IN = previousStability;
+      if (previousCapture === undefined) delete process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+      else process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = previousCapture;
+    }
 
     // Deep-clone isolation: mutating s2's full messages should not affect s1's full.
     s2Full[0]!.role = 'mutated';
@@ -920,16 +1830,18 @@ describe('Cursor react assembler', () => {
     expect(s1ToolCalls).toHaveLength(2);
     expect(s1ToolResults).toHaveLength(2);
 
-    // s2 input: delta = [tool results for Read+Write], full = [user prompt, tool results].
+    // s2 input preserves the complete assistant output, then one response per tool.
     const s2Delta = s2Request!['gen_ai.input.messages_delta'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Delta).toHaveLength(1);
-    expect(s2Delta[0]).toMatchObject({ role: 'tool' });
-    expect(s2Delta[0]!.parts).toHaveLength(2);
+    expect(s2Delta.map(message => message.role))
+      .toEqual(['assistant', 'tool', 'tool']);
+    expect(s2Delta[0].parts.filter(part => part.type === 'tool_call').map(part => part.id))
+      .toEqual(['tool-aaa', 'tool-bbb']);
+    expect(s2Delta.slice(1).map(message => message.parts[0]?.id))
+      .toEqual(['tool-aaa', 'tool-bbb']);
 
     const s2Full = s2Request!['gen_ai.input.messages'] as Array<{ role: string; parts: Array<Record<string, unknown>> }>;
-    expect(s2Full).toHaveLength(2);
-    expect(s2Full[0]).toMatchObject({ role: 'user' });
-    expect(s2Full[1]).toMatchObject({ role: 'tool' });
+    expect(s2Full.map(message => message.role))
+      .toEqual(['user', 'assistant', 'tool', 'tool']);
 
     // s2 llm.response should carry the final text but NO tool_call parts.
     const s2Output = s2Response!['gen_ai.output.messages'] as Array<{ parts: Array<Record<string, unknown>> }>;

@@ -26,6 +26,7 @@ function makeSender(): FileSlsSender {
     },
     'test-config',
     '/tmp/test-failed',
+    '/tmp/test-data',
   );
 }
 
@@ -88,6 +89,16 @@ describe('FileSlsSender', () => {
     sender.enqueue(['line1'], '/tmp/test.log');
     await sender.flush();
     expect(mockPersistFailedLogs).toHaveBeenCalledTimes(1);
+    const context = mockPersistFailedLogs.mock.calls[0][2];
+    expect(context).toMatchObject({
+      mode: 'webtracking',
+      project: 'test-project',
+      logstore: 'test-logstore',
+      kind: 'test-config',
+      batchCount: 1,
+    });
+    expect(context.batchBytes).toBeGreaterThan(0);
+    expect(context).not.toHaveProperty('__logs__');
   });
 
   it('shutdown flushes remaining buffer', async () => {

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+
+# Some agents invoke hooks with sh, bypassing the Bash shebang. Re-exec before
+# Bash options/syntax; exec preserves stdin, arguments, and the exit status.
+# Disable inherited POSIX mode as shared helpers require full Bash syntax.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash -- "$0" "$@"
+fi
+set +o posix
 set -euo pipefail
 
 # ============================================================================
@@ -26,18 +34,48 @@ PROCESSOR="$HOOKS_DIR/qoder-hook-processor.mjs"
 # Fail silently if the processor is missing
 [[ -f "$PROCESSOR" ]] || exit 0
 
-MIN_NODE_MAJOR=18
+MIN_NODE_MAJOR=22
 
 node_is_suitable() {
   local bin="$1"
   [[ -x "$bin" ]] || return 1
-  node_is_app_bundle "$bin" && return 1
-  local ver
-  ver="$("$bin" --version 2>/dev/null)" || return 1
-  local major="${ver#v}"
+  local ver major
+  if major="$(node_major_from_runtime_path "$bin")"; then
+    ver="${bin%/bin/node}"
+    ver="${ver##*/}"
+    ver="${ver#node-}"
+  else
+    node_is_app_bundle "$bin" && return 1
+    ver="$("$bin" --version 2>/dev/null)" || return 1
+  fi
+  # SQLite is unflagged from 22.13 / 23.4. Major-only checks accept early
+  # Node 22 builds that cannot run the metadata transaction gate.
+  major="${ver#v}"
+  local minor="${major#*.}"
+  minor="${minor%%.*}"
   major="${major%%.*}"
-  [[ "$major" =~ ^[0-9]+$ ]] && (( major >= MIN_NODE_MAJOR )) || return 1
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] || return 1
+  (( major > 23 || (major == 23 && minor >= 4) || (major == 22 && minor >= 13) )) || return 1
   return 0
+}
+
+# Managed runtimes live at <pilot-dir>/runtime/node-v<x>.<y>.<z>/bin/node, extracted by the
+# installer only after it verified SHASUMS256 and probed the binary itself, so the directory
+# name is authoritative. Reading the major from the path skips a `node --version` boot that
+# would otherwise run on the user's interactive path for every single event -- ~60ms on a
+# quiet host, 200ms+ where EDR scans each exec. Anything that is not a managed runtime still
+# gets probed.
+node_major_from_runtime_path() {
+  local bin="$1" dir name
+  dir="${bin%/bin/node}"
+  [[ "$dir" != "$bin" ]] || return 1
+  name="${dir##*/}"
+  [[ "${dir%/*}" == */runtime ]] || return 1
+  case "$name" in node-v[0-9]*) ;; *) return 1 ;; esac
+  name="${name#node-v}"
+  name="${name%%.*}"
+  [[ "$name" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$name"
 }
 
 node_is_app_bundle() {
@@ -51,7 +89,26 @@ node_is_app_bundle() {
   return 1
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+# Numeric-descending sort for version directory paths (stdin, one per line).
+# Prefers sort -V; falls back to zero-padded keys where sort -V is unavailable
+# (e.g. BSD/macOS sort, which has no -V).
+sort_version_dirs_desc() {
+  if printf '' | sort -V >/dev/null 2>&1; then
+    sort -rV
+    return
+  fi
+  local d v ma mi pa
+  while IFS= read -r d; do
+    v="${d##*/}"; v="${v#node-v}"; v="${v#v}"
+    IFS=. read -r ma mi pa <<<"$v"
+    [[ "$ma" =~ ^([0-9]+) ]] && ma="${BASH_REMATCH[1]}" || ma=0
+    [[ "$mi" =~ ^([0-9]+) ]] && mi="${BASH_REMATCH[1]}" || mi=0
+    [[ "$pa" =~ ^([0-9]+) ]] && pa="${BASH_REMATCH[1]}" || pa=0
+    printf '%04d.%04d.%04d|%s\n' "$ma" "$mi" "$pa" "$d"
+  done | sort -r | cut -d'|' -f2-
+}
+
+NODE_PIN_FILE="${LOONGSUITE_PILOT_DATA_DIR:-$HOME/.loongsuite-pilot}/node-bin"
 
 NODE_BIN=""
 
@@ -65,11 +122,31 @@ fi
 
 # 2. Fallback search (read-only — does NOT update pin)
 if [[ -z "$NODE_BIN" ]]; then
-  nvm_candidates=("$HOME/.nvm/versions/node"/*/bin/node)
+  # Managed runtime node (never removed by user node-manager churn) comes first,
+  # newest version first. Numeric-descending order matches the daemon's
+  # compareNodeRuntimeDirs; a plain reverse glob is lexicographic and would
+  # prefer node-v22.9.0 over node-v22.22.2.
   candidates=()
-  for (( i=${#nvm_candidates[@]}-1; i>=0; i-- )); do
-    candidates+=("${nvm_candidates[i]}")
+  runtime_dir="$(dirname "$NODE_PIN_FILE")/runtime"
+  # Appends "<dir>/bin/node" for each newline-separated dir in $1, newest first.
+  # Herestring rather than `done < <(...)`: agents inject this hook as a bare path,
+  # so the interpreter is up to each runtime, and `sh <script>` bypasses the shebang.
+  # macOS /bin/sh is bash in POSIX mode, which rejects process substitution but still
+  # accepts <<<. A pipe would run candidates+= in a subshell and lose it.
+  # The list arrives as an argument so a non-zero glob/pipeline status cannot leak
+  # into `set -e`, and the empty case returns early because <<<"" still yields one
+  # blank line.
+  add_node_bin_candidates() {
+    local list="$1" d
+    [[ -n "$list" ]] || return 0
+    while IFS= read -r d; do
+      if [[ -n "$d" ]]; then candidates+=("$d/bin/node"); fi
+    done <<<"$list"
+  }
+  for runtime_dir in "$(dirname "$NODE_PIN_FILE")/runtime" "$HOME/.loongsuite-pilot/runtime"; do
+    add_node_bin_candidates "$(for d in "$runtime_dir"/node-v*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
   done
+  add_node_bin_candidates "$(for d in "$HOME/.nvm/versions/node"/*; do [[ -d "$d" ]] && printf '%s\n' "$d"; done | sort_version_dirs_desc)"
   candidates+=(
     "$HOME/.volta/bin/node"
     "$HOME/.fnm/aliases/default/bin/node"
@@ -89,7 +166,7 @@ if [[ -z "$NODE_BIN" ]]; then
 fi
 
 if [[ -z "$NODE_BIN" ]]; then
-  echo "[loongsuite-pilot] node >= $MIN_NODE_MAJOR not found" >&2
+  echo "[loongsuite-pilot] SQLite-capable node (22.13+, 23.4+, or newer) not found" >&2
   exit 0
 fi
 
