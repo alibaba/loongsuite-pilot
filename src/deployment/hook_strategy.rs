@@ -1022,7 +1022,8 @@ impl HookStrategy {
         self
     }
 
-    pub(crate) fn with_resource_roots(mut self, pilot: &Path, data: &Path) -> Self {
+    /// Bind hook deployment to the package and data directories for this installation.
+    pub fn with_resource_roots(mut self, pilot: &Path, data: &Path) -> Self {
         self.resource_roots = Some((pilot.into(), data.into()));
         self
     }
@@ -1713,6 +1714,11 @@ impl HookStrategy {
                 .into_iter()
                 .map(|path| normalize_hook_reference(&path))
                 .collect::<Vec<_>>();
+            if let Some(data) = self.codex_sdk_data(def) {
+                if let Some(quoted) = crate::sdk::agent_hooks::quote_codex_path(&data) {
+                    needles.push(normalize_hook_reference(&format!("--data-dir {quoted}")));
+                }
+            }
             if let Some(paths) = owned_legacy_codex_scripts(
                 &path,
                 &def.id,
