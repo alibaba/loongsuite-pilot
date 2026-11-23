@@ -48,7 +48,9 @@ rl.on('line', (line) => {
     end(file.startsWith('exit3') ? 3 : 1);
   } else if (file.startsWith('child-')) {
     const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], {stdio:'ignore'});
-    fs.writeFileSync(JSON.parse(payload).pidFile, String(c.pid));
+    const pidFile = JSON.parse(payload).pidFile;
+    fs.writeFileSync(pidFile + '.tmp', String(c.pid));
+    fs.renameSync(pidFile + '.tmp', pidFile);
     if (file.startsWith('child-ok')) { process.stdout.write('{"matched":false}\r\n'); end(); }
     if (file.startsWith('child-exit')) process.exit(1);
   }
@@ -144,16 +146,23 @@ describe('PowerShellPool', () => {
   });
 
   it.each(['ok', 'hang', 'exit', 'stop'])('reaps an actual child process when the executor path is %s', async scenario => {
-    const { pool, scriptsDir } = await setup();
+    const { pool, scriptsDir, log } = await setup();
+    pool.warm();
+    // Allow cold guardian startup before timing a request that must spawn a descendant.
+    await vi.waitFor(async () => expect(await readFile(log, 'utf8')).toContain('$__pilotScripts'), {
+      timeout: 4000,
+    });
     const pidFile = join(scriptsDir, 'descendant.pid');
-    const run = pool.run(join(scriptsDir, `child-${scenario}@1.ps1`), JSON.stringify({ pidFile }), scenario === 'hang' ? 600 : 3_000);
-    for (let i = 0; i < 100 && !existsSync(pidFile); i++) await new Promise(resolve => setTimeout(resolve, 10));
-    expect(existsSync(pidFile)).toBe(true);
-    const pid = Number(await readFile(pidFile, 'utf8'));
+    const run = pool.run(join(scriptsDir, `child-${scenario}@1.ps1`), JSON.stringify({ pidFile }), 3_000);
+    const pid = await vi.waitFor(async () => {
+      const marker = await readFile(pidFile, 'utf8');
+      expect(marker).toMatch(/^[1-9]\d*$/);
+      return Number(marker);
+    }, { timeout: 4000 });
     if (scenario === 'stop') pool.stop();
     expect((await run).ok).toBe(scenario === 'ok');
     await waitForExit(pid);
-  });
+  }, 12_000);
 
   it('keeps the request deadline when a valid marker arrives before slow guardian cleanup', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'ps-slow-cleanup-'));
