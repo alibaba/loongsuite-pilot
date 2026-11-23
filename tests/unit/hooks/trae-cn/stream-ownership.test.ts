@@ -43,7 +43,13 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories'])('reconciles a nati
     const rounds = index.responses(session, new Set(['one']));
     expect(rounds?.[0].id).toBe(history);
     if (mode === 'valid') expect(rounds?.[0]).toMatchObject({ request: 'request1', reply, seq: 5, toolIds: ['one','two'] });
-    else expect(rounds?.[0]).not.toHaveProperty('request');
+    else if (mode === 'two histories') {
+      expect(rounds).toHaveLength(2);
+      for (const round of rounds!) {
+        expect(round).toMatchObject({ shared: true, initial: true, request: 'request1', streamReports: [{ reply, seq: 5 }] });
+        expect(round).not.toHaveProperty('seq');
+      }
+    } else expect(rounds?.[0]).not.toHaveProperty('request');
   } finally {
     index.close();
     await rm(root, { recursive: true, force: true });

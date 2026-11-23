@@ -129,17 +129,25 @@ export class NativeUsageIndex {
     return [...receipt.history].map(([id, at]) => {
       const owners = receipt.streams.filter(s => s.histories.has(id));
       const s = owners[0];
-      if (receipt.ambiguousStreams || owners.length !== 1 || !s.closed || s.histories.size !== 1 ||
+      if (receipt.ambiguousStreams || owners.length !== 1 || !s.closed ||
           receipt.streams.filter(other => other.request === s.request).length !== 1) return { id, at };
       const toolIds = [...s.tools].filter(call => receipt.calls.has(call) &&
         receipt.streams.every(other => other === s || !other.tools.has(call)));
       const uniqueReports = [...s.reports].filter(([key]) => receipt.streams.every(other => other === s || !other.reports.has(key)));
-      const usage = uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
+      const shared = s.histories.size > 1;
+      const usage = !shared && uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
       return { id, at, request: s.request, toolIds,
+        ...(shared ? { shared: true, streamReports: uniqueReports.map(([, usage]) => usage) } : {}),
         ...(s.initial && s === receipt.streams[0] ? { initial: true } : {}),
         ...(s.terminal && s === receipt.streams.at(-1) ? { terminal: true } : {}),
         ...(s.continuation ? { continuation: s.continuation } : {}), ...(usage ? { reply: usage.reply, seq: usage.seq } : {}) };
     });
+  }
+
+  expectedSeqs(trace: string, session: string, reply: string) {
+    const receipts = [...this.streams.values()].map(stream => stream.receipts.get(trace))
+      .filter(r => r?.done && r.session === session && r.expected.has(reply));
+    if (receipts.length === 1) return receipts[0]?.expected.get(reply);
   }
 
   complete(trace: string, session: string, reply: string, seqs: Map<number, unknown>) {

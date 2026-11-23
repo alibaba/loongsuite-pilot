@@ -39,3 +39,27 @@ it('keeps response identities distinct and turn-level data on the agent', () => 
     JSON.stringify([{ role: 'assistant', parts: [{ type: 'text', content: 'final answer' }] }])]);
   expect(result).toHaveLength(8);
 });
+
+it('retains shared input, observed usage and tool ownership once per response stream', () => {
+  const span = (kind: string, id: string, parent?: string) => ({
+    spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId: parent,
+    startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind },
+  }) as unknown as ReadableSpan;
+  const agent = span('AGENT', '1'), step = span('STEP', '2', '1');
+  const llm = span('LLM', '3', '2'), tool = span('TOOL', '4', '2');
+  llm.attributes['gen_ai.input.messages'] = 'shared prompt';
+  tool.attributes['gen_ai.tool.call.id'] = 'call_one';
+  const rounds = ['a', 'b'].map((c, i) => ({ id: c.repeat(24), at: String((i + 2) * 1e9),
+    shared: true, initial: true, request: 'stream', toolIds: ['call_one'], streamReceived: 2,
+    streamExpected: 2, streamTokens: 30 }));
+  const records = [{ 'event.name': 'llm.response', span_id: '3', 'loongsuite.trae_cn.model_responses': rounds }] as unknown as AgentActivityEntry[];
+  const spans = expandTraeHistory(records, [agent, step, llm, tool]);
+  const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
+  expect(steps).toHaveLength(1);
+  expect(steps[0].attributes['gen_ai.input.messages']).toBe('shared prompt');
+  expect(steps[0].attributes['agent.trae-cn.hub.total_tokens_observed']).toBe(30);
+  const models = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+  expect(models.map(m => m.attributes['gen_ai.response.id'])).toEqual(rounds.map(r => r.id));
+  expect([...models, tool].every(s => s.parentSpanId === steps[0].spanContext().spanId)).toBe(true);
+  expect(models.every(s => s.attributes['gen_ai.usage.total_tokens'] === undefined)).toBe(true);
+});

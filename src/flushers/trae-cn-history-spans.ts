@@ -42,6 +42,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         m?.role === 'assistant' && Array.isArray(m.parts) ? m.parts.filter((p: { type?: string }) => p?.type) : []);
     } catch { /* The converter can omit or truncate optional content. */ }
   }
+  const sharedSteps = new Map<string, ReadableSpan>();
   const seen = new Set<string>();
   for (const r of rounds) {
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || !/^[a-f0-9]{24}$/.test(r.id) ||
@@ -53,17 +54,27 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     const templates: ReadableSpan[] = [step, llm];
     for (const template of templates) {
       const isModel = template === llm;
-      const id = createHash('sha256').update([trace, r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
+      const shared = r.shared === true && typeof r.request === 'string' ? r.request : undefined;
+      const existing = shared && !isModel ? sharedSteps.get(shared) : undefined;
+      if (existing) {
+        const startTime = earlier(instant, existing.startTime) ? instant : existing.startTime;
+        const endTime = earlier(existing.endTime, instant) ? instant : existing.endTime;
+        Object.assign(existing, { startTime, endTime, duration: hrTimeDuration(startTime, endTime) });
+        parent = existing.spanContext().spanId;
+        continue;
+      }
+      const id = createHash('sha256').update([trace, shared && !isModel ? 'stream/' + shared : r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
       const attributes: ReadableSpan['attributes'] = {};
       for (const key of ['gen_ai.span.kind', 'gen_ai.operation.name', 'gen_ai.agent.name', 'gen_ai.agent.id',
         'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id', 'gen_ai.request.model', 'workspace.path']) {
         if (template.attributes[key] !== undefined) attributes[key] = template.attributes[key];
       }
-      attributes['gen_ai.step.id'] = r.id;
+      attributes['gen_ai.step.id'] = shared || r.id;
       attributes['loongsuite.trae_cn.observation'] = 'response_recorded';
       if (typeof r.request === 'string') attributes['loongsuite.trae_cn.stream_request_id'] = r.request;
-      if (isModel) {
-        attributes['gen_ai.response.id'] = r.id;
+      if (isModel) attributes['gen_ai.response.id'] = r.id;
+      // Shared streams prove the batch of messages, but not which response owns each one.
+      if (shared ? !isModel : isModel) {
         const prompt = llm.attributes['gen_ai.input.messages'];
         if (r.initial === true && typeof prompt === 'string') attributes['gen_ai.input.messages'] = prompt;
         if (typeof r.continuation === 'string') {
@@ -77,13 +88,19 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         const parts = assistantParts.filter(p => (p.type === 'tool_call' && p.id && calls.includes(p.id))
           || (r.terminal === true && p.type === 'text'));
         if (parts.length) attributes['gen_ai.output.messages'] = JSON.stringify([{ role: 'assistant', parts }]);
+        if (shared && typeof r.streamReceived === 'number') {
+          attributes['agent.trae-cn.hub.usage_received'] = r.streamReceived;
+          if (typeof r.streamExpected === 'number') attributes['agent.trae-cn.hub.usage_expected'] = r.streamExpected;
+          if (typeof r.streamTokens === 'number') attributes['agent.trae-cn.hub.total_tokens_observed'] = r.streamTokens;
+        }
         if (typeof r.input === 'number' && typeof r.output === 'number') {
           attributes['gen_ai.usage.input_tokens'] = r.input;
           attributes['gen_ai.usage.output_tokens'] = r.output;
           attributes['gen_ai.usage.total_tokens'] = r.input + r.output;
           if (typeof r.cached === 'number') attributes['gen_ai.usage.cache_read.input_tokens'] = r.cached;
         }
-      } else {
+      }
+      if (!isModel && !shared) {
         attributes['gen_ai.react.round'] = seen.size;
       }
       const observation: ReadableSpan = { ...template, name: template.name, kind: template.kind, resource: template.resource,
@@ -91,9 +108,13 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         droppedLinksCount: 0, droppedAttributesCount: 0, links: [], events: [], status: { code: 0 },
         spanContext: () => ({ ...template.spanContext(), spanId: id }), parentSpanId: parent,
         startTime: instant, endTime: instant, duration: [0, 0], attributes };
+      if (shared && !isModel) {
+        Object.assign(observation, { name: 'response stream (multiple model responses)' });
+        sharedSteps.set(shared, observation);
+      }
       observed.push(observation);
       if (!isModel && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
-        if (typeof call === 'string') parents.set(call, { span: observation, history: r.id });
+        if (typeof call === 'string') parents.set(call, { span: observation, history: shared || r.id });
       }
       parent = id;
     }

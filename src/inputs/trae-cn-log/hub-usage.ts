@@ -126,7 +126,7 @@ export class HubUsage {
     }
   }
 
-  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses'>) {
+  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses' | 'expectedSeqs'>) {
     if (entry['event.name'] !== 'llm.response') return;
     const ids = new Set<string>();
     const messages = entry['gen_ai.output.messages'];
@@ -139,9 +139,18 @@ export class HubUsage {
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
     const matches = [...this.turns.values()].filter(t => t.session === entry['gen_ai.session.id'] &&
       [...ids].some(id => t.tools.has(id)));
-    if (matches.length !== 1 || !matches[0].reports.size) return;
+    if (matches.length !== 1) return;
     const turn = matches[0];
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds.map(round => {
+      if ('streamReports' in round && round.streamReports) {
+        const reports = round.streamReports.filter(r => r.reply === turn.reply && turn.reports.has(r.seq));
+        return { ...round, streamReceived: reports.length,
+          streamExpected: round.streamReports.length,
+          streamTokens: reports.reduce((total, r) => {
+            const usage = turn.reports.get(r.seq)!;
+            return total + usage.input + usage.output;
+          }, 0) };
+      }
       const report = 'reply' in round && round.reply === turn.reply && round.seq !== undefined ? turn.reports.get(round.seq) : undefined;
       return report ? { ...round, input: report.input, output: report.output,
         ...(report.cached !== undefined ? { cached: report.cached } : {}) } : round;
@@ -156,7 +165,13 @@ export class HubUsage {
     entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'trace_id'] = turn.trace;
     entry[prefix + 'usage_event_seqs'] = [...turn.reports.keys()].join(',');
-    const complete = (turn.contiguous && turn.done) || native?.complete(turn.trace, turn.session, turn.reply, turn.reports) === true;
+    const expected = native?.expectedSeqs(turn.trace, turn.session, turn.reply);
+    entry[prefix + 'usage_received'] = turn.reports.size;
+    if (expected) {
+      entry[prefix + 'usage_expected'] = expected.size;
+      entry[prefix + 'missing_usage_seqs'] = [...expected].filter(seq => !turn.reports.has(seq)).join(',');
+    }
+    const complete = expected ? native!.complete(turn.trace, turn.session, turn.reply, turn.reports) : (turn.contiguous && turn.done) || native?.complete(turn.trace, turn.session, turn.reply, turn.reports) === true;
     entry[prefix + 'complete'] = complete;
     entry[prefix + 'input_tokens_observed'] = input;
     entry[prefix + 'output_tokens_observed'] = output;
@@ -164,7 +179,7 @@ export class HubUsage {
       entry[prefix + 'cached_tokens_observed'] = cached;
       if (input > 0) entry[prefix + 'cache_hit_ratio_observed'] = cached / input;
     }
-    if (!complete) return;
+    if (!complete || !turn.reports.size) return;
     // Hook fields can arrive independently. Combine sources only when the
     // counters they both report describe the same usage.
     const counts = {
