@@ -328,7 +328,7 @@ describe('request-scoped correlation attributes', () => {
     expect(replay.map(entry => entry['memory.user_id'])).toEqual(['U002', 'U001']);
   });
 
-  it.each(['replacement', 'rewrite'])('does not reassign an existing turn across a same-size file %s', mode => {
+  it.each(['replacement', 'rewrite'])('does not reassign an existing turn across a same-size file %s', async mode => {
     const file = path.join(dir, 's1.jsonl');
     const timestamp = new Date('2026-01-01T00:00:00Z');
     append('s1', { attributes: { 'memory.user_id': 'U001' } });
@@ -340,8 +340,20 @@ describe('request-scoped correlation attributes', () => {
     else fs.truncateSync(file, 0);
     append('s1', { attributes: { 'memory.user_id': 'U002' } });
     fs.utimesSync(file, timestamp, timestamp);
-    expect(fs.statSync(file).size).toBe(original.size);
-    expect(fs.statSync(file).mtimeMs).toBe(original.mtimeMs);
+    if (mode === 'rewrite') {
+      // The original write and the rewrite can land in the same filesystem
+      // clock tick. Advance ctime while holding mtime constant so this case
+      // exercises invalidation by ctime alone.
+      await vi.waitFor(() => {
+        fs.utimesSync(file, timestamp, timestamp);
+        expect(fs.statSync(file).ctimeMs).not.toBe(original.ctimeMs);
+      });
+    }
+    const updated = fs.statSync(file);
+    expect(updated.size).toBe(original.size);
+    expect(updated.mtimeMs).toBe(original.mtimeMs);
+    if (mode === 'rewrite') expect(updated.ino).toBe(original.ino);
+    else expect(updated.ino).not.toBe(original.ino);
 
     expect(store.resolveTurnContext('s1', 'same prompt', 't1')).toBeNull();
     const restarted = new CorrelationStore(dir, { attributesEnabled: true, traceEnabled: false });
