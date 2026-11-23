@@ -17,6 +17,11 @@ import {
 import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
+import {
+  prepareOpenClawTools,
+  restoreOpenClawToolCallIds,
+  type OpenClawToolConversion,
+} from './openclaw-tool-conversion.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
@@ -1615,6 +1620,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     convertState.active += 1;
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
+    let openClawTools: OpenClawToolConversion | undefined;
     let streamedExportSucceeded: boolean | undefined;
 
     try {
@@ -1680,6 +1686,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // EventLog-to-Trace boundary so the converter does not emit an extra
         // empty STEP for the duplicate input boundary.
         const traceConversionRecords = prepareTraceEvents(recordsForConversion);
+        if (agentType === 'openclaw') openClawTools = prepareOpenClawTools(traceConversionRecords);
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
@@ -1687,7 +1694,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // turn is interrupted before llm.response / tool.result arrive (e.g.
         // user Ctrl+C, agent errored mid-step). The converter library would
         // otherwise still emit a span for the orphan request/call.
-        const sanitized = dropOrphanPairs(traceConversionRecords);
+        const sanitized = dropOrphanPairs(openClawTools?.records ?? traceConversionRecords);
         toolSpanIds.prepare(sanitized);
         llmSpanIds.prepare(sanitized);
         let result;
@@ -1724,7 +1731,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               pendingBytes = 0;
               const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
               const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
-                metadata, openClawIdentity, reasoning);
+                metadata, openClawIdentity, openClawTools, reasoning);
               if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
               streamedExportSucceeded = exported && streamedExportSucceeded;
             };
@@ -1792,7 +1799,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await provider.forceFlush();
       const spans = inMem.getFinishedSpans();
       inMem.reset();
-      return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity);
+      return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity, openClawTools);
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });
       return false;
@@ -1810,6 +1817,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     spans: ReadableSpan[],
     grokMetadata: GrokConversionMetadata,
     openClawIdentity: OpenClawIdentityMetadata,
+    openClawTools?: OpenClawToolConversion,
     reasoning?: { seen: boolean; total: number },
   ): Promise<boolean> {
     if (spans.length === 0) return true;
@@ -1821,12 +1829,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     applyQoderWorkStepTiming(records, spans);
-    this.enrichToolSkillAttributes(records, spans);
-    this.enrichMultimodalAttributes(records, spans);
+    const toolRecords = openClawTools?.records ?? records;
+    this.enrichToolSkillAttributes(toolRecords, spans);
+    this.enrichMultimodalAttributes(toolRecords, spans);
     if (agentType === 'openclaw') {
       this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
       this.enrichOpenClawSessionKey(records, spans);
-      this.enrichOpenClawToolAttributes(records, spans);
+      this.enrichOpenClawToolAttributes(toolRecords, spans);
+      if (openClawTools) restoreOpenClawToolCallIds(spans, openClawTools.nativeCallIds);
       this.enrichOpenClawLlmAttributes(records, spans);
       if (reasoning) {
         for (const span of spans) {

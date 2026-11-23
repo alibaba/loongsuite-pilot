@@ -84,8 +84,7 @@ export function createLegacyHandlers(shared) {
       const match = context(event, ctx);
       if (!match || !states.has(match.run)) return;
       if (!match.run.currentStepCallId) return;
-      fn(event, match.ctx, userId, record => {
-        const start = match.run.toolStartedAtNanos.get(event?.toolCallId);
+      fn(event, match.ctx, userId, (record, start) => {
         if (record["event.name"] === "tool.result" && start
           && BigInt(record.time_unix_nano) / 1_000_000n <= BigInt(start) / 1_000_000n) {
           record = { ...record,
@@ -144,10 +143,8 @@ export function createLegacyHandlers(shared) {
     tool_result_persist(event, ctx, userId, emit) {
       const match = context(event, ctx);
       if (!match || !states.has(match.run)) return;
-      const id = event?.message?.toolCallId || event?.toolCallId;
-      const seen = id && match.run.persistedToolCallIds.has(id);
-      shared.handleToolResultPersist(event, match.ctx, userId, tagged(emit, "tool_result_persist"));
-      if (id && !seen) {
+      const firstPersist = shared.handleToolResultPersist(event, match.ctx, userId, tagged(emit, "tool_result_persist"));
+      if (firstPersist) {
         const state = states.get(match.run);
         state.boundary = nanos();
         state.boundarySource = "tool_result_persist";

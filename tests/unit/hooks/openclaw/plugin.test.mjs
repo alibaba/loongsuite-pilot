@@ -158,7 +158,51 @@ async function replay(plugin, envelopes, { pluginConfig = {}, contextPatch } = {
     if (contextPatch) Object.assign(ctx, contextPatch(env) || {});
     await h(env.event, ctx);
   }
-  return readOutputRecords();
+  const records = readOutputRecords();
+  assertInvocationSpanIds(records);
+  return records;
+}
+
+// Apply the ID contract to every fixture replay, including errors, fallback,
+// privacy-off and delayed tool results, not just the happy-path fixture.
+function assertInvocationSpanIds(records) {
+  const idsByInvocation = new Map();
+  const ownersById = new Map();
+  for (const record of records) {
+    const name = record['event.name'];
+    if (!['llm.request', 'llm.response', 'tool.call', 'tool.result'].includes(name)) {
+      expect(record.span_id).toBeUndefined();
+      continue;
+    }
+    expect(record.span_id).toMatch(/^[0-9a-f]{16}$/);
+    expect(record.span_id).not.toBe('0000000000000000');
+    const isTool = name.startsWith('tool.');
+    const callId = isTool ? record['gen_ai.tool.call.id'] : record['gen_ai.step.id'];
+    if (!callId) continue;
+    const key = JSON.stringify([record.trace_id, record['gen_ai.step.id'], isTool, callId,
+      isTool ? record.span_id : undefined]);
+    if (idsByInvocation.has(key)) expect(record.span_id).toBe(idsByInvocation.get(key));
+    if (ownersById.has(record.span_id)) expect(key).toBe(ownersById.get(record.span_id));
+    idsByInvocation.set(key, record.span_id);
+    ownersById.set(record.span_id, key);
+  }
+}
+
+// Only complete scenarios require both boundaries: cancellation/missing hooks may
+// legitimately produce orphans. Pair by span first, then validate step ownership.
+function assertCompleteToolPairs(records) {
+  const tools = records.filter(r => r['event.name'].startsWith('tool.'));
+  const calls = tools.filter(r => r['event.name'] === 'tool.call');
+  const results = tools.filter(r => r['event.name'] === 'tool.result');
+  expect(results).toHaveLength(calls.length);
+  expect(new Set(calls.map(r => r.span_id)).size).toBe(calls.length);
+  for (const call of calls) {
+    const matches = results.filter(r => r.span_id === call.span_id);
+    expect(matches).toHaveLength(1);
+    expect(matches[0].trace_id).toBe(call.trace_id);
+    expect(matches[0]['gen_ai.tool.call.id']).toBe(call['gen_ai.tool.call.id']);
+    expect(matches[0]['gen_ai.step.id']).toBe(call['gen_ai.step.id']);
+  }
 }
 
 function todayStamp() {
@@ -201,6 +245,103 @@ describe('OpenClaw plugin stateful pipeline', () => {
       expect(record['agent.openclaw.session_key']).toBeUndefined();
       expect(record['agent.openclaw.session_key.ambiguous']).toBe(true);
     }
+  });
+
+  it('uses distinct paired span IDs for models and parallel tools across runs', async () => {
+    const plugin = await loadPlugin();
+    const envelopes = readJsonl('pilot-probe-events-cp2.jsonl');
+    const first = await replay(plugin, envelopes);
+    const second = await replay(plugin, envelopes);
+    assertCompleteToolPairs(first);
+    assertCompleteToolPairs(second);
+    const starts = records => records.filter(r => ['llm.request', 'tool.call'].includes(r['event.name']));
+    expect(starts(first)).toHaveLength(4);
+    expect(new Set(starts(first).map(r => r.span_id)).size).toBe(4);
+    const firstIds = new Set(starts(first).map(r => r.span_id));
+    expect(starts(second).every(r => !firstIds.has(r.span_id))).toBe(true);
+  });
+
+  it('separates reused tool IDs across model steps and does not correlate missing IDs', async () => {
+    const plugin = await loadPlugin();
+    const handlers = registerPlugin(plugin);
+    const ctx = { runId: 'span-run', sessionId: 'span-session', sessionKey: 'span-key' };
+    for (let step = 0; step < 2; step++) {
+      handlers.model_call_started({ callId: 'reused-model-id' }, ctx);
+      handlers.before_tool_call({ toolName: 'read', toolCallId: 'reused-tool-id' }, ctx);
+      handlers.after_tool_call({ toolName: 'read', toolCallId: 'reused-tool-id', result: 'ok' }, ctx);
+    }
+    handlers.before_tool_call({ toolName: 'read' }, ctx);
+    handlers.after_tool_call({ toolName: 'read', result: 'ok' }, ctx);
+    const records = readOutputRecords();
+    assertInvocationSpanIds(records);
+    const calls = records.filter(r => r['event.name'] === 'tool.call');
+    expect(calls).toHaveLength(3);
+    expect(new Set(calls.map(r => r.span_id)).size).toBe(3);
+    const missing = records.filter(r => r['event.name'].startsWith('tool.') && !r['gen_ai.tool.call.id']);
+    expect(missing).toHaveLength(2);
+    expect(missing[0].span_id).not.toBe(missing[1].span_id);
+  });
+
+  it('passes each persisted result once to the next model request after a tool ID is reused', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'persisted-tool-reuse', sessionId: 'reuse-session', sessionKey: 'agent:main:reuse' };
+    const tool = { toolName: 'read', toolCallId: 'reused-id' };
+    handlers.model_call_started({ callId: 'model-0' }, ctx);
+    for (const [index, response] of ['first result', 'second result'].entries()) {
+      await handlers.before_tool_call(tool, ctx);
+      handlers.after_tool_call({ ...tool, result: response }, ctx);
+      const persisted = { ...tool, message: { toolCallId: tool.toolCallId, role: 'toolResult',
+        content: [{ type: 'text', text: response }] } };
+      const persistenceContext = { sessionKey: ctx.sessionKey, agentId: 'main' };
+      handlers.tool_result_persist(persisted, persistenceContext);
+      handlers.tool_result_persist(persisted, persistenceContext);
+      handlers.model_call_started({ callId: `model-${index + 1}` }, ctx);
+    }
+
+    const records = readOutputRecords();
+    assertCompleteToolPairs(records);
+    const requests = records.filter(record => record['event.name'] === 'llm.request').slice(1);
+    expect(requests.map(record => (record['gen_ai.input.messages_delta'] ?? [])
+      .filter(message => message.role === 'tool').flatMap(message => message.parts.map(part => part.response))))
+      .toEqual([['first result'], ['second result']]);
+  });
+
+  it.each([false, true])('pairs delayed reused tool IDs with invocation state (same step: %s)', async sameStep => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'overlap-span-run', sessionId: 'session' };
+    let now = 1_785_900_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
+    handlers.model_call_started({ callId: 'model-1' }, ctx);
+    handlers.before_tool_call({ toolName: 'read', toolCallId: 'reused' }, ctx);
+    now += 2_000;
+    if (!sameStep) handlers.model_call_started({ callId: 'model-2' }, ctx);
+    handlers.before_tool_call({ toolName: 'read', toolCallId: 'reused' }, ctx);
+    now += 2_000;
+    handlers.after_tool_call({ toolName: 'read', toolCallId: 'reused', result: 'first', durationMs: 1_000 }, ctx);
+    handlers.after_tool_call({ toolName: 'read', toolCallId: 'reused', result: 'second', durationMs: 1_000 }, ctx);
+    const records = readOutputRecords();
+    assertCompleteToolPairs(records);
+    const calls = records.filter(r => r['event.name'] === 'tool.call');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    expect(calls[0].span_id).not.toBe(calls[1].span_id);
+    for (let n = 0; n < 2; n++) {
+      expect(results[n].span_id).toBe(calls[n].span_id);
+      expect(results[n]['gen_ai.step.id']).toBe(calls[n]['gen_ai.step.id']);
+      expect(BigInt(results[n].time_unix_nano) - BigInt(calls[n].time_unix_nano)).toBe(1_000_000_000n);
+    }
+  });
+
+  it('matches distinct parallel tool IDs when results arrive in reverse order', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'reverse-span-run', sessionId: 'session' };
+    for (const id of ['first', 'second']) {
+      handlers.model_call_started({ callId: id }, ctx);
+      handlers.before_tool_call({ toolName: 'read', toolCallId: id }, ctx);
+    }
+    for (const id of ['second', 'first']) {
+      handlers.after_tool_call({ toolName: 'read', toolCallId: id, result: id }, ctx);
+    }
+    assertCompleteToolPairs(readOutputRecords());
   });
 
   it('delegates the minimum host-version check to OpenClaw without a CLI command', () => {
@@ -719,6 +860,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(toolRecords.every((record) => record['gen_ai.step.id'] === firstCallId)).toBe(true);
     const call = toolRecords.find((record) => record['event.name'] === 'tool.call');
     const result = toolRecords.find((record) => record['event.name'] === 'tool.result');
+    expect(result.span_id).toBe(call.span_id);
     expect(BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano)).toBe(1_000_000_000n);
     expect(BigInt(result.observed_time_unix_nano)).toBeGreaterThan(BigInt(result.time_unix_nano));
   });
@@ -771,6 +913,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(result['gen_ai.tool.call.duration']).toBe(134);
     expect(result['agent.openclaw.duration_ms']).toBe(134);
     expect(result['agent.openclaw.duration_clipped_to_next_model']).toBe(true);
+    expect(result.span_id).toBe(call.span_id);
     expect(result.time_unix_nano).toBe(nextRequest.time_unix_nano);
     expect(BigInt(result.time_unix_nano) - BigInt(call.time_unix_nano)).toBe(120_000_000n);
     expect(BigInt(result.observed_time_unix_nano)).toBeGreaterThan(BigInt(result.time_unix_nano));
@@ -1852,6 +1995,137 @@ describe('subagent trace propagation', () => {
     expect(children.every(r => r.parent_span_id === spawn.span_id)).toBe(true);
     expect(children.every(r => r['user.id'] === 'user-a')).toBe(true);
     expect(children.every(r => r['gen_ai.session.id'] === 'child-session')).toBe(true);
+  });
+
+  it.each(['event', 'context'])('pairs out-of-order tools sharing an ID with names in the %s', async identitySource => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'reused-mixed-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const child = { runId: 'reused-mixed-child', sessionId: 'child', sessionKey: 'agent:main:subagent:mixed' };
+    const spawn = { toolName: 'sessions_spawn', toolCallId: 'reused' };
+    const read = { toolName: 'read', toolCallId: 'reused' };
+    const fire = (name, identity, data) => identitySource === 'event'
+      ? h[name]({ ...data, ...identity }, parent)
+      : h[name](data, { ...parent, ...identity });
+
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    await h.model_call_started({ callId: 'model-1' }, parent);
+    await fire('before_tool_call', spawn, { params: { task: 'child work' } });
+    await h.model_call_started({ callId: 'model-2' }, parent);
+    await fire('before_tool_call', read, { params: { file: 'fixture' } });
+    await h.after_tool_call({ toolCallId: 'reused', result: 'unattributed result' }, parent);
+    await fire('after_tool_call', read, { result: 'read done' });
+    await fire('after_tool_call', spawn, { result: {
+      details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+    } });
+
+    const restarted = registerPlugin(await loadPlugin());
+    await restarted.before_agent_run({ prompt: 'child work' }, child);
+    await restarted.llm_output({}, child);
+
+    const records = readOutputRecords();
+    const spawnCall = records.find(r => r['event.name'] === 'tool.call' && r['gen_ai.tool.name'] === 'sessions_spawn');
+    const readCall = records.find(r => r['event.name'] === 'tool.call' && r['gen_ai.tool.name'] === 'read');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    expect(spawnCall).toBeDefined();
+    expect(readCall).toBeDefined();
+    expect(spawnCall.span_id).not.toBe(readCall.span_id);
+    expect([spawnCall.span_id, readCall.span_id]).not.toContain(results[0]?.span_id);
+    expect(results.slice(1)).toEqual([
+      expect.objectContaining({ span_id: readCall.span_id, 'gen_ai.step.id': readCall['gen_ai.step.id'], 'gen_ai.tool.call.id': 'reused' }),
+      expect.objectContaining({ span_id: spawnCall.span_id, 'gen_ai.step.id': spawnCall['gen_ai.step.id'], 'gen_ai.tool.call.id': 'reused' }),
+    ]);
+    const invoke = records.find(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(invoke['gen_ai.agent.invocation.id']).toMatch(/^[a-f0-9]{32}$/);
+    const childRows = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+    expect(childRows.length).toBeGreaterThan(0);
+    for (const row of childRows) expect(row).toMatchObject({
+      trace_id: spawnCall.trace_id,
+      parent_span_id: spawnCall.span_id,
+      'gen_ai.agent.parent.invocation.id': invoke['gen_ai.agent.invocation.id'],
+    });
+  });
+
+  it('does not consume a pending call or bind a child for a mismatching tool name', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'mismatched-tool-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const child = { runId: 'mismatched-tool-child', sessionId: 'child', sessionKey: 'agent:main:subagent:orphan' };
+    const read = { toolName: 'read', toolCallId: 'shared' };
+    await h.before_agent_run({ prompt: 'read' }, parent);
+    await h.model_call_started({ callId: 'model' }, parent);
+    await h.before_tool_call(read, parent);
+    await h.after_tool_call({
+      toolName: 'sessions_spawn', toolCallId: read.toolCallId,
+      result: { details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey } },
+    }, parent);
+    // The unique pending read can still be paired when a legacy result has no name.
+    await h.after_tool_call({ toolCallId: read.toolCallId, result: 'done' }, parent);
+
+    const records = readOutputRecords();
+    const call = records.find(r => r['event.name'] === 'tool.call');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    expect(results).toHaveLength(2);
+    expect(results[0].span_id).not.toBe(call.span_id);
+    expect(results[1]).toMatchObject({ span_id: call.span_id, 'gen_ai.tool.name': 'read' });
+    expect(records.some(r => r['event.name'] === 'gen_ai.agent.invoke')).toBe(false);
+    expect(fs.existsSync(path.join(pilotDataDir, 'subagent-contexts', 'openclaw'))).toBe(false);
+  });
+
+  it('keeps reused spawn IDs separate within a parent run, including child audits after restart', async () => {
+    const h = registerPlugin(await loadPlugin());
+    const parent = { runId: 'reused-spawn-parent', sessionId: 'parent', sessionKey: 'agent:main:main' };
+    const children = [0, 1].map(i => ({
+      runId: `reused-spawn-child-${i}`,
+      sessionId: `child-${i}`,
+      sessionKey: `agent:main:subagent:child-${i}`,
+    }));
+    const spawn = { toolName: 'sessions_spawn', toolCallId: 'reused' };
+    await h.before_agent_run({ prompt: 'delegate' }, parent);
+    for (const i of [0, 1]) {
+      await h.model_call_started({ callId: `model-${i}` }, parent);
+      await h.before_tool_call({ ...spawn, params: { task: `work-${i}` } }, parent);
+    }
+    for (const child of children) {
+      await h.after_tool_call({ ...spawn, result: {
+        details: { status: 'accepted', runId: child.runId, childSessionKey: child.sessionKey },
+      } }, parent);
+    }
+
+    // Once both pending invocations are complete, a result with the same
+    // native ID cannot reuse a span, an audit identity, or a child binding.
+    await h.model_call_started({ callId: 'model-unpaired' }, parent);
+    await h.after_tool_call({ ...spawn, result: {
+      details: { status: 'accepted', runId: 'unpaired-child' },
+    } }, parent);
+    const restarted = registerPlugin(await loadPlugin());
+    for (const child of children) {
+      await restarted.before_agent_run({ prompt: 'child work' }, child);
+      await restarted.llm_output({}, child);
+    }
+
+    const records = readOutputRecords();
+    const calls = records.filter(r => r['event.name'] === 'tool.call');
+    const results = records.filter(r => r['event.name'] === 'tool.result');
+    const invokes = records.filter(r => r['event.name'] === 'gen_ai.agent.invoke');
+    expect(calls).toHaveLength(2);
+    expect(results).toHaveLength(3);
+    expect(invokes).toHaveLength(2);
+    expect(new Set(results.map(r => r.span_id)).size).toBe(3);
+    expect(new Set(invokes.map(r => r['gen_ai.agent.invocation.id'])).size).toBe(2);
+    for (const [i, child] of children.entries()) {
+      expect(results[i].span_id).toBe(calls[i].span_id);
+      expect(results[i]['gen_ai.step.id']).toBe(calls[i]['gen_ai.step.id']);
+      const childRows = records.filter(r => r['gen_ai.turn.id'] === child.runId);
+      expect(childRows.length).toBeGreaterThan(0);
+      for (const row of childRows) expect(row).toMatchObject({
+        trace_id: calls[i].trace_id,
+        parent_span_id: calls[i].span_id,
+        'gen_ai.agent.parent.invocation.id': invokes[i]['gen_ai.agent.invocation.id'],
+      });
+    }
+    const latestRequest = records.filter(r => r['event.name'] === 'llm.request').at(-1);
+    expect(results[2]['gen_ai.step.id']).toBe(latestRequest['gen_ai.step.id']);
+    const contextDir = path.join(pilotDataDir, 'subagent-contexts', 'openclaw');
+    expect(fs.readdirSync(contextDir)).toHaveLength(2);
   });
 });
 
