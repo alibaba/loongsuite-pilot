@@ -8,6 +8,7 @@ import type { NativeUsageIndex } from './native-usage-index.js';
 type Usage = { input: number; output: number; cached?: number };
 type Turn = {
   reply: string; session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
+  plans: Map<string, { seq: number; content: string; call?: string }>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
 };
 type Cursor = { handle: FileHandle; offset: number; skipping: boolean; turn?: Turn };
@@ -23,7 +24,7 @@ export class HubUsage {
   private pending?: Promise<void>;
   private dirty = false;
 
-  constructor(private readonly root: string) {}
+  constructor(private readonly root: string, private readonly captureContent = false) {}
 
   async refresh() {
     if (!this.watcher) {
@@ -97,7 +98,7 @@ export class HubUsage {
             const meta = JSON.parse(row.data);
             if (meta.reply_to_message_id !== reply || !/^[0-9a-f]{24}$/.test(meta.session_id) ||
                 !/^[0-9a-f]{32}$/.test(meta.trace_id)) continue;
-            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(),
+            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(),
               lastSeq: row.seq - 1, contiguous: row.seq === 0 || row.seq === 1, done: false, touched: Date.now() };
             this.turns.set(reply, cursor.turn);
           }
@@ -112,7 +113,18 @@ export class HubUsage {
           if (row.type === 'done') turn.done = true;
           if (row.type === 'plan_item') {
             const id = d.tool_call_info?.meta?.llm_toolcall_id;
-            if (typeof id === 'string' && id.length <= 256) turn.tools.add(id);
+            const call = typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : undefined;
+            if (call) turn.tools.add(call);
+            // The client replaces a plan item's reasoning on updates. A single
+            // snapshot may precede dispatch, and later snapshots may omit text.
+            if (this.captureContent && typeof d.id === 'string' && d.id.length <= 128 && count(row.seq)) {
+              const previous = turn.plans.get(d.id);
+              if ((!previous || row.seq > previous.seq) && (previous || turn.plans.size < 256)) {
+                const content = typeof d.reasoning_content === 'string'
+                  ? d.reasoning_content.slice(0, 32000) : previous?.content;
+                if (content !== undefined) turn.plans.set(d.id, { seq: row.seq, content, call: call ?? previous?.call });
+              }
+            }
           }
           if (row.type === 'token_usage') {
             if (!count(d.prompt_tokens) || !count(d.completion_tokens) || !count(row.seq) ||
@@ -141,6 +153,13 @@ export class HubUsage {
       [...ids].some(id => t.tools.has(id)));
     if (matches.length !== 1) return;
     const turn = matches[0];
+    if (this.captureContent && Array.isArray(messages)) {
+      const parts = [...turn.plans].filter(([, plan]) => plan.content).map(([id, plan]) => ({
+        type: 'reasoning', content: plan.content, plan_item_id: id,
+        ...(plan.call && ids.has(plan.call) ? { tool_call_id: plan.call } : {}),
+      }));
+      if (parts.length) entry['gen_ai.output.messages'] = [{ role: 'assistant', parts }, ...messages];
+    }
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds.map(round => {
       if ('streamReports' in round && round.streamReports) {
         const reports = round.streamReports.filter(r => r.reply === turn.reply && turn.reports.has(r.seq));

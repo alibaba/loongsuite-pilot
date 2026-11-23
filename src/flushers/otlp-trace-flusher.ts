@@ -1788,14 +1788,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
-    if (agentType === 'trae-cn') spans = expandTraeHistory(records, spans);
+    if (agentType === 'trae-cn') {
+      spans = expandTraeHistory(records, spans);
+      this.enrichToolResultAttributes(records, spans, 'TRAE-CN');
+    }
     applyQoderWorkStepTiming(records, spans);
     this.enrichToolSkillAttributes(records, spans);
     this.enrichMultimodalAttributes(records, spans);
     if (agentType === 'openclaw') {
       this.enrichOpenClawIdentityAttributes(openClawIdentity, spans);
       this.enrichOpenClawSessionKey(records, spans);
-      this.enrichOpenClawToolAttributes(records, spans);
+      this.enrichToolResultAttributes(records, spans, 'OpenClaw');
       this.enrichOpenClawLlmAttributes(records, spans);
       if (reasoning) {
         for (const span of spans) {
@@ -2599,9 +2602,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
-  private enrichOpenClawToolAttributes(
+  private enrichToolResultAttributes(
     records: AgentActivityEntry[],
     spans: ReadableSpan[],
+    agentName: string,
   ): void {
     const extensionByCallId = new Map<string, {
       resultStatus?: string;
@@ -2639,13 +2643,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         span.attributes['tool.result.status'] = extension.resultStatus;
       }
       if (extension.errorType) span.attributes['error.type'] = extension.errorType;
-      if (extension.errorMessage) span.attributes['error.message'] = extension.errorMessage;
+      const message = agentName === 'TRAE-CN' ? undefined : extension.errorMessage;
+      if (message) span.attributes['error.message'] = message;
 
       const resultStatus = extension.resultStatus?.toLowerCase();
       if (extension.errorType || resultStatus === 'failure' || resultStatus === 'error') {
         Object.assign(span.status, {
           code: SpanStatusCode.ERROR,
-          message: extension.errorMessage || 'OpenClaw tool call failed',
+          message: message || `${agentName} tool call failed`,
         });
       }
     }

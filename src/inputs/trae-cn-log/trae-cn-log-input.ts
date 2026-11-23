@@ -17,6 +17,7 @@ export interface TraeCnLogInputOptions extends SessionInputOptions {
   /** TRAE ai-agent stdout log directory (auxiliary source; best-effort). */
   auxLogDir?: string;
   hubCacheDir?: string;
+  captureMessageContent?: boolean;
 }
 
 /**
@@ -46,7 +47,7 @@ export class TraeCnLogInput extends BaseSessionInput {
       filePattern: opts?.filePattern ?? DEFAULT_FILE_PATTERN,
       pollIntervalMs: opts?.pollIntervalMs ?? 30_000,
     });
-    this.hub = new HubUsage(opts?.hubCacheDir ?? resolveHome('~/.trae-cn/hub_event_cache/TraeCode'));
+    this.hub = new HubUsage(opts?.hubCacheDir ?? resolveHome('~/.trae-cn/hub_event_cache/TraeCode'), opts?.captureMessageContent);
     this.auxLogDir = opts?.auxLogDir ?? resolveHome(DEFAULT_AUX_LOG_DIR);
   }
 

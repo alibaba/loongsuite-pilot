@@ -33,7 +33,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     if (round && typeof round === 'object' && !Array.isArray(round) && typeof round.request === 'string' && Array.isArray(round.toolIds))
       callsByRequest.set(round.request, round.toolIds.filter((id): id is string => typeof id === 'string'));
   }
-  let assistantParts: { type: string; id?: string }[] = [];
+  let assistantParts: { type: string; id?: string; tool_call_id?: string }[] = [];
   const output = llm.attributes['gen_ai.output.messages'];
   if (typeof output === 'string') {
     try {
@@ -88,6 +88,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         }
         const calls = Array.isArray(r.toolIds) ? r.toolIds : [];
         const parts = assistantParts.filter(p => (p.type === 'tool_call' && p.id && calls.includes(p.id))
+          || (p.type === 'reasoning' && p.tool_call_id && calls.includes(p.tool_call_id))
           || (r.terminal === true && p.type === 'text'));
         if (parts.length) attributes['gen_ai.output.messages'] = JSON.stringify([{ role: 'assistant', parts }]);
         if (shared && typeof r.streamReceived === 'number') {

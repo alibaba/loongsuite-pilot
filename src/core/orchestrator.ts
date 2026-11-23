@@ -1919,6 +1919,7 @@ export class Orchestrator extends EventEmitter {
     const traeCnLogInput = new TraeCnLogInput({
       stateStore: this.stateStore,
       sessionDir: traeCnLogDir,
+      captureMessageContent: this.config.agents['trae-cn']?.captureMessageContent === true,
       pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
     });
     this.inputManager.registerInput(traeCnLogInput);
