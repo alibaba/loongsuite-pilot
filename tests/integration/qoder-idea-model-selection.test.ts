@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
+import { readSqliteTokensForSession } from '../../src/inputs/qoder-trace/sqlite-token-reader.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
 import { InputManager } from '../../src/core/input-manager.js';
 import { loadDatabaseSync } from '../../src/utils/node-sqlite.js';
@@ -19,6 +20,65 @@ vi.mock('node:os', async importOriginal => {
 afterEach(async () => {
   if (fixture.home) await fs.rm(fixture.home, { recursive: true, force: true });
   fixture.home = '';
+});
+
+it.each([
+  ['missing table', ''],
+  ['missing model column', 'CREATE TABLE chat_record (session_id TEXT, request_id TEXT);'],
+])('retains JetBrains token rows with a legacy schema: %s', async (_name, recordSchema) => {
+  fixture.home = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-idea-legacy-model-'));
+  const dbDir = path.join(fixture.home, '.qoder/shared_client/cache/db');
+  await fs.mkdir(dbDir, { recursive: true });
+  const Database = loadDatabaseSync();
+  if (!Database) throw new Error('node:sqlite required');
+  const dbPath = path.join(dbDir, 'local.db');
+  const db = new Database(dbPath);
+  try {
+    db.exec(`${recordSchema}
+      CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, session_id TEXT, request_id TEXT)`);
+    db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy-message', 'assistant', 100, '{"prompt_tokens":12,"completion_tokens":3}', '{"model_key":"legacy-model"}', 'legacy-session', 'legacy-request');
+  } finally {
+    db.close();
+  }
+
+  const result = await readSqliteTokensForSession('legacy-session');
+  expect(result.matchedDbPath).toBe(dbPath);
+  expect(result.rows).toEqual([expect.objectContaining({
+    messageId: 'legacy-message', model: 'legacy-model', inputTokens: 12, outputTokens: 3,
+  })]);
+  expect(result.requestModels).toEqual([]);
+});
+
+it('keeps one token row per message and omits conflicting request models', async () => {
+  fixture.home = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-idea-replayed-model-'));
+  const dbDir = path.join(fixture.home, '.qoder/shared_client/cache/db');
+  await fs.mkdir(dbDir, { recursive: true });
+  const Database = loadDatabaseSync();
+  if (!Database) throw new Error('node:sqlite required');
+  const db = new Database(path.join(dbDir, 'local.db'));
+  try {
+    db.exec(`CREATE TABLE chat_record (session_id TEXT, request_id TEXT, extra TEXT);
+      CREATE TABLE chat_message (id TEXT, role TEXT, gmt_create INTEGER, token_info TEXT, model_info TEXT, session_id TEXT, request_id TEXT)`);
+    const record = db.prepare('INSERT INTO chat_record VALUES (?, ?, ?)');
+    const message = db.prepare('INSERT INTO chat_message VALUES (?, ?, ?, ?, ?, ?, ?)');
+    message.run('agreed-message', 'assistant', 100, '{"prompt_tokens":12,"completion_tokens":3}', null, 'session', 'agreed');
+    message.run('ambiguous-message', 'assistant', 200, '{"prompt_tokens":19,"completion_tokens":5}', null, 'session', 'ambiguous');
+    for (const [requestId, model] of [['agreed', 'auto'], ['agreed', 'auto'], ['ambiguous', 'fast'], ['ambiguous', 'auto']]) {
+      record.run('session', requestId, JSON.stringify({ modelConfig: { key: model } }));
+    }
+    record.run('unrelated-session', 'agreed', '{"modelConfig":{"key":"fast"}}');
+  } finally {
+    db.close();
+  }
+
+  const result = await readSqliteTokensForSession('session');
+  expect(result.rows.map(row => [row.messageId, row.inputTokens])).toEqual([
+    ['agreed-message', 12], ['ambiguous-message', 19],
+  ]);
+  expect(result.requestModels).toEqual([
+    { messageId: 'agreed-message', requestId: 'agreed', gmtCreate: 100, model: 'auto' },
+  ]);
 });
 
 it('uses the JetBrains request model without token rows and ignores ambiguous clock matches', async () => {

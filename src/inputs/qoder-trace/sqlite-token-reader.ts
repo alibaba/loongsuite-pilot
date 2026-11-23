@@ -146,42 +146,17 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
   const dbPaths = resolveAllQoderDbPaths();
   if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
 
-  const sql = `
-    SELECT
-      cm.id AS message_id,
-      cm.session_id AS session_id,
-      cm.request_id AS request_id,
-      cm.gmt_create AS gmt_create,
-      cm.token_info AS token_info,
-      cm.model_info AS model_info,
-      CASE WHEN json_valid(cr.extra) THEN json_extract(cr.extra, '$.modelConfig.key') END AS request_model
-    FROM chat_message cm
-    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id AND cr.session_id = cm.session_id
-    WHERE cm.session_id = ?
-      AND cm.role = 'assistant'
-      AND (
-        json_valid(cm.token_info)
-        OR CASE WHEN json_valid(cr.extra) THEN json_type(cr.extra, '$.modelConfig.key') = 'text' ELSE 0 END
-      )
-      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
-    ORDER BY cm.gmt_create ASC, cm.id ASC
-  `;
-
   let modelOnly: SqliteTokenResult | undefined;
   for (const dbPath of dbPaths) {
-    let rows: Array<{
-      message_id?: string;
-      session_id?: string;
-      request_id: string;
-      gmt_create: number;
-      token_info: string | null;
-      model_info?: string | null;
-      request_model?: unknown;
-    }>;
+    let rows: SqliteTokenRow[];
     try {
-      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
-        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
-      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
+      rows = isIdeaDbPath(dbPath)
+        ? await readSqliteTokenRows(dbPath, sessionId, true).catch(error => {
+          // Older JetBrains clients may omit chat_record or its model metadata.
+          logger.debug('sqlite request-model query failed', { sessionId, dbPath, error: String(error) });
+          return readSqliteTokenRows(dbPath, sessionId, false);
+        })
+        : await readSqliteTokenRows(dbPath, sessionId, false);
     } catch (err) {
       logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
       continue;
@@ -192,13 +167,12 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     const results: SqliteTokenData[] = [];
     const requestModels: SqliteRequestModel[] = [];
     for (const row of rows) {
-      const requestModel = typeof row.request_model === 'string' ? row.request_model.trim() : '';
-      if (row.request_id && requestModel && requestModel.length <= 512 && requestModel.toLowerCase() !== 'unknown') {
+      if (row.request_id && row.request_model) {
         requestModels.push({
           requestId: row.request_id,
           messageId: row.message_id ?? '',
           gmtCreate: row.gmt_create,
-          model: requestModel,
+          model: row.request_model,
         });
       }
       const info = row.token_info ? parseTokenInfo(row.token_info) : null;
@@ -218,6 +192,60 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     if (requestModels.length > 0) modelOnly ??= { rows: [], requestModels, matchedDbPath: dbPath };
   }
   return modelOnly ?? { rows: [], matchedDbPath: null };
+}
+
+interface SqliteTokenRow {
+  message_id?: string;
+  session_id?: string;
+  request_id: string;
+  gmt_create: number;
+  token_info: string | null;
+  model_info?: string | null;
+  request_model: string | null;
+}
+
+function readSqliteTokenRows(dbPath: string, sessionId: string, withRequestModels: boolean): Promise<SqliteTokenRow[]> {
+  // Group repeated records before joining. They must not duplicate usage
+  // rows or turn conflicting model selections into an arbitrary choice.
+  const modelQuery = `
+    WITH recorded_models AS (
+      SELECT request_id, CASE WHEN json_valid(extra) THEN
+        CASE WHEN json_type(extra, '$.modelConfig.key') = 'text'
+          THEN trim(json_extract(extra, '$.modelConfig.key')) END
+      END AS model
+      FROM chat_record
+      WHERE session_id = ?
+    ), request_models AS (
+      SELECT request_id, MIN(model) AS request_model
+      FROM recorded_models
+      WHERE length(model) BETWEEN 1 AND 512 AND lower(model) != 'unknown'
+      GROUP BY request_id
+      HAVING COUNT(DISTINCT model) = 1
+    )
+  `;
+  const sql = `
+    ${withRequestModels ? modelQuery : ''}
+    SELECT
+      cm.id AS message_id,
+      cm.session_id AS session_id,
+      cm.request_id AS request_id,
+      cm.gmt_create AS gmt_create,
+      cm.token_info AS token_info,
+      cm.model_info AS model_info,
+      ${withRequestModels ? 'rm.request_model' : 'NULL'} AS request_model
+    FROM chat_message cm
+    ${withRequestModels ? 'LEFT JOIN request_models rm ON rm.request_id = cm.request_id' : ''}
+    WHERE cm.session_id = ?
+      AND cm.role = 'assistant'
+      AND (json_valid(cm.token_info)${withRequestModels ? ' OR rm.request_model IS NOT NULL' : ''})
+      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
+    ORDER BY cm.gmt_create ASC, cm.id ASC
+  `;
+
+  const sessionParams = withRequestModels ? [sessionId, sessionId] : [sessionId];
+  return queryReadonlyPaged(dbPath, sql, (cursor) => [
+    ...sessionParams, cursor.continued, cursor.sort, cursor.sort, cursor.id,
+  ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
 }
 
 /**
