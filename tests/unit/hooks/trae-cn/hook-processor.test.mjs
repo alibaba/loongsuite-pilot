@@ -191,7 +191,7 @@ describe('trae-cn hook processor', () => {
     try {
       await manager.startInput(input.id);
       await vi.waitFor(() => expect(spans.map(span => span.attributes['gen_ai.span.kind']).sort())
-        .toEqual(['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL']), { timeout: 2_000 });
+        .toEqual(captureContent ? ['AGENT', 'ENTRY', 'LLM', 'STEP', 'TOOL'] : ['AGENT', 'ENTRY', 'STEP', 'TOOL']), { timeout: 2_000 });
       const tool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
       const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
       const agent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'AGENT');

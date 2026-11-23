@@ -19,7 +19,7 @@ import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn, prepareIndependentTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
-import { expandTraeHistory } from './trae-cn-history-spans.js';
+import { expandTraeHistory, omitEmptyTraeModelSpans } from './trae-cn-history-spans.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
 import { convertQwenWorkCollaborationTurn } from './qwen-work-collaboration-converter.js';
@@ -1790,7 +1790,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       }
     }
     if (agentType === 'trae-cn') {
-      spans = expandTraeHistory(records, spans);
+      spans = omitEmptyTraeModelSpans(expandTraeHistory(records, spans));
       this.enrichToolResultAttributes(records, spans, 'TRAE-CN');
     }
     applyQoderWorkStepTiming(records, spans);

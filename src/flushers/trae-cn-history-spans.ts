@@ -168,3 +168,40 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   }
   return [...spans.filter(s => (s !== step || unassigned) && s !== llm), ...observed];
 }
+
+function hasMessageBody(value: unknown): boolean {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  try {
+    const messages = JSON.parse(value);
+    return Array.isArray(messages) && messages.some(message =>
+      Array.isArray(message?.parts) && message.parts.some((part: Record<string, unknown> | null) => {
+        if (!part) return false;
+        if (part.type === 'tool_call') return typeof part.name === 'string' && !!part.name.trim();
+        if (part.type === 'tool_call_response') {
+          return typeof part.response === 'string' ? !!part.response.trim() : part.response != null;
+        }
+        return typeof part.content === 'string' && !!part.content.trim();
+      }));
+  } catch {
+    return false;
+  }
+}
+
+// The TRAE tree uses STEP parents for both LLM and TOOL. Keep a tool's
+// STEP even when the corresponding model messages could not be recovered.
+export function omitEmptyTraeModelSpans(spans: ReadableSpan[]): ReadableSpan[] {
+  const empty = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM' &&
+    !(hasMessageBody(s.attributes['gen_ai.input.messages']) && hasMessageBody(s.attributes['gen_ai.output.messages'])));
+  if (!empty.length) return spans;
+  const removed = new Map(empty.map(s => [s.spanContext().spanId, s.parentSpanId]));
+  const modelSteps = new Set(removed.values());
+  const kept = spans.filter(s => !removed.has(s.spanContext().spanId));
+  for (const span of kept) {
+    if (span.parentSpanId && removed.has(span.parentSpanId)) {
+      Object.assign(span, { parentSpanId: removed.get(span.parentSpanId) });
+    }
+  }
+  const withChildren = new Set(kept.map(s => s.parentSpanId));
+  return kept.filter(s => s.attributes['gen_ai.span.kind'] !== 'STEP' ||
+    !modelSteps.has(s.spanContext().spanId) || withChildren.has(s.spanContext().spanId));
+}

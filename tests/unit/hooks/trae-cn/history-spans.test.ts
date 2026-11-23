@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
-import { expandTraeHistory } from '../../../../src/flushers/trae-cn-history-spans.js';
+import { expandTraeHistory, omitEmptyTraeModelSpans } from '../../../../src/flushers/trae-cn-history-spans.js';
 
 it('keeps response identities distinct and turn-level data on the agent', () => {
   const span = (kind: string, id: string, parent?: string): ReadableSpan => ({
@@ -76,4 +76,18 @@ it('retains shared input, observed usage and tool ownership once per response st
     expect(model.attributes['gen_ai.input.messages']).toBeUndefined();
   }
   expect(models.every(s => s.attributes['gen_ai.usage.total_tokens'] === undefined)).toBe(true);
+});
+
+it('exports only model spans with both messages and keeps observable tools', () => {
+  const message = (part: object) => JSON.stringify([{ role: 'assistant', parts: [part] }]);
+  const span = (kind: string, id: string, parentSpanId?: string, input?: string, output?: string) => ({
+    spanContext: () => ({ spanId: id }), parentSpanId, attributes: { 'gen_ai.span.kind': kind,
+      'gen_ai.input.messages': input, 'gen_ai.output.messages': output },
+  }) as unknown as ReadableSpan;
+  const text = message({ type: 'text', content: 'prompt' });
+  const steps = ['1', '2', '3'].map(id => span('STEP', id, 'agent'));
+  const models = [span('LLM', 'a', '1', text, message({ type: 'text', content: '  ' })),
+    span('LLM', 'b', '2', '[]', text), span('LLM', 'c', '3', text, message({ type: 'tool_call', name: 'Read' }))];
+  const tool = span('TOOL', 'tool', '2');
+  expect(omitEmptyTraeModelSpans([...steps, ...models, tool])).toEqual([steps[1], steps[2], models[2], tool]);
 });
