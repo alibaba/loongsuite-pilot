@@ -191,7 +191,11 @@ export class DoubaoChatReader {
           }
           const fragments = [...source.fragment, Buffer.from(payload)];
           const fragmentBytes = source.fragmentBytes + payload.length;
-          if (fragmentBytes > MAX_RECORD_BYTES) throw new Error('Doubao chat WAL record capacity exceeded');
+          if (fragmentBytes > MAX_RECORD_BYTES) {
+            source.offset = readStart + position + 7 + length;
+            source.fragment = []; source.fragmentBytes = 0;
+            throw new Error('Doubao chat WAL record capacity exceeded');
+          }
           if (type === 1 || type === 4) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;

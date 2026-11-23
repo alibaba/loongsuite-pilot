@@ -171,7 +171,7 @@ describe('Doubao ordinary chat collection', () => {
     } finally { await flusher.shutdown(); }
   });
 
-  it('masks ordinary-chat content through the production JSONL and OTLP pipeline', async () => {
+  it.each([true, false])('applies masking and content policy through JSONL and OTLP (capture=%s)', async capture => {
     const { store, file, log } = await setup(), spans: ReadableSpan[] = [];
     const secret = 'sk-' + 'x'.repeat(24), outputDir = path.join(fixture.home, 'output');
     const trace = new OtlpTraceFlusher({ enabled: true, endpoints: [{ name: 'test', endpoint: 'http://127.0.0.1:1' }], serviceName: 'synthetic-chat-mask' }, undefined, () => ({
@@ -179,6 +179,7 @@ describe('Doubao ordinary chat collection', () => {
     }));
     const output = new MultiFlusher([new JsonlFlusher({ enabled: true, outputDir, rotateDaily: false }), trace]);
     const manager = new InputManager(); manager.setFlusher(output); manager.setConfiguredUserId('synthetic-user');
+    manager.setAgentsConfig({ doubao: { captureMessageContent: capture } });
     manager.setMaskConfig({ mode: 'all', types: [] });
     const input = new Probe({ stateStore: store, inputId: 'doubao', pollIntervalMs: 100, workBudget: { milliseconds: Infinity } });
     manager.registerInput(input);
@@ -189,6 +190,10 @@ describe('Doubao ordinary chat collection', () => {
       await vi.waitFor(() => expect(spans).toHaveLength(4)); await manager.stopAll(); await output.flush();
       const events = await readFile(path.join(outputDir, 'doubao-all.jsonl'), 'utf8');
       expect(events).not.toContain(secret); expect(JSON.stringify(spans.map(span => span.attributes))).not.toContain(secret);
+      if (!capture) {
+        expect(events).not.toContain('gen_ai.input.messages'); expect(events).not.toContain('gen_ai.output.messages');
+        expect(spans.every(span => span.attributes['gen_ai.input.messages'] === undefined && span.attributes['gen_ai.output.messages'] === undefined)).toBe(true);
+      }
       expect(spans.some(span => span.attributes['gen_ai.user.id'] === 'synthetic-user')).toBe(true);
     } finally { await manager.stopAll(); await output.shutdown(); }
   });

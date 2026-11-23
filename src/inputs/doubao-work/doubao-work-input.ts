@@ -411,6 +411,7 @@ export class DoubaoWorkInput extends BaseInput {
     if (committed !== saved || this.nativeDeferred || Date.now() >= this.nextCacheDiagnosticsAt) {
       this.nextCacheDiagnosticsAt = Date.now() + 60_000;
       this.logger.debug('Doubao Work native cache statistics', { ...this.nativeReader.stats() });
+      if (this.chatReader) this.logger.debug('Doubao chat native cache statistics', this.chatReader.stats());
     }
     for (const entry of entries) {
       entry['loongsuite.doubao_work.client'] = this.client;
