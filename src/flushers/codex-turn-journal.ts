@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
@@ -25,6 +26,12 @@ export function codexTurnJournalGroupKey(entry: AgentActivityEntry): string {
     // must not split one pending execution into differently ordered files.
     return createHash('sha256').update(JSON.stringify([
       'openclaw-cron-v1', entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
+    ])).digest('hex');
+  }
+  if (resolveAgentSystem(entry['gen_ai.agent.type']) === 'antigravity') {
+    // Match the flusher's native session and turn scope across identity changes.
+    return createHash('sha256').update(JSON.stringify([
+      entry['gen_ai.agent.type'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
     ])).digest('hex');
   }
   const identity = [
