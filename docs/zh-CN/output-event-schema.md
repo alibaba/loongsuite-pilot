@@ -6,7 +6,54 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 
 下面的类型描述的是规范化事件的语义值。JSONL 保留原生 JSON 类型；SLS 等只接受字符串列的后端可在各自输出边界进行序列化。
 
+## Hermes / OpenClaw 的源 JSONL 写出时机
+
+Hermes 在 `pre_api_request` 中为本次 API 请求分配固定的 `span_id`，同步追加
+`llm.request` 到 `logs/hermes-agent/*.jsonl`；对应响应复用相同 ID。响应、工具调用和
+工具结果在各自 hook 可获得数据时追加，回合结束只补齐旧版本缺失的响应内容及结束标记，
+不会重复写出已经成功追加的事件。没有响应的请求保留请求记录，不合成成功响应。
+新版 lazy-forward streaming helper 与旧版方法签名均支持 TTFT 观测。
+
+增量 Hermes 事件携带 `agent.hermes.collection=realtime-v1`。首条 `llm.request`
+落盘前会先追加一次 `event.name=other`、`agent.hermes.hook=turn_start` 的用户输入事件，
+用于逐轮上游 Trace 关联；它使用已确定的原生 turn/task ID，不参与 Token 统计，
+并与首个 API 请求共用观测到的请求起始时间。回合结束记录为
+`event.name=other`、`agent.hermes.hook=turn_end`、`gen_ai.turn.end=true`。
+collector 以该标记结束 trace 聚合，避免重试中的 error/stop 或同会话并发回合提前截断 trace。
+旧版插件事件仍沿用原有结束判定。源 JSONL 追加不等待 collector 生成完整 trace 或上报完成。
+
+Hermes 压缩上下文时可能在同一次原生 turn 中更换 session。事件保留原生 turn ID，
+`gen_ai.step.id` 和 `gen_ai.response.id` 同时纳入 session 身份，collector 按
+session 与 turn 一起聚合，避免压缩前后的 trace 混合。旧插件产生的事件也按 session 分组。
+
+OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `span_id`，
+响应复用该 ID。尚未关联父上下文的子 Agent 事件仍使用有界缓冲，以维持父子 trace 关系；
+有拦截策略的工具事件也需先完成策略判定，不能承诺所有 hook 都在判定前写出。
+
+跨进程读取成功追加的行不要求每条记录 `fsync`。此处的实时性指源插件文件的可见性，
+不是规范化 `logs/output` 文件或远端 SLS/ARMS 的实时可见性。
+下游传播器应在 Pilot 对应请求 hook **之后**、实际网络发送**之前**，按
+`gen_ai.session.id`、`gen_ai.turn.id`，以及 Hermes 的 `gen_ai.request.id`
+或 OpenClaw 的 `gen_ai.step.id`（模型 call ID）选择本次请求，
+并对一轮内每次 API 请求重新读取。`pre_llm_call` 早于请求分配，缓存一次或读取全局
+最后一行可能得到空值、前一次调用或其他会话的 ID，不能由提前写盘单独解决。
+工具出站请求应关联对应的 `tool.call`，不可把一轮的 LLM SpanID 用作所有出站请求的 ID。
+
+增量 Hermes 插件和对应 collector 应一起部署；旧 collector 不理解新增的显式回合结束协议。
+
 ## Event Names
+
+OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段
+`agent.openclaw.session_key`。已取得 key 的运行事件（`other`、`agent.input`、
+`llm.request`、`llm.response`、`tool.call`、`tool.result`）会保留该字段，
+同一轮上下文明确时也会填入 ENTRY、AGENT、STEP、LLM、TOOL Span 属性，
+不会放入 Resource。`session_start` / `session_end` 仍不进入规范化输出。
+
+该字段不替代 `gen_ai.session.id`：reset 后 UUID 可以变化而 key 不变。
+缺失、非法、超过 1024 字符或冲突时不猜测；混合父子 Agent 上下文也不继承父级 key。
+key 可能包含渠道用户/群组标识，输出前遵循配置的脱敏规则；关闭消息内容采集
+不会移除这项元数据。JSONL/SLS 仅新增该精确字段的例外，不放开其他内部字段。
+不会自动创建 SLS 索引或 ARMS 专用展示列。
 
 | `event.name` | 说明 |
 |--------------|------|
@@ -14,9 +61,22 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `llm.response` | 一次 LLM 响应，包含文本、reasoning、tool-call 意图、finish reason、token 用量和费用等可用信息。 |
 | `tool.call` | Agent 发起的一次实际工具执行。 |
 | `tool.result` | 工具执行返回的结果。 |
+| `gen_ai.model.request` / `gen_ai.model.response` | 标准模型事件名；与 `llm.request` / `llm.response` 同等识别，保留输入名称。 |
+| `gen_ai.tool.call` / `gen_ai.tool.result` | 标准工具事件名；与 `tool.call` / `tool.result` 同等识别，保留输入名称。 |
+| `gen_ai.agent.invoke` | 向另一个 Agent 提交一次逻辑工作；批量工作逐项记录。 |
+| `gen_ai.agent.result` | 实际收到的 Agent 结果或派发失败；工具受理回执不等于 Agent 完成。 |
 | `skill.use` | 技能、扩展能力或 Agent 能力调用。 |
 | `tool.approve` | 用户批准工具或动作执行的事件。 |
+| `agent.input` | 输入型 `other` 的兼容副本，便于按事件名查询 Agent 输入。 |
 | `other` | 无法归类到上述类型的其他事件。 |
+
+兼容期内，携带 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta` 的
+`other` 会被原样保留，并紧邻追加一条 `agent.input`。兼容副本保留输入内容
+和上下文字段，使用从原 ID 确定性派生的新 `event.id`，但不复制
+`gen_ai.turn.start` 和 `gen_ai.turn.end`；旧 `other` 仍是唯一的 Turn 边界事件。
+双写发生在脱敏之后，因此两条事件携带相同的脱敏内容。没有规范输入字段时不生成
+`agent.input`。生成副本时，SLS、JSONL 和 HTTP 保留两条事件；OTLP Trace
+转换继续消费旧 `other`，并在转换前排除兼容副本，因此不会增加空 STEP。
 
 四类核心事件的 `event.name` 与 GenAI audit-event 对应关系如下：
 
@@ -27,6 +87,15 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `tool.call` | `gen_ai.tool.call` |
 | `tool.result` | `gen_ai.tool.result` |
 
+六个标准名不会归为 `other`。已有四类短名输出不改名，也不因支持标准名而双写。
+OTLP 转换在入口适配名称并排除委派审计视角，避免重复 Span、STEP 和 token。
+
+Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多个 session。
+父 invoke/result 使用 `gen_ai.agent.invocation.id`，实际子工作使用相等的
+`gen_ai.agent.parent.invocation.id`。复用子 session 接受新工作时换新 invocation；
+嵌套事件同时保留 incoming 与 outgoing。父子会话定位以两侧事件的 invocation
+及自身 session/turn 为准；缺侧不猜测。详见[子 Agent 数据模型](subagent-data-model.md)。
+
 ## 字段说明
 
 必填程度与 OpenTelemetry 语义保持一致：
@@ -34,7 +103,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 - `Required` - 始终提供。
 - `Conditionally Required` - 条件满足时提供。
 - `Recommended` - 当源 Agent 暴露该数据时提供。
-- `Opt-In` - 可选字段，通常包含敏感信息，仅在需要时开启。
+- `可获取时` - 集成提供该字段时即会上报。
+- `Opt-In` - 依赖独立开启的功能，例如多模态上传。
 
 | 字段 | 类型 | 必填程度 | 说明 |
 |------|------|----------|------|
@@ -43,6 +113,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `event.id` | string | Required | collector 生成的全局唯一事件 ID。 |
 | `event.name` | string | Required | 事件名称，见 [Event Names](#event-names)。 |
 | `user.id` | string | Required | 用户标识，例如员工号、本地账号或机器级身份。 |
+| `user.name` | string | 源 Agent 暴露时 Recommended | Agent 账号的短名称或登录名，独立于 `user.id`。Qoder 与 Qoder CN 相同，由 Stop 的 `product` 决定来源：`app` 只读桌面端账号文件；`cli` 用 `qodercli status` 或 `qoderclicn status`，这条没有数据时再用桌面端账号文件；没有 `product` 的 IDE 只读 hook 的 `extra.user`。选中的来源没有值时为空字符串。 |
+| `user.email` | string | 源 Agent 暴露时 Recommended | 与 `user.name` 同一账号、同一来源。该来源没有邮箱时为空字符串。手机号、登录名或账号 ID 不写成邮箱。 |
 | `trace_id` | string | Recommended | W3C Trace ID，用于跨系统关联完整请求链路。 |
 | `span_id` | string | Recommended | 当前 Span ID。 |
 | `parent_span_id` | string | Recommended | 父 Span ID。根 Span 为空。 |
@@ -53,10 +125,15 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.turn.id` | string | Recommended | 一次用户请求到 Agent 最终响应的轮次 ID。 |
 | `gen_ai.step.id` | string | Recommended | 一次 ReAct 循环或 Agent 中间步骤。 |
 | `gen_ai.response.id` | string | Recommended | 模型 Provider 返回的 LLM response ID。 |
-| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder` 或 `qoder-work`。 |
+| `gen_ai.agent.type` | string | Required | Agent 产品类型，例如 `claude-code`、`codex`、`cursor`、`qoder`、`qoder-app` 或 `qoder-work`。 |
 | `gen_ai.agent.id` | string | Recommended | Agent 运行实例 ID。 |
+| `gen_ai.agent.parent.id` | string | 有可靠来源时 Recommended | 当前工作的上游 Agent 身份，不替代 invocation。 |
+| `gen_ai.agent.peer.id` | string | 有可靠来源时 Recommended | 本次 invoke/result 的直接交互 Agent。 |
+| `gen_ai.agent.invocation.id` | string | 委派事件 Required | 当前向外逻辑委派的稳定 ID；批量逐工作唯一。 |
+| `gen_ai.agent.parent.invocation.id` | string | 已确认接受委派的工作 Required | 当前事件/轮次所接受的上游委派 ID；不是子 session 的永久属性。 |
 | `gen_ai.agent.name` | string | Recommended | Agent 实例可读名称。 |
-| `gen_ai.provider.name` | string | Required | 模型 Provider 名称，见 [Provider Names](#provider-names)。 |
+| `gen_ai.provider.name` | string | Conditionally Required | 模型 Provider 名称；除下述明确标记的仅观察 Agent 轮次事件外均为必填。见 [Provider Names](#provider-names)。 |
+| `loongsuite.observation.scope` | string | Conditionally Required | `agent_turn` 表示来源只观察到 Agent 输入或轮次边界，不表示内部没有执行模型或工具。 |
 | `gen_ai.request.id` | string | Recommended | 客户端请求 ID，用于关联网关或 Provider 日志。 |
 | `gen_ai.request.model` | string | 可获取时 Conditionally Required | 客户端请求的模型。 |
 | `gen_ai.response.model` | string | Recommended | 实际用于响应的模型。 |
@@ -72,23 +149,32 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | 缓存读取 token 成本，单位 USD。 |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | 缓存写入 token 成本，单位 USD。 |
 | `gen_ai.usage.total_cost` | double | Recommended | 本次事件总成本，单位 USD。 |
-| `gen_ai.input.messages` | json array | Opt-In | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
+| `gen_ai.input.messages` | json array | 可获取时 | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
-| `gen_ai.input.multimodal_metadata` | json array | Opt-In | 本条事件消息中 `uri` 媒体的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且消息含媒体时写入；`captureMessageContent: false` 时剥离。 |
-| `gen_ai.output.messages` | json array | Opt-In | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
+| `gen_ai.input.multimodal_metadata` | json array | Opt-In | 输入与工具输出中 `uri` 多模态的摘要列表；条目含 `uri`、`mime_type`，可选 `modality`。开启多模态且这些位置含多模态时写入。 |
+| `gen_ai.input.multimodal_metadata_delta` | json array | Opt-In | 本条事件 `messages_delta` 与 `tool.call.result` 中 `uri` 的摘要，条目形态与 `gen_ai.input.multimodal_metadata` 相同。不包含累计 `gen_ai.input.messages`；没有则不写。 |
+| `gen_ai.output.messages` | json array | 可获取时 | 模型输出消息，包含文本、reasoning、tool-call parts 和 finish reason，可能包含敏感内容。 |
+| `gen_ai.output.multimodal_metadata` | json array | Opt-In | 输出与工具调用中 `uri` 多模态的摘要，条目形态与输入摘要相同；这些位置没有多模态时不写。 |
+| `gen_ai.system_instructions` | json array | 可获取时 | `llm.request` 上发送给模型的 system prompt，以 `text` parts 数组表示，可能包含敏感内容。 |
 | `gen_ai.tool.name` | string | `tool.call` 和 `tool.result` Required | 工具名称。 |
 | `gen_ai.tool.call.id` | string | 可获取时 Recommended | 用于关联 `tool.call` 和 `tool.result` 的工具调用 ID。 |
 | `gen_ai.tool.call.exec.id` | string | Recommended | 工具执行侧 ID。 |
-| `gen_ai.tool.call.arguments` | json | Opt-In | 工具调用参数，可能包含敏感内容。 |
-| `gen_ai.tool.call.result` | json | Opt-In | 工具结果 payload，可能包含敏感内容。 |
+| `gen_ai.tool.call.arguments` | json | 可获取时 | 工具调用参数，可能包含敏感内容。 |
+| `gen_ai.tool.call.result` | json | 可获取时 | 工具结果 payload，可能包含敏感内容。 |
 | `gen_ai.tool.call.duration` | int | Recommended | 使用匹配的 result 边界减去 call 边界得到的正数工具执行耗时，单位毫秒；任一边界缺失或差值非正时省略。 |
+| `gen_ai.guardrail.triggered` | boolean | 关联到裁决时 Required | 表示存在检查裁决，固定为 `true`，不等于规则命中。工具事件没有 tool call id、没有记录、记录已过期或 interceptor 未开启时省略。 |
+| `gen_ai.guardrail.action` | string | 与 `gen_ai.guardrail.triggered` 同时出现 | `block`：强制拦截；`log`：log 命中但放行；`allow`：其余已知裁决。`tool.call` 查 `PreToolUse`，`tool.result` 查 `PostToolUse`。放行的提示词裁决关联到该轮首个原生 `llm.request`，不增加请求事件；被拦截的 Qoder 提示补报为 `block`。没有对应裁决或关联存在歧义时省略。 |
+| `gen_ai.guardrail.fail_open` | boolean | 检查失败时 Opt-In | `true` 表示有检查错误。此前已有 log 命中时可同时有 `action=log`，不把 log 命中等同失败。 |
+| `gen_ai.guardrail.rule_id` | string | 存在已知命中时 Recommended | 最终 block 拦截规则或首条 log 命中的配置 ID，适用于提示词请求和工具事件。 |
+| `gen_ai.guardrail.rule_version` | string | 规则命中时 Recommended | 取规则配置的 `rules[].version`。 |
 | `gen_ai.skill.name` | string | `skill.use` Conditionally Required | 技能或扩展能力名称。 |
 | `gen_ai.skill.id` | string | 技能标识可用时 Recommended | 稳定的技能标识。 |
 | `gen_ai.skill.description` | string | 技能元数据可用时 Recommended | 技能描述。 |
 | `gen_ai.skill.version` | string | 技能元数据可用时 Recommended | 技能版本。 |
 | `error.type` | string | 操作以错误结束时 Conditionally Required | 低基数错误类型、错误码、异常类名或 HTTP 状态。 |
 | `error.message` | string | `error.type` 存在时 Recommended | 人类可读错误详情。 |
+| `http.response.status_code` | int | 模型 HTTP 调用失败时 Recommended | `llm.response` 上失败模型请求的 HTTP 状态码；重试失败和终态失败都会带上。 |
 | `agent.channel` | string | Recommended | 请求来源渠道，例如 `ide_plugin`、`web` 或 `api`。 |
 | `git.domain` | string | Recommended | 当前 workspace 的 Git 托管域名。 |
 | `git.repo` | string | Recommended | 当前 workspace 的 Git 仓库名或 URL。 |
@@ -97,14 +183,43 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `workspace.path` | string | Recommended | agent 进程实际运行的工作目录（cwd），与 git 无关。即使目录不是 git 仓库也会带上。 |
 | `agent.*` | json | Opt-In | Agent-specific 扩展属性。稳定且高频查询的维度应逐步沉淀为结构化字段。 |
 
+只有同时满足以下条件的事件可以省略 `gen_ai.provider.name`：声明
+`loongsuite.observation.scope=agent_turn`，具有非空 `gen_ai.turn.id`，且事件为
+`agent.input` 或带 turn-start/turn-end 标记的 `other` 边界；事件中不能包含模型
+请求/响应、Token 用量、step、系统提示或工具字段。其他事件（包括模型和工具事件）
+仍要求非空 Provider。该范围只说明来源能观察到什么，不表示 Agent 内部没有调用模型或工具；
+此范围内的输入和输出消息是用户可见的 Agent 对话，不代表模型实际请求或响应的完整内容。
+
+Qoder 产品入口：IDE 输出 `gen_ai.agent.type=qoder`，终端 CLI 输出 `qoder-cli`。CLI 格式 transcript 优先使用本轮原生用户记录的 `businessIdentity.product` 区分 `app`/`cli`，覆盖生命周期 Hook 不带产品字段的子 Agent；旧运行时兼容本轮 Hook 的 `parent_business_info.product=app` 标记。新版桌面端输出 `qoder-app`。OTLP Resource 的 `gen_ai.framework` 使用对应产品类型；独立 IDE 的 `gen_ai.agent.system=qoder-ide`，新桌面端为 `qoder-app`，CLI、CN、JetBrains 和 Work 保留 `qoder`。产品标记仅属于本轮原生记录或 Hook 上下文，不跨 session 恢复沿用。桌面端复用 `agents.qoder` 配置和 CLI transcript/Token 补全路径，不需要新增 `agents.qoder-app` 配置。缺少或无法识别产品证据时保留原分类，不根据路径或进程名猜测。历史数据保留原 system 值，跨版本统计需结合 type/framework 区分入口。
+
+Qoder IDE 子运行使用独立 session，与 CLI 的共享 session sidechain 协议不同。IDE 适配通过只读 SQLite `chat_record.parent_session_id`、`parent_tool_call_id` 和 `request_id` 确认委派；父 `Agent` 工具产生稳定的 invoke/result 日志，子事件保留原生 session、独立 turn 和 incoming invocation，连接到立即父工具。复用 session 时按原生 request 分开，嵌套工作分别保留 incoming/outgoing invocation。缺少或冲突的关联证据保持待定，不按 Agent 名称或相近时间绑定。
+
+子工具参数和结果来自对应 transcript，通过 SQLite 的精确 `toolCallId` 归属到原生请求；模型调用 ID、模型和 usage 来自该请求的 SQLite 元数据。IDE 1.37 的子 transcript 可能省略纯文本模型响应：成功前台运行的最后一条子模型回复使用父 `Agent` 工具实际交付的原生回答，来源标记为 `qoder-ide-agent-result`；中间响应或失败运行缺少正文时保持缺失，不补造 finish reason。父工具实际交付的结果同时作为 Agent result，异步受理不作为成功结果。该适配不读取或解密数据库中的会话正文，生成的事件与其他输入经过相同的内容开关和脱敏处理；checkpoint 仅保存关联 ID 和源定位，不保存正文。
+
+IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超过时保留原文件和待定状态并记录告警，不将不完整内容当作完整子运行。扫描每轮分块进行，可在重启后继续。
+
+子请求的 SQLite 消息元数据通过同一只读快照分页读取，单请求最多 4096 行、归一化元数据最多 4 MiB，单条及全部工具元数据各最多 16 MiB。超过上限时，已确认的委派仍上报 invoke 和已实际交付的 result；子运行保持待定，日志记录原因及相关 ID，并以较低频率重试。源数据恢复到上限内后可继续采集。
+
+工作目录自动采集覆盖 Antigravity（App、新 IDE 和 CLI）、Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
+
+## System Instructions（系统提示词）
+
+`gen_ai.system_instructions` 在 `llm.request` 事件上以 `text` parts 数组承载 system prompt，并经过统一脱敏管道。
+
+`hermes` 的 system prompt 取自 `pre_api_request` 观测到的 provider 请求 body，因为 `conversation_history` 从不回放 system 消息。各 provider 形态归一化为同一组 parts：OpenAI 兼容的 `messages[]` 中 role 为 `system` / `developer` 的消息、Responses API 顶层 `instructions`、Anthropic 与 Bedrock 的顶层 `system`（字符串或 block 列表）、Gemini 的 `systemInstruction.parts[].text`。prompt 为空或不存在时不产出该字段。
+
+对 `hermes`，system instructions 仅保留在 `gen_ai.system_instructions` 中，不会合成到 `gen_ai.input.messages` 或 `gen_ai.input.messages_delta`。这样 LLM、AGENT 与 ENTRY span 的业务 turn 输入及 `gen_ai.input.messages_hash` 语义保持不变。
+
 ## 多模态消息 Parts
 
-当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的媒体使用对象存储引用，而不是内联 base64：
+> **实验性。** 多模态 `uri` parts 与 `gen_ai.*.multimodal_metadata` 字段可能调整。
+
+当全局多模态基础设施与 Agent `uploadMode` 已开启时（见 [配置总览](configuration.md#多模态对象存储) 与 [多模态采集](multimodal.md)），消息 `parts` 中的多模态使用对象存储引用，而不是内联 base64：
 
 | `parts[].type` | 说明 |
 |----------------|------|
 | `text` | 文本内容。 |
-| `uri` | 已上传或乐观引用的媒体；含 `uri`、`mime_type`，可选 `modality`（例如 `image`）。 |
+| `uri` | 已上传或乐观引用的多模态；含 `uri`、`mime_type`，可选 `modality`（例如 `image`）。 |
 
 `uri` 形如 `oss://bucket/prefix/YYYYMMDD/<sha256>.ext` 或 `sls://project/logstore/YYYYMMDD/<sha256>.ext`。内容 hash 编码在对象路径中。`YYYYMMDD` 按事件的**本地**日历日划分（优先取 `time_unix_ms`），非 UTC，与 Python probe 的对象路径约定一致，便于跨 midnight 边界按日期前缀查询。上传失败时 uri 可能 dangling；Pilot 以 fail-open 方式继续采集文本。
 
@@ -117,7 +232,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `AGENTTEAMS_WORKER_NAME` | `gen_ai.agent.name`、`resourceAttributes["agentteams.worker.name"]` | 逻辑 Worker 名称；主 Agent 上优先于 Agent 原生名称。 |
 | `AGENTTEAMS_INSTANCE_ID` | `resourceAttributes["agentteams.instance.id"]` | 当前 Worker 运行实例；不会覆盖 `gen_ai.agent.id`。 |
 
-当前支持 Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、MiMo Code、Qwen Code CLI 和 Cursor CLI。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
+Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、MiMo Code、Qwen Code CLI 和 Cursor CLI 支持上述两个变量。OpenClaw 和 Hermes Agent 仅支持 `AGENTTEAMS_WORKER_NAME`，暂不读取 `AGENTTEAMS_INSTANCE_ID`。Cursor Desktop 不读取这组变量。未设置变量时，现有事件字段和名称回退行为不变。Pilot 只采集上述固定白名单字段；其他 `AGENTTEAMS_*` 变量不会进入事件或 OTLP Resource。
 
 ## Provider Names
 
@@ -133,6 +248,7 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `gcp.gen_ai` | Google GenAI endpoint，具体后端未知时使用。 |
 | `deepseek` | DeepSeek。 |
 | `qwen` | 阿里云通义千问。 |
+| `bytedance.doubao` | 豆包工作原生服务；客户端轮次观测不表示已采集模型内部调用。 |
 | `groq` | Groq。 |
 | `mistral_ai` | Mistral AI。 |
 | `cohere` | Cohere。 |
@@ -141,6 +257,19 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `ibm.watsonx.ai` | IBM Watsonx AI。 |
 
 如果以上值都不适用，使用小写 dotted provider 名称，例如 `baidu.ernie` 或 `zhipu.chatglm`。
+
+## 豆包工作客户端轮次元数据
+
+实验性 `doubao-work` 事件与 OTLP Resource 包含 `loongsuite.doubao_work.observation_scope=client_message`、
+`loongsuite.doubao_work.business_outcome=unknown` 和 `loongsuite.doubao_work.client_outcome`
+（`received`、`ended`、`error` 或 `cancelled`）。客户端结束不表示业务成功，也不是模型 finish reason。
+见[支持范围与配置](doubao-work.md)。
+
+新增事件及导出的 OTLP Span 包含 `loongsuite.doubao_work.client`，取值仅为 `doubao-work`（豆包工作）或 `doubao`（豆包 App 工作模式）。新事件的 `gen_ai.agent.type` 和 `gen_ai.framework` 同样按产品区分；两者共用解析协议，不表示已获得模型或提供商调用身份。历史记录缺少来源字段时保持未知，不重写旧身份。
+
+本地工具产生配对的 `tool.call` / `tool.result` 日志，并保留真实起止。可唯一关联本次 trajectory 时，按 assistant 消息重建 STEP → LLM / TOOL：输入为此前可见消息，输出包含文本和 tool_calls，并行工具共享 STEP。LLM 以及缺少时间的 trajectory 工具使用客户端提交、工具及结束边界推算时间，中间未知边界线性分配；它们会影响 CMS 默认 LLM 调用次数和耗时统计，不代表精确模型计时或实际模型请求数。模型、usage、原生 response ID 与模型 finish reason 缺失时省略。
+
+缺少可用轨迹的工具仍直接归属 AGENT / TASK，使用 `genai.observed-tools.v1` 部分观测契约。完整原生 sandbox 执行在请求区间内映射为 TASK，内部轮次属于该本地片段，不充当完整子 Agent 生命周期；区间外后台执行仅保留日志，不拉长请求。内容在转换前统一脱敏，复用时只导出当前轮次，但 LLM 输入可以包含此前可见上下文。所选技能/伙伴只表示选择上下文。
 
 ## Finish Reasons
 
@@ -152,3 +281,8 @@ LoongSuite Pilot 会将采集到的活动归一化为 GenAI 遥测事件。Pilot
 | `content_filter` | 内容安全过滤停止生成。 |
 | `end_turn` | 模型结束当前轮次。 |
 | `cancelled` | 用户中断生成，不表示 Provider 或 Agent 错误。 |
+| `error` | 单次物理模型请求失败。对 Claude Code，中间的 `error` 不结束 turn；最终失败还会带 `gen_ai.turn.end=true`。 |
+
+### 逐轮关联原文 hash
+
+Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。

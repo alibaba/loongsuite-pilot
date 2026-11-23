@@ -1,11 +1,34 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { WorkspacePolicy } from '../../../src/core/workspace-policy.js';
 import { InputManager } from '../../../src/core/input-manager.js';
 import { MockFlusher } from '../../helpers/mock-flusher.js';
-import { buildTestEntry } from '../../helpers/fixture-builder.js';
+import {
+  buildTestEntry,
+  cleanupTempDir,
+  createTempDir,
+  writeJsonlFile,
+} from '../../helpers/fixture-builder.js';
 import { EventEmitter } from 'node:events';
+import path from 'node:path';
+import * as fs from 'node:fs/promises';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
 import { ClientType, CollectionMethod } from '../../../src/types/index.js';
 import type { AgentActivityEntry, InputState } from '../../../src/types/index.js';
 import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
+import { CodexOutputDurabilityError } from '../../../src/flushers/base-flusher.js';
+import { TurnBoundaryProcessor } from '../../../src/normalization/turn-boundary-processor.js';
+import { CorrelationStore } from '../../../src/core/upstream-link/correlation-store.js';
+import { TraceLinker } from '../../../src/core/upstream-link/trace-linker.js';
+import { InterceptResultLinker } from '../../../src/core/intercept-result-linker.js';
+import { ToolVerdictStore } from '../../../src/interceptor/tool-verdict-store.js';
+import {
+  INVOCATION_SESSION_ID_FIELD,
+  INVOCATION_USER_ID_FIELD,
+} from '../../../src/normalization/invocation-identity.js';
+import { deriveAgentInputEventId } from '../../../src/normalization/agent-input-dual-write.js';
+import { buildBlockedQoderPromptEntry } from '../../../src/interceptor/blocked-prompt.js';
+import { parseHookRequest } from '../../../src/interceptor/adapters/qoder.js';
+import * as gitEnrichment from '../../../src/normalization/enrich-git-context.js';
 
 vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
@@ -14,6 +37,7 @@ vi.mock('../../../src/utils/logger.js', () => ({
 }));
 
 class StubInput extends EventEmitter {
+  setWorkspacePolicy() {}
   readonly id: string;
   readonly agentType = ClientType.Qoder;
   readonly collectionMethod = CollectionMethod.IdeSnapshotPolling;
@@ -50,7 +74,213 @@ describe('InputManager', () => {
     manager.setFlusher(flusher);
   });
 
+  it('filters excluded sessions before identity rewriting and every output destination', async () => {
+    manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+    const input = new StubInput('privacy');
+    manager.registerInput(input as any);
+    const denied = buildTestEntry({ 'gen_ai.session.id': 'denied', 'workspace.path': '/private-project/app' });
+    const allowed = buildTestEntry({ 'gen_ai.session.id': 'allowed' });
+    input.emit('entries', [denied, allowed]);
+    await manager.stopAll();
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'denied')).toBe(false);
+    expect(flusher.batchCalls.flat().some(entry => entry['gen_ai.session.id'] === 'allowed')).toBe(true);
+  });
+
+  it.each([undefined, 'CodexTurnJournalError', 'CodexOutputDurabilityError'])(
+    'keeps the shared Codex checkpoint behind durable output acceptance (failure=%s)', async failureName => {
+    const root = await createTempDir('codex-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    store.setOffset('codex', 1);
+    await store.save();
+    const input = new StubInput('codex-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling) });
+    manager.registerInput(input as any);
+    let accept!: () => void;
+    let fail!: (failure: Error) => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const durability = new Promise<void>((resolve, rejectPromise) => { accept = resolve; fail = rejectPromise; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await durability; });
+    const healthyOutput = new MockFlusher('healthy-output');
+    manager.setFlusher(new MultiFlusher([flusher, healthyOutput]));
+    store.setOffset('codex', 2);
+    store.setOffset('other-input', 3);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex', 'gen_ai.session.id': 'native-codex' })]);
+    const saving = store.save();
+    await startedOutput;
+    expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+    try {
+      if (failureName) {
+        const failure = failureName === 'CodexOutputDurabilityError' ? new CodexOutputDurabilityError('SLS')
+          : Object.assign(new Error('journal failed'), { name: failureName });
+        const rejectedSave = expect(saving).rejects.toBe(failure);
+        fail(failure);
+        await rejectedSave;
+        await expect(store.save()).rejects.toBe(failure);
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 1 } });
+      } else {
+        accept();
+        await saving;
+        expect(JSON.parse(await fs.readFile(file, 'utf8'))).toEqual({ codex: { lastOffset: 2 }, 'other-input': { lastOffset: 3 } });
+      }
+      // Entry handling never calls StateStore.save, so stopping drains the
+      // queue after durable acceptance without recursively awaiting itself.
+      await manager.stopAll();
+      expect(healthyOutput.batchCalls).toHaveLength(1);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('retries Codex journal quota without freezing other input checkpoints and resumes after capacity returns', async () => {
+    const root = await createTempDir('codex-quota-isolation-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('codex-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.CodexCliHook });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    store.setOffset(input.id + ':file', 1);
+    await store.save();
+    store.setOffset(input.id + ':file', 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    const send = vi.spyOn(flusher, 'sendBatch')
+      .mockImplementationOnce(async () => { attempted(); throw wrapped; })
+      .mockResolvedValue(undefined);
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'codex' })]);
+    try {
+      await first;
+      store.setOffset('healthy', 10);
+      await store.save();
+      expect(store.saveFailed).toBe(false);
+      expect(store.isPersisted('healthy')).toBe(true);
+      expect(store.isPersisted(input.id + ':file')).toBe(false);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[input.id + ':file'].lastOffset).toBe(1);
+      await vi.waitFor(() => expect(manager.getInputCounters().get(input.id)?.outEvents).toBe(1), { timeout: 2500 });
+      await store.save();
+      expect(store.isPersisted(input.id + ':file')).toBe(true);
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally { await manager.stopAll(); await cleanupTempDir(root); }
+  });
+
+  it('holds the Hermes source checkpoint until its journal accepts the batch', async () => {
+    const root = await createTempDir('hermes-checkpoint-output-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-checkpoint');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let accept!: () => void;
+    let started!: () => void;
+    const startedOutput = new Promise<void>(resolve => { started = resolve; });
+    const pending = new Promise<void>(resolve => { accept = resolve; });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { started(); await pending; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await startedOutput;
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+      accept();
+      await manager.stopAll();
+      await store.save();
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(2);
+    } finally { accept(); await cleanupTempDir(root); }
+  });
+
+  it('aborts a Hermes journal quota retry on shutdown without advancing the source checkpoint', async () => {
+    const root = await createTempDir('hermes-quota-stop-');
+    const file = path.join(root, 'state.json');
+    const store = new StateStore(file);
+    const input = new StubInput('hermes-quota');
+    Object.defineProperty(input, 'agentType', { value: ClientType.Hermes });
+    Object.assign(input, { holdCheckpointUntil: (handling: Promise<void>) => store.holdSaveUntil(handling, input.id) });
+    manager.registerInput(input as any);
+    const key = `${input.id}:file`;
+    store.setOffset(key, 1);
+    await store.save();
+    store.setOffset(key, 2);
+    let attempted!: () => void;
+    const first = new Promise<void>(resolve => { attempted = resolve; });
+    const quota = Object.assign(new Error('full'), { name: 'CodexTurnJournalCapacityError' });
+    const wrapped = Object.assign(new Error('journal', { cause: quota }), { name: 'CodexTurnJournalError' });
+    vi.spyOn(flusher, 'sendBatch').mockImplementation(async () => { attempted(); throw wrapped; });
+    input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'hermes' })]);
+    try {
+      await first;
+      await manager.stopAll();
+      expect(store.hasSaveFailure(key)).toBe(true);
+      expect(JSON.parse(await fs.readFile(file, 'utf8'))[key].lastOffset).toBe(1);
+    } finally { await cleanupTempDir(root); }
+  });
+
   describe('registerInput and event dispatch (T030)', () => {
+    it('counts raw input independently from normalized entry emission', () => {
+      const input = new StubInput('raw-input');
+      manager.registerInput(input as any);
+
+      input.emit('input-runtime-delta', {
+        sourceKind: 'primary',
+        rawReadCalls: 2,
+        rawReadBytes: 180,
+        rawInRecords: 3,
+        rawInBytes: 120,
+        rawInMaxBatchBytes: 80,
+        rawInMaxRecordBytes: 50,
+        rawBacklogBytesMax: 120,
+        parseSuccessRecords: 2,
+        parseFailedRecords: 1,
+        readDurationMs: 1.5,
+        processDurationMs: 2.5,
+      });
+      input.emit('input-runtime-delta', {
+        sourceKind: 'primary',
+        rawReadCalls: 1,
+        rawReadBytes: 40,
+        rawInRecords: 2,
+        rawInBytes: 40,
+        rawInMaxBatchBytes: 40,
+        rawInMaxRecordBytes: 20,
+        rawBacklogBytesMax: 40,
+        parseSuccessRecords: 2,
+        parseFailedRecords: 0,
+        readDurationMs: 0.5,
+        processDurationMs: 1.5,
+      });
+
+      expect(manager.getInputCounters().get(input.id)).toMatchObject({
+        rawReadCalls: 3,
+        rawReadBytes: 220,
+        rawInRecords: 5,
+        rawInBytes: 160,
+        rawInMaxBatchBytes: 80,
+        rawInMaxRecordBytes: 50,
+        rawBacklogBytesMax: 120,
+        parseSuccessRecords: 4,
+        parseFailedRecords: 1,
+        readDurationMs: 2,
+        processDurationMs: 4,
+        inEvents: 0,
+        inBytes: 0,
+      });
+
+      const firstWindow = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(firstWindow.rawInMaxBatchBytes).toBe(80);
+      expect(firstWindow.rawBacklogBytesMax).toBe(120);
+      const nextWindow = manager.takeInputCounterSnapshot().get(input.id)!;
+      expect(nextWindow.rawInMaxBatchBytes).toBe(0);
+      expect(nextWindow.rawInMaxRecordBytes).toBe(0);
+      expect(nextWindow.rawBacklogBytesMax).toBe(0);
+      expect(nextWindow.rawInBytes).toBe(160);
+    });
+
     it('subscribes to entries events and calls flusher.sendBatch', async () => {
       const input = new StubInput('test-input');
       manager.registerInput(input as any);
@@ -61,6 +291,74 @@ describe('InputManager', () => {
       await new Promise(r => setTimeout(r, 50));
 
       expect(flusher.batchCalls.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('passes the existing serialized sizes aligned with final dispatched events', async () => {
+      const input = new StubInput('test-input');
+      manager.registerInput(input as any);
+      const send = vi.spyOn(flusher, 'sendBatch');
+      input.emit('entries', [buildTestEntry(), buildTestEntry()]);
+      await manager.stopAll();
+      const [entries, sizes] = send.mock.calls[0] as unknown as [AgentActivityEntry[], number[]];
+      expect(sizes).toEqual(entries.map(entry => Buffer.byteLength(JSON.stringify(entry))));
+    });
+
+    it('last-mile enriches every Codex transcript path before dispatch', async () => {
+      const input = new StubInput('codex-transcript');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.CodexCliHook]: { captureMessageContent: false },
+      });
+      const cwd = '/tmp/codex-workspace-context-test';
+      const entries = [
+        buildTestEntry({
+          'event.id': 'codex-completed',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'agent.codex.cwd': cwd,
+        }),
+        buildTestEntry({
+          'event.id': 'codex-interrupted',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'agent.codex.cwd': cwd,
+          'agent.codex.turn_status': 'interrupted',
+        }),
+        buildTestEntry({
+          'event.id': 'codex-subagent',
+          'gen_ai.agent.type': ClientType.CodexCliHook,
+          'gen_ai.agent.scope': 'subagent',
+          'agent.codex.cwd': cwd,
+        }),
+      ];
+
+      input.emit('entries', entries);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(3);
+      expect(flusher.batchCalls[0].every(entry => entry['workspace.path'] === cwd)).toBe(true);
+    });
+
+    it('dispatches the batch when last-mile git enrichment fails unexpectedly', async () => {
+      const input = new StubInput('fail-open-input');
+      manager.registerInput(input as any);
+
+      const entries = [buildTestEntry({ 'event.id': 'fail-open' })];
+      const originalIterator = entries[Symbol.iterator].bind(entries);
+      let iteratorCalls = 0;
+      Object.defineProperty(entries, Symbol.iterator, {
+        value: () => {
+          iteratorCalls++;
+          if (iteratorCalls === 1) throw new Error('enrichment iterator failed');
+          return originalIterator();
+        },
+      });
+
+      input.emit('entries', entries);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.id']).toBe('fail-open');
     });
 
     it('serializes multiple entry batches from the same input', async () => {
@@ -143,6 +441,77 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['user.id']).toBe('installer-user');
+    });
+
+    it('invocation env identity overrides configured/native identity and is consumed', async () => {
+      const input = new StubInput('input-1');
+      manager.registerInput(input as any);
+      manager.setUserId('fallback-user');
+      manager.setConfiguredUserId('installer-user');
+
+      const entry = buildTestEntry({ userId: 'native-user', sessionId: 'native-session' });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'customer-session';
+      entry[INVOCATION_USER_ID_FIELD] = 'customer-user';
+      input.emit('entries', [entry]);
+      await new Promise(r => setTimeout(r, 50));
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['gen_ai.session.id']).toBe('customer-session');
+      expect(dispatched['user.id']).toBe('customer-user');
+      expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      expect(dispatched).not.toHaveProperty(INVOCATION_USER_ID_FIELD);
+    });
+
+    it.each([false, true])('links native-session input before applying invocation identity (input=%s)', async withInput => {
+      const nativeSessionId = 'opencode-native-session';
+      const customerSessionId = 'customer-session';
+      const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const upstreamSpanId = '00f067aa0ba902b7';
+      const localTraceId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const dataDir = await createTempDir('input-manager-upstream-identity-');
+
+      try {
+        const correlateDir = path.join(dataDir, 'acp-correlate');
+        await writeJsonlFile(path.join(correlateDir, `${nativeSessionId}.jsonl`), [{
+          type: 'session',
+          sessionId: nativeSessionId,
+          traceparent: `00-${upstreamTraceId}-${upstreamSpanId}-01`,
+        }]);
+        manager.setTraceLinker(new TraceLinker(
+          new CorrelationStore(correlateDir),
+          { retries: 0 },
+        ));
+
+        const input = new StubInput('opencode-log');
+        manager.registerInput(input as any);
+        const entry = buildTestEntry({
+          agentType: ClientType.OpenCode,
+          sessionId: nativeSessionId,
+          trace_id: localTraceId,
+          'gen_ai.turn.id': `${nativeSessionId}:t1`,
+          ...(withInput ? { 'gen_ai.input.messages_delta': [
+            { role: 'user', parts: [{ type: 'text', content: 'actual input' }] },
+          ] } : {}),
+        });
+        entry[INVOCATION_SESSION_ID_FIELD] = customerSessionId;
+
+        input.emit('entries', [entry]);
+        await manager.stopAll();
+
+        expect(flusher.batchCalls).toHaveLength(1);
+        const dispatched = flusher.batchCalls[0][0];
+        expect(dispatched['gen_ai.session.id']).toBe(customerSessionId);
+        expect(dispatched.trace_id).toBe(withInput ? upstreamTraceId : localTraceId);
+        expect(dispatched.parent_span_id).toBe(withInput ? upstreamSpanId : undefined);
+        if (!withInput) {
+          // Invocation identity still applies, but metadata cannot consume the native session context.
+          expect(new CorrelationStore(correlateDir).resolveSessionFirst(nativeSessionId))
+            .toBe(`00-${upstreamTraceId}-${upstreamSpanId}-01`);
+        }
+        expect(dispatched).not.toHaveProperty(INVOCATION_SESSION_ID_FIELD);
+      } finally {
+        await cleanupTempDir(dataDir);
+      }
     });
   });
 
@@ -243,6 +612,214 @@ describe('InputManager', () => {
     });
   });
 
+  describe('turn boundary enrichment', () => {
+    it('fills boundaries once before dispatching the same records to every flusher', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      manager.setFlusher(new MultiFlusher([jsonl, sls, http]));
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const entries = [
+        buildTestEntry({
+          'event.id': 'request',
+          'event.name': 'llm.request',
+          'gen_ai.turn.id': 'turn-1',
+        }),
+        buildTestEntry({
+          'event.id': 'response',
+          'event.name': 'llm.response',
+          'gen_ai.turn.id': 'turn-1',
+          'gen_ai.response.finish_reasons': ['stop'],
+        }),
+      ];
+
+      input.emit('entries', entries);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0]).toHaveLength(2);
+        expect(child.batchCalls[0][0]).toMatchObject({
+          'event.id': 'request',
+          'gen_ai.turn.start': true,
+        });
+        expect(child.batchCalls[0][1]).toMatchObject({
+          'event.id': 'response',
+          'gen_ai.turn.end': true,
+        });
+      }
+    });
+
+    it('fails open and dispatches original entries when enrichment throws', async () => {
+      const input = new StubInput('cursor-hook');
+      manager.registerInput(input as any);
+      const enrich = vi.spyOn(TurnBoundaryProcessor.prototype, 'enrich')
+        .mockImplementationOnce(() => {
+          throw new Error('synthetic enrichment failure');
+        });
+      const original = buildTestEntry({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+
+      input.emit('entries', [original]);
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]).toMatchObject({
+        'event.id': 'original',
+        'gen_ai.turn.id': 'turn-fail-open',
+      });
+      expect(flusher.batchCalls[0][0]['gen_ai.turn.start']).toBeUndefined();
+      enrich.mockRestore();
+    });
+  });
+
+  describe('blocked prompt flush', () => {
+    it.each([
+      { surface: 'qoder' as const, kind: 'blocked-prompt' },
+      { surface: 'qodercli' as const, kind: 'blocked-prompt' },
+    ])('inherits native App exclusions for $surface $kind events without cwd', async ({ surface }) => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({
+        'gen_ai.agent.type': 'qoder-app', 'gen_ai.session.id': 'app-session',
+        'workspace.path': '/private-project/app',
+      })]);
+      await manager.stopAll();
+      expect(flusher.batchCalls).toHaveLength(0);
+
+      const request = parseHookRequest({
+        hook_event_name: 'UserPromptSubmit', session_id: 'app-session',
+        parent_business_info: { product: 'app' }, prompt: 'private prompt',
+      }, surface)!;
+      expect(request.cwd).toBeUndefined();
+      const entry = buildBlockedQoderPromptEntry(request);
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('app-session');
+    });
+
+    it('does not borrow App identity for a CLI blocked prompt sharing an excluded App session id', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      const input = new StubInput('qoder-app-native');
+      manager.registerInput(input as any);
+      input.emit('entries', [buildTestEntry({ 'gen_ai.agent.type': 'qoder-app',
+        'gen_ai.session.id': 'shared-session', 'workspace.path': '/private-project/app' })]);
+      await manager.stopAll();
+      const request = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'shared-session',
+        parent_business_info: { product: 'cli' } }, 'qodercli')!;
+      const entry = buildBlockedQoderPromptEntry(request);
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls.flat()).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['gen_ai.agent.type']).toBe('qoder-cli');
+    });
+
+    it('filters excluded prepared events before identity rewriting or any output', async () => {
+      manager.setWorkspacePolicy(new WorkspacePolicy(['/private-project']));
+      manager.setConfiguredUserId('configured-user');
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit',
+        sessionId: 'native-session', cwd: '/private-project/app', prompt: 'private content', raw: {} });
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['user.id']).toBe('');
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('honors sticky exclusions for blocked prompts without cwd using native session/agent keys', async () => {
+      const policy = new WorkspacePolicy(['/private-project']);
+      manager.setWorkspacePolicy(policy);
+      const blocked = buildTestEntry({ 'gen_ai.agent.type': 'qoder-cli', 'gen_ai.session.id': 'native-session',
+        'workspace.path': '/private-project/app' });
+      expect(policy.allows(blocked)).toBe(false);
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qodercli', event: 'UserPromptSubmit',
+        sessionId: 'native-session', raw: {} });
+      entry[INVOCATION_SESSION_ID_FIELD] = 'public-session';
+      await manager.flushPreparedEntries([entry]);
+      expect(flusher.batchCalls).toHaveLength(0);
+      expect(entry['gen_ai.session.id']).toBe('native-session');
+    });
+
+    it('does not send late prepared output after its sink aborts during git enrichment', async () => {
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      const enrich = vi.spyOn(gitEnrichment, 'enrichCanonicalEntriesWithGit').mockImplementationOnce(() => gate);
+      const abort = new AbortController();
+      const entry = buildBlockedQoderPromptEntry({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', raw: {} });
+      try {
+        const pending = manager.flushPreparedEntries([entry], abort.signal);
+        expect(enrich).toHaveBeenCalledOnce();
+        abort.abort();
+        release();
+        await expect(pending).rejects.toThrow();
+        expect(flusher.batchCalls).toHaveLength(0);
+      } finally { enrich.mockRestore(); }
+    });
+
+    it('applies user id, content policy, and mask before the shared flusher', async () => {
+      manager.setConfiguredUserId('configured-user');
+      manager.setMaskConfig({ mode: 'all', types: [] });
+      const apiKey = 'sk-1234567890abcdefghijklmnop';
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qoder',
+        event: 'UserPromptSubmit',
+        prompt: `token ${apiKey}`,
+        sessionId: 's1',
+        cwd: '/tmp/not-a-repo-for-pilot-blocked-prompt',
+        raw: {},
+      }, Date.now(), {
+        action: 'block',
+        reason: `hit ${apiKey}`,
+        ruleId: 'flow-probe',
+        ruleVersion: '3',
+        severity: 'CRITICAL',
+        title: `label ${apiKey}`,
+        message: `不要粘贴 ${apiKey}`,
+        evaluatedRules: ['flow-probe'],
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched['user.id']).toBe('configured-user');
+      expect(dispatched['gen_ai.input.messages']).toEqual([
+        { role: 'user', parts: [{ type: 'text', content: 'token [APIKEY_MASKED]{sk-1*********************mnop}' }] },
+      ]);
+      expect(dispatched['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched['gen_ai.guardrail.rule_id']).toBe('flow-probe');
+      expect(dispatched['gen_ai.guardrail.rule_version']).toBe('3');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.reason');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.severity');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.title');
+      expect(dispatched).not.toHaveProperty('gen_ai.guardrail.message');
+      expect(dispatched.trace_id).toBeUndefined();
+      expect(dispatched['gen_ai.turn.start']).toBeUndefined();
+    });
+
+    it('drops message content when the qoder capture policy is off', async () => {
+      manager.setAgentsConfig({
+        [ClientType.Qoder]: { captureMessageContent: false },
+      });
+      const entry = buildBlockedQoderPromptEntry({
+        agent: 'qodercli',
+        event: 'UserPromptSubmit',
+        prompt: 'sk-1234567890abcdefghijklmnop',
+        raw: {},
+      });
+
+      await manager.flushPreparedEntries([entry]);
+
+      const dispatched = flusher.batchCalls[0][0];
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages');
+      expect(dispatched).not.toHaveProperty('gen_ai.input.messages_delta');
+      expect(JSON.stringify(dispatched)).not.toContain('sk-1234567890abcdefghijklmnop');
+    });
+  });
+
   describe('collector mask', () => {
     it('masks whitelisted content fields before dispatching to the flusher', async () => {
       const input = new StubInput('cursor-hook');
@@ -261,7 +838,7 @@ describe('InputManager', () => {
 
       const dispatched = flusher.batchCalls[0][0];
       expect(dispatched['gen_ai.input.messages']).toEqual([
-        { role: 'user', content: 'use [ACCESSKEY_MASKED]' },
+        { role: 'user', content: 'use [ACCESSKEY_MASKED]{AKIA************MPLE}' },
       ]);
       expect(dispatched['workspace.current_root']).toBe(`/tmp/${accessKey}`);
     });
@@ -318,6 +895,167 @@ describe('InputManager', () => {
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(apiKey);
         expect(JSON.stringify(child.batchCalls[0][0])).not.toContain(phone);
       }
+    });
+  });
+
+  describe('agent.input compatibility dual-write', () => {
+    it('dual-writes masked input other after shared enrichment', async () => {
+      const input = new StubInput('dual-write-mask');
+      manager.registerInput(input as any);
+      manager.setMaskConfig({ mode: 'all', types: [] });
+
+      const accessKey = 'AKIAIOSFODNN7EXAMPLE';
+      const source = buildTestEntry({
+        'event.id': 'input-other',
+        'gen_ai.turn.id': 'turn-dual-write',
+        'gen_ai.input.messages_delta': [
+          { role: 'user', content: `use ${accessKey}` },
+        ],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      const [other, agentInput] = flusher.batchCalls[0];
+      expect(flusher.batchCalls[0]).toHaveLength(2);
+      expect(other['event.name']).toBe('other');
+      expect(other['event.id']).toBe('input-other');
+      expect(agentInput['event.name']).toBe('agent.input');
+      expect(agentInput['event.id']).toBe(deriveAgentInputEventId('input-other'));
+      expect(other['gen_ai.turn.start']).toBe(true);
+      expect(agentInput['gen_ai.turn.start']).toBeUndefined();
+      expect(agentInput['gen_ai.turn.end']).toBeUndefined();
+      expect(JSON.stringify(other)).toContain('[ACCESSKEY_MASKED]');
+      expect(JSON.stringify(agentInput)).toContain('[ACCESSKEY_MASKED]');
+      expect(JSON.stringify(other)).not.toContain(accessKey);
+      expect(JSON.stringify(agentInput)).not.toContain(accessKey);
+
+      const stripDerivedFields = (entry: AgentActivityEntry) => {
+        const comparable = { ...entry };
+        delete comparable['event.id'];
+        delete comparable['event.name'];
+        delete comparable['gen_ai.turn.start'];
+        delete comparable['gen_ai.turn.end'];
+        return comparable;
+      };
+      expect(stripDerivedFields(agentInput)).toEqual(stripDerivedFields(other));
+      expect(source['event.name']).toBe('other');
+      expect(source['event.id']).toBe('input-other');
+    });
+
+    it('does not generate agent.input after content policy removes input fields', async () => {
+      const input = new StubInput('dual-write-content-policy');
+      manager.registerInput(input as any);
+      manager.setAgentsConfig({
+        [ClientType.Cursor]: { captureMessageContent: false },
+      });
+      const source = buildTestEntry({
+        agentType: ClientType.Cursor,
+        'event.id': 'content-policy-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'secret prompt' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.name']).toBe('other');
+      expect(flusher.batchCalls[0][0]).not.toHaveProperty('gen_ai.input.messages_delta');
+    });
+
+    it('does not copy a non-input other event', async () => {
+      const input = new StubInput('non-input-other');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({ 'event.id': 'metadata-other' });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      expect(flusher.batchCalls).toHaveLength(1);
+      expect(flusher.batchCalls[0]).toHaveLength(1);
+      expect(flusher.batchCalls[0][0]['event.id']).toBe('metadata-other');
+    });
+
+    it('dispatches the same expanded pair to every child flusher', async () => {
+      const jsonl = new MockFlusher('jsonl');
+      const sls = new MockFlusher('sls');
+      const http = new MockFlusher('http');
+      manager.setFlusher(new MultiFlusher([jsonl, sls, http]));
+      const input = new StubInput('dual-write-multi');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({
+        'event.id': 'multi-input',
+        'gen_ai.input.messages': [{ role: 'user', content: 'hello' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const expectedIds = ['multi-input', deriveAgentInputEventId('multi-input')];
+      for (const child of [jsonl, sls, http]) {
+        expect(child.batchCalls).toHaveLength(1);
+        expect(child.batchCalls[0].map(entry => entry['event.id'])).toEqual(expectedIds);
+      }
+    });
+
+    it('counts ingress before expansion and successful egress after expansion', async () => {
+      const input = new StubInput('dual-write-metrics');
+      manager.registerInput(input as any);
+      const source = buildTestEntry({
+        'event.id': 'metrics-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+      });
+      let flushed: { count: number; bytes: number } | undefined;
+      manager.on('flushed', payload => {
+        flushed = payload as { count: number; bytes: number };
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const counter = manager.getInputCounters().get(input.id)!;
+      const dispatched = flusher.batchCalls[0];
+      const expectedBytes = dispatched.reduce(
+        (total, entry) => total + Buffer.byteLength(JSON.stringify(entry)),
+        0,
+      );
+      expect(counter.inEvents).toBe(1);
+      expect(counter.outEvents).toBe(2);
+      expect(counter.outFailed).toBe(0);
+      expect(flushed).toEqual({ count: 2, bytes: expectedBytes });
+    });
+
+    it('counts the full expanded batch when dispatch fails', async () => {
+      const input = new StubInput('dual-write-failure');
+      manager.registerInput(input as any);
+      flusher.shouldFail = true;
+      const source = buildTestEntry({
+        'event.id': 'failed-input',
+        'gen_ai.input.messages_delta': [{ role: 'user', content: 'hello' }],
+      });
+
+      input.emit('entries', [source]);
+      await manager.stopAll();
+
+      const counter = manager.getInputCounters().get(input.id)!;
+      expect(counter.inEvents).toBe(1);
+      expect(counter.outEvents).toBe(0);
+      expect(counter.outFailed).toBe(2);
+    });
+  });
+
+  describe('counter identity', () => {
+    it('records the collection method and the owning agent separately', () => {
+      // Reporting rolls ingress up by agent, so the counter has to carry the agent
+      // the input collects for. Without it the only label left is the collection
+      // method, and every unmapped input of one method collapses into one row.
+      manager.registerInput(new StubInput('qoder-ide') as any);
+
+      const counter = manager.getInputCounters().get('qoder-ide')!;
+      expect(counter.type).toBe(CollectionMethod.IdeSnapshotPolling);
+      expect(counter.agentType).toBe(ClientType.Qoder);
     });
   });
 
@@ -441,6 +1179,46 @@ describe('InputManager', () => {
     });
   });
 
+
+  describe('interceptor result linking', () => {
+    it('joins tool.call and tool.result before invocation identity rewrite', async () => {
+      const store = new ToolVerdictStore('/tmp/unused-tool-verdicts.json');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PreToolUse' }, 'allow');
+      store.put({ sessionId: 'native-session', toolUseId: 'call-1', phase: 'PostToolUse' }, 'block');
+      manager.setInterceptResultLinker(new InterceptResultLinker(store, true));
+      manager.setConfiguredUserId('installer-user');
+      const input = new StubInput('qoder-tools');
+      manager.registerInput(input as any);
+
+      input.emit('entries', [
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'call',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.result',
+          'event.id': 'result',
+          'gen_ai.session.id': 'native-session',
+          'gen_ai.tool.call.id': 'call-1',
+        }),
+        buildTestEntry({
+          'event.name': 'tool.call',
+          'event.id': 'missing',
+          'gen_ai.session.id': 'native-session',
+        }),
+      ]);
+      await manager.stopAll();
+
+      const dispatched = flusher.batchCalls[0];
+      expect(dispatched[0]['gen_ai.guardrail.action']).toBe('allow');
+      expect(dispatched[0]['gen_ai.guardrail.triggered']).toBe(true);
+      expect(dispatched[1]['gen_ai.guardrail.action']).toBe('block');
+      expect(dispatched[2]['gen_ai.guardrail.action']).toBeUndefined();
+      expect(dispatched[2]['gen_ai.guardrail.triggered']).toBeUndefined();
+    });
+  });
 
   describe('no flusher warning', () => {
     it('drops entries when no flusher is set', async () => {

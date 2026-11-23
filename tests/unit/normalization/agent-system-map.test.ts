@@ -1,7 +1,37 @@
 import { describe, it, expect } from 'vitest';
+import { readdirSync, readFileSync } from 'node:fs';
 import { resolveAgentSystem, AGENT_SYSTEM_MAP } from '../../../src/normalization/agent-system-map.js';
 
 describe('resolveAgentSystem', () => {
+  it.each([
+    ['openclaw', 'openclaw'],
+    ['copilot', 'copilot'],
+    ['cursor-cli', 'cursor'],
+    ['kiro-cli', 'kiro'],
+    ['qoder-cn', 'qoder'],
+  ])('maps supported type %s to %s', (agentType, system) => {
+    expect(resolveAgentSystem(agentType)).toBe(system);
+  });
+
+  it('covers every bundled Agent integration and the runtime-only Wukong input', () => {
+    const definitionsDir = new URL('../../../agents.d/', import.meta.url);
+    // Deployment IDs can differ from the type actually emitted by an input.
+    const emittedTypes: Record<string, string> = {
+      'hermes-agent': 'hermes',
+      'qoder-jetbrains': 'qoder-idea',
+    };
+    const agentTypes = readdirSync(definitionsDir)
+      .filter(file => file.endsWith('.json'))
+      .map(file => {
+        const definition = JSON.parse(readFileSync(new URL(file, definitionsDir), 'utf8'));
+        return emittedTypes[definition.id] ?? definition.id;
+      });
+
+    for (const agentType of [...agentTypes, 'wukong']) {
+      expect(resolveAgentSystem(agentType), `Missing system mapping for ${agentType}`).not.toBe('unknown');
+    }
+  });
+
   it('maps claude-code to claude', () => {
     expect(resolveAgentSystem('claude-code')).toBe('claude');
   });
@@ -11,8 +41,8 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('codex-session')).toBe('codex');
   });
 
-  it('maps qoder variants to qoder', () => {
-    expect(resolveAgentSystem('qoder')).toBe('qoder');
+  it('distinguishes standalone Qoder IDE and preserves the other Qoder family mappings', () => {
+    expect(resolveAgentSystem('qoder')).toBe('qoder-ide');
     expect(resolveAgentSystem('qoder-idea')).toBe('qoder');
     expect(resolveAgentSystem('qoder-work')).toBe('qoder');
     expect(resolveAgentSystem('qoder-work-cn')).toBe('qoder');
@@ -20,9 +50,19 @@ describe('resolveAgentSystem', () => {
     expect(resolveAgentSystem('qoder-cli-hook')).toBe('qoder');
   });
 
+  it('distinguishes Qoder App without changing existing Qoder family systems', () => {
+    expect(resolveAgentSystem('qoder-app')).toBe('qoder-app');
+    expect(resolveAgentSystem('qoder-cli')).toBe('qoder');
+    expect(resolveAgentSystem('qoder-cn')).toBe('qoder');
+  });
+
   it('maps cursor variants to cursor', () => {
     expect(resolveAgentSystem('cursor')).toBe('cursor');
     expect(resolveAgentSystem('cursor-hook')).toBe('cursor');
+  });
+
+  it('maps grok-build to grok', () => {
+    expect(resolveAgentSystem('grok-build')).toBe('grok');
   });
 
   it('maps qwen-code-cli to qwen-code', () => {
@@ -59,7 +99,7 @@ describe('resolveAgentSystem', () => {
     const expectedKeys = [
       'claude-code', 'codex', 'codex-session',
       'qoder', 'qoder-idea', 'qoder-work', 'qoder-work-cn', 'qoder-cli', 'qoder-cli-hook',
-      'cursor', 'cursor-hook',
+      'cursor', 'cursor-hook', 'grok-build',
       'qwen-code-cli', 'qwen-work-cn', 'mimo-code', 'pi-coding-agent', 'workbuddy', 'hermes', 'dsh',
     ];
     for (const key of expectedKeys) {

@@ -79,6 +79,7 @@ function resolveMaskPlan(planOrRules: MaskPlan | readonly CompiledMaskRule[]): M
     return {
       rules: planOrRules,
       piiTypes: new Set(),
+      replacementMode: 'placeholder',
     };
   }
   return planOrRules as MaskPlan;

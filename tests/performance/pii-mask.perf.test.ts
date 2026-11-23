@@ -63,12 +63,21 @@ function benchmark(
 
 describe('PII masking performance benchmark', () => {
   it('reports baseline and five-type costs for large and dense text', () => {
-    const config = { mode: 'all' as const, types: [] };
+    const config = {
+      mode: 'all' as const,
+      types: [],
+      replacementMode: 'placeholder' as const,
+    };
     const legacyRules = loadEnabledRules(config);
     const allPlan = loadMaskPlan(config);
+    const previewPlan = loadMaskPlan({
+      ...config,
+      replacementMode: 'preview',
+    });
     const phoneOnlyPlan = loadMaskPlan({
       mode: 'custom',
       types: ['phone'],
+      replacementMode: 'placeholder',
     });
     const plain = 'ordinary collector output without sensitive values\n'.repeat(1_500);
     const numericNoise =
@@ -88,6 +97,12 @@ describe('PII masking performance benchmark', () => {
       { length: 250 },
       () =>
         '11010519491231002X 13800138000 user@example.com 192.168.1.10 4111111111111111',
+    ).join('\n');
+    const secretLike = 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789/+_==';
+    const unanchoredSecretLike = Array.from({ length: 1_000 }, () => secretLike).join(' ');
+    const anchoredAccessKeySecrets = Array.from(
+      { length: 300 },
+      () => `AKIA1234567890ABCDEF:${secretLike}`,
     ).join('\n');
 
     const results = [
@@ -112,6 +127,21 @@ describe('PII masking performance benchmark', () => {
       benchmark('all-rules:dense-matches', denseMatches, 20, value =>
         maskString(value, allPlan),
       ),
+      benchmark('all-preview:plain', plain, 100, value =>
+        maskString(value, previewPlan),
+      ),
+      benchmark('all-preview:mixed', mixed, 100, value =>
+        maskString(value, previewPlan),
+      ),
+      benchmark('all-preview:dense-matches', denseMatches, 20, value =>
+        maskString(value, previewPlan),
+      ),
+      benchmark('all-rules:unanchored-secret-like', unanchoredSecretLike, 100, value =>
+        maskString(value, allPlan),
+      ),
+      benchmark('all-rules:anchored-access-key-secrets', anchoredAccessKeySecrets, 50, value =>
+        maskString(value, allPlan),
+      ),
     ];
 
     console.info(`[pii-mask-perf] ${JSON.stringify(results)}`);
@@ -122,6 +152,11 @@ describe('PII masking performance benchmark', () => {
     expect(results[4].p95Ms).toBeLessThan(50);
     expect(results[5].p95Ms).toBeLessThan(50);
     expect(results[6].p95Ms).toBeLessThan(100);
+    expect(results[7].p95Ms).toBeLessThan(50);
+    expect(results[8].p95Ms).toBeLessThan(50);
+    expect(results[9].p95Ms).toBeLessThan(100);
+    expect(results[10].p95Ms).toBeLessThan(50);
+    expect(results[11].p95Ms).toBeLessThan(50);
     expect(maskString(mixed, allPlan)).not.toContain('11010519491231002X');
     expect(maskString(mixed, allPlan)).not.toContain('13800138000');
     expect(maskString(mixed, allPlan)).not.toContain('user@example.com');
@@ -132,7 +167,16 @@ describe('PII masking performance benchmark', () => {
     expect(maskedDenseMatches.match(/\[IDCARD_MASKED\]/g)).toHaveLength(250);
     expect(maskedDenseMatches.match(/\[PHONE_MASKED\]/g)).toHaveLength(250);
     expect(maskedDenseMatches.match(/\[EMAIL_MASKED\]/g)).toHaveLength(250);
-    expect(maskedDenseMatches.match(/\[IPADDRESS_MASKED\]/g)).toHaveLength(250);
-    expect(maskedDenseMatches.match(/\[BANKCARD_MASKED\]/g)).toHaveLength(250);
+    expect(maskedDenseMatches.match(/\[IP_ADDRESS_MASKED\]/g)).toHaveLength(250);
+    expect(maskedDenseMatches.match(/\[CREDIT_CARD_MASKED\]/g)).toHaveLength(250);
+
+    const previewMixed = maskString(mixed, previewPlan);
+    expect(previewMixed).toContain('[PHONE_MASKED]{138****8000}');
+    expect(previewMixed).toContain('[IP_ADDRESS_MASKED]{192.*.*.10}');
+
+    expect(maskString(unanchoredSecretLike, allPlan)).toBe(unanchoredSecretLike);
+    const maskedAnchoredAccessKeySecrets = maskString(anchoredAccessKeySecrets, allPlan);
+    expect(maskedAnchoredAccessKeySecrets.match(/\[ACCESSKEY_SECRET_MASKED\]/g)).toHaveLength(300);
+    expect(maskedAnchoredAccessKeySecrets).not.toContain(secretLike);
   });
 });

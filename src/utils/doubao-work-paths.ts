@@ -1,0 +1,52 @@
+import { homedir } from 'node:os';
+import path from 'node:path';
+import { resolveHome } from './fs-utils.js';
+
+export type DoubaoClient = 'doubao-work' | 'doubao';
+
+export function isDoubaoAgentType(agentType: string): agentType is DoubaoClient {
+  return agentType === 'doubao-work' || agentType === 'doubao';
+}
+
+export function resolveDoubaoAppEnabled(
+  listeners?: Record<string, { client?: unknown; enabled?: boolean }>,
+  agents?: Record<string, { enabled?: boolean }>,
+): boolean {
+  if (listeners?.doubao?.client !== undefined && listeners.doubao.client !== 'doubao') return false;
+  const legacy = listeners?.['doubao-work'];
+  // Both true and false on the old Agent indicate a previous installer selection.
+  return listeners?.doubao?.enabled ?? agents?.doubao?.enabled
+    ?? (legacy?.client === undefined && legacy?.enabled !== false && agents?.['doubao-work']?.enabled === undefined);
+}
+
+export function doubaoAppUsesLegacySource(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {
+  return listeners?.['doubao-work']?.client === 'doubao';
+}
+
+/** Shared source-only configuration for probing and the full config loader. */
+export function resolveDoubaoWorkSource(listener?: { client?: unknown; logDir?: unknown }): {
+  client?: DoubaoClient; logDir?: string;
+} {
+  return {
+    ...(listener?.client === 'doubao' || listener?.client === 'doubao-work' ? { client: listener.client } : {}),
+    ...(typeof listener?.logDir === 'string' && listener.logDir.trim()
+      ? { logDir: path.resolve(resolveHome(listener.logDir.trim())) } : {}),
+  };
+}
+
+/** Select the product explicitly; a log-only override must never relocate native roots. */
+export function resolveDoubaoWorkPaths(client: DoubaoClient = 'doubao-work'): {
+  userDataRoot?: string; logDir?: string; snapshotRoot?: string; sessionNamespace?: '.doubao' | '.doubaowork';
+} {
+  const paths = process.platform === 'win32' ? path.win32 : path.posix;
+  const product = client === 'doubao' ? 'Doubao' : 'DoubaoWork';
+  const userDataRoot = process.platform === 'win32'
+    ? paths.join(process.env.LOCALAPPDATA || paths.join(homedir(), 'AppData', 'Local'), product, 'User Data')
+    : process.platform === 'darwin'
+      ? paths.join(homedir(), 'Library', 'Application Support', product) : undefined;
+  return userDataRoot ? { userDataRoot,
+    logDir: paths.join(userDataRoot, 'sdk_storage', 'log'),
+    snapshotRoot: paths.join(userDataRoot, 'coding', 'snapshot'),
+    sessionNamespace: client === 'doubao' ? '.doubao' : '.doubaowork',
+  } : {};
+}

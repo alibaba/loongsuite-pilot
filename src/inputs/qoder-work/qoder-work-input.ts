@@ -5,6 +5,7 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 
 export interface QoderWorkInputOptions extends Partial<HookInputOptions> {
   stateStore: HookInputOptions['stateStore'];
@@ -41,7 +42,7 @@ export class QoderWorkInput extends BaseHookInput {
       stateStore: opts.stateStore,
       logDir: opts.logDir ?? resolveHome(defaultLogDir),
       logPrefix,
-      pollIntervalMs: opts.pollIntervalMs ?? 30_000,
+      pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     });
     this.agentType = agentType;
     this.id = `${agentType}-hook`;

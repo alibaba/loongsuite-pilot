@@ -27,7 +27,42 @@ describe.runIf(process.platform !== 'win32')('QwenWorkCN custom dataDir pipeline
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it('writes Hook history and reads Hook/intercept data from the same custom root', async () => {
+  it('acknowledges UserPromptSubmit without advancing the transcript cursor before Stop', async () => {
+    const rows = transcriptRows();
+    rows[0] = { ...rows[0], message: { role: 'user', content: 'passive prompt' } };
+    await fs.writeFile(transcriptFile, `${JSON.stringify(rows[0])}\n`);
+    const hook = path.join(dataDir, 'hooks', 'qwenworkcn-loongsuite-pilot-hook.sh');
+    const invoke = (event: string) => spawnSync('bash', [hook], {
+      input: JSON.stringify({
+        hook_event_name: event,
+        transcript_path: transcriptFile,
+        session_id: 'session-custom',
+        cwd: '/workspace/custom',
+      }),
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome, NODE_ENV: 'production' },
+    });
+    const prompt = invoke('UserPromptSubmit');
+    expect(prompt.status, prompt.stderr).toBe(0);
+    expect(prompt.stdout).toBe('{}\n');
+    await expect(fs.stat(path.join(dataDir, 'state'))).rejects.toThrow();
+    const historyDir = path.join(dataDir, 'logs', 'qwen-work-cn', 'history');
+    await expect(fs.stat(historyDir)).rejects.toThrow();
+
+    await fs.appendFile(transcriptFile, `${JSON.stringify(rows[1])}\n`);
+    const stop = invoke('Stop');
+    expect(stop.status, stop.stderr).toBe(0);
+    const [historyFile] = await fs.readdir(historyDir);
+    const readHistory = async () => (await fs.readFile(path.join(historyDir, historyFile), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line));
+    const events = await readHistory();
+    expect(events.map(event => event['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+    expect(JSON.stringify(events)).toContain('passive prompt');
+    invoke('Stop');
+    expect(await readHistory()).toEqual(events);
+  });
+
+  it('reads custom-root Hook history and enriches it from native segments', async () => {
     const staleDataDir = path.join(root, 'stale-pilot-data');
     const env: NodeJS.ProcessEnv = {
       ...process.env,
@@ -59,29 +94,27 @@ describe.runIf(process.platform !== 'win32')('QwenWorkCN custom dataDir pipeline
     await expect(fs.stat(path.join(fakeHome, '.loongsuite-pilot', 'logs'))).rejects.toThrow();
     await expect(fs.stat(path.join(staleDataDir, 'logs'))).rejects.toThrow();
 
-    const runtimeResult = spawnSync(process.execPath, [
-      path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs'),
-    ], { encoding: 'utf-8', env });
-    expect(runtimeResult.status, runtimeResult.stderr).toBe(0);
-    await expect(fs.stat(path.join(dataDir, 'logs', 'qoderwork-wrapper-error.log'))).resolves.toBeDefined();
-
-    const interceptFile = path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl');
-    await fs.writeFile(interceptFile, `${JSON.stringify({
-      type: 'token',
-      ts: Date.now(),
-      id: 'response-custom',
-      prompt_tokens: 120,
-      completion_tokens: 30,
-      total_tokens: 150,
-    })}\n`);
+    const segmentsRoot = path.join(root, 'sessions');
+    const segmentsDir = path.join(segmentsRoot, '-workspace-custom', 'session-custom', 'segments');
+    await fs.mkdir(segmentsDir, { recursive: true });
+    await fs.writeFile(path.join(segmentsDir, 'run.jsonl'), [
+      {
+        type: 'model.request.started', ts: '2026-08-07T08:00:00.000Z',
+        turn_id: 'turn-custom', request_id: 'request-custom', data: { model: 'qwen-custom' },
+      },
+      {
+        type: 'model.response.completed', ts: '2026-08-07T08:00:01.000Z',
+        turn_id: 'turn-custom', request_id: 'request-custom',
+        data: { model: 'qwen-custom', input_tokens: 120, output_tokens: 30, cache_read_input_tokens: 90 },
+      },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     const stateStore = new MockStateStore();
     stateStore.update('qwen-work-cn-trace', { lastFile: historyFile, lastOffset: 0 });
     const input = new QwenWorkCNTraceInput({
       stateStore: stateStore as never,
       logDir: historyDir,
-      segmentsRoot: path.join(root, 'sessions'),
-      interceptFile,
+      segmentsRoot,
       pollIntervalMs: 60_000,
     });
     const entries = await collectOnce(input);
@@ -89,6 +122,10 @@ describe.runIf(process.platform !== 'win32')('QwenWorkCN custom dataDir pipeline
     expect(response?.['gen_ai.usage.input_tokens']).toBe(120);
     expect(response?.['gen_ai.usage.output_tokens']).toBe(30);
     expect(response?.['gen_ai.usage.total_tokens']).toBe(150);
+    expect(response?.['gen_ai.usage.cache_read.input_tokens']).toBe(90);
+    expect(response?.['gen_ai.usage.reasoning_tokens']).toBeUndefined();
+    expect(entries.every(entry => entry['gen_ai.system_instructions'] === undefined)).toBe(true);
+    await expect(fs.stat(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).rejects.toThrow();
   });
 });
 
@@ -149,7 +186,6 @@ async function deployQwenHooks(hooksDir: string): Promise<void> {
   for (const file of [
     'qwenworkcn-loongsuite-pilot-hook.sh',
     'qwen-work-cn-hook-processor.mjs',
-    'qoderwork-runtime-wrapper.mjs',
     'agent-event-normalizer.mjs',
   ]) {
     await fs.copyFile(path.join(sourceDir, file), path.join(hooksDir, file));

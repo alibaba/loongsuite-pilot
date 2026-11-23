@@ -1,5 +1,5 @@
 import { createLogger } from '../../utils/logger.js';
-import type { MultimodalOssConfig, UploadItem, Uploader } from '../types.js';
+import type { MultimodalStorage, UploadItem, UploadOptions, Uploader } from '../types.js';
 import { LruMap, MULTIMODAL_LRU_LIMIT } from './lru-set.js';
 import { ossPutObject, parseOssStorageBasePath } from './oss-client.js';
 import {
@@ -9,23 +9,25 @@ import {
 } from './retry.js';
 
 const logger = createLogger('OssUploader');
+const UPLOAD_FAILURE_WARN_INTERVAL_MS = 60_000;
 
 export class OssUploader implements Uploader {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly successKeys = new LruMap<true>(MULTIMODAL_LRU_LIMIT);
+  private readonly failureWarnAt = new LruMap<number>(MULTIMODAL_LRU_LIMIT);
+  private readonly abort = new AbortController();
   private closed = false;
 
   constructor(
-    private readonly oss: MultimodalOssConfig,
-    private readonly storageBasePath: string,
+    private readonly storage: Extract<MultimodalStorage, { type: 'oss' }>,
   ) {
-    const parsed = parseOssStorageBasePath(storageBasePath);
+    const parsed = parseOssStorageBasePath(storage.target.storageBasePath);
     this.bucket = parsed.bucket;
     this.prefix = parsed.prefix;
   }
 
-  async upload(item: UploadItem, opts?: { skipIfExists?: boolean }): Promise<boolean> {
+  async upload(item: UploadItem, opts?: UploadOptions): Promise<boolean> {
     try {
       if (this.closed) {
         logger.warn('oss upload skipped: uploader closed');
@@ -50,20 +52,21 @@ export class OssUploader implements Uploader {
       }
 
       const result = await withRetries(DEFAULT_MULTIMODAL_RETRY, async () => {
-        if (this.closed) {
+        if (this.closed || this.abort.signal.aborted) {
           return { ok: false as const, retryable: false, error: 'uploader closed' };
         }
         const put = await ossPutObject({
-          endpoint: this.oss.endpoint,
+          endpoint: this.storage.target.endpoint,
           bucket: this.bucket,
           objectKey,
-          accessKeyId: this.oss.accessKeyId,
-          accessKeySecret: this.oss.accessKeySecret,
-          securityToken: this.oss.securityToken,
+          accessKeyId: this.storage.auth.accessKeyId,
+          accessKeySecret: this.storage.auth.accessKeySecret,
+          securityToken: this.storage.auth.securityToken,
           body: item.data!,
           contentType: item.contentType,
           timeoutMs: MULTIMODAL_UPLOAD_TIMEOUT_MS,
           meta: item.meta,
+          signal: this.abort.signal,
         });
         if (put.ok) return { ok: true as const, value: true };
         return {
@@ -71,13 +74,15 @@ export class OssUploader implements Uploader {
           retryable: put.retryable !== false,
           error: put.error,
           statusCode: put.statusCode,
+          requestId: put.requestId,
         };
-      });
+      }, { signal: this.abort.signal });
 
       if (!result.ok) {
-        logger.warn('oss upload failed', {
+        this.warnUploadFailure(result.statusCode, {
           statusCode: result.statusCode,
           error: result.error,
+          requestId: result.requestId,
           size: item.expectedSize,
         });
         return false;
@@ -97,9 +102,19 @@ export class OssUploader implements Uploader {
       });
       return true;
     } catch (err) {
-      logger.warn('oss upload failed', { error: String(err), size: item.expectedSize });
+      this.warnUploadFailure(undefined, { error: String(err), size: item.expectedSize });
       return false;
     }
+  }
+
+  private warnUploadFailure(statusCode: number | undefined, fields: Record<string, unknown>): void {
+    const reason = typeof fields.error === 'string' ? fields.error : '';
+    const key = `${statusCode ?? 'none'}\0${reason}`;
+    const now = Date.now();
+    const previous = this.failureWarnAt.get(key) ?? 0;
+    if (now - previous < UPLOAD_FAILURE_WARN_INTERVAL_MS) return;
+    this.failureWarnAt.set(key, now);
+    logger.warn('oss upload failed', fields);
   }
 
   async shutdown(): Promise<void> {
@@ -108,6 +123,7 @@ export class OssUploader implements Uploader {
       return;
     }
     this.closed = true;
+    this.abort.abort();
     this.successKeys.clear();
   }
 }

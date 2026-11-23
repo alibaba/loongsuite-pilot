@@ -57,6 +57,35 @@ describe('DSH uninstall cleanup helper', () => {
     await expect(fs.stat(patchPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it('does not create a DSH home when the patch file is already absent', async () => {
+    const missingHome = path.join(tmpDir, 'missing-dsh-home');
+    const missingPatch = path.join(missingHome, 'cordis.patch.yml');
+
+    const result = await cleanupDshIntegration({
+      patchPath: missingPatch,
+      pluginDir,
+      marker: MARKER,
+    });
+
+    expect(result).toEqual({ success: true, changed: false });
+    await expect(fs.stat(missingHome)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.stat(path.join(pluginDir, '.collection-enabled')))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('removes an inline flow-sequence block and restores the original brackets and comments', async () => {
+    const before = '# shared root\r\n  [';
+    const after = ' \n ] # original empty root\r\n';
+    const managed = block(false).replace(
+      "- insert:\n  - id: 'loongsuite-pilot-observability'\n    name: file:///pilot/plugins/dsh/plugin.mjs",
+      '{insert: [{id: "loongsuite-pilot-observability", name: "file:///pilot/plugins/dsh/plugin.mjs"}]}',
+    );
+    await fs.writeFile(patchPath, before + ' ' + managed + after);
+    const result = await cleanupDshIntegration({ patchPath, pluginDir, marker: MARKER });
+    expect(result).toMatchObject({ success: true, changed: true });
+    expect(await fs.readFile(patchPath, 'utf8')).toBe(before + after);
+  });
+
   it('fails closed and preserves an incomplete marker block', async () => {
     const invalid = `# BEGIN ${MARKER}\n- insert: []\n`;
     await fs.writeFile(patchPath, invalid);

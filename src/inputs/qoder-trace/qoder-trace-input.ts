@@ -1,25 +1,109 @@
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { ClientType, CollectionMethod } from '../../types/index.js';
-import type { AgentActivityEntry } from '../../types/index.js';
+import type { AgentActivityEntry, MultimodalUploadMode } from '../../types/index.js';
+import { mergeAllowedRootPaths } from '../../multimodal/resolve.js';
+import type { MultimodalProcessor } from '../../multimodal/processor.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { resolveHome, directoryExists, ensureDir } from '../../utils/fs-utils.js';
 import { getTodayDateString } from '../../utils/fs-utils.js';
 import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
+import { matchesFileIdentity } from '../../utils/file-identity.js';
+import { historyFileIdentity, historyRetentionExtra, migrateHistoryRetention, nextHistoryFile } from '../base/history-retention-checkpoint.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
 import { readSegmentTokensForSession } from './segment-token-reader.js';
-import { readSqliteTokensForSession, isIdeaDbPath } from './sqlite-token-reader.js';
+import { readSqliteTokensForSession, isIdeaDbPath, resolveQoderAppRoot, type SqliteTokenResult } from './sqlite-token-reader.js';
 import { readInterceptData, type InterceptData } from './intercept-token-reader.js';
-import { enrichCliTurn, enrichIdeTurn, injectTraceId } from './token-enricher.js';
+import {
+  collectCliExpectedRequestIds,
+  enrichCliFromSegments,
+  enrichCliPrimary,
+  enrichIdeTurn,
+  injectTraceId,
+  needsCliSegmentFallback,
+} from './token-enricher.js';
+import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
+import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
+import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { QoderTranscriptSource } from './transcript-source.js';
+import { QoderIdeDelegations } from './ide-delegations.js';
+import { QoderLegacyHookReader } from './legacy-hook-reader.js';
 
 export interface QoderTraceInputOptions extends InputOptions {
   logDir?: string;
+  dataDir?: string;
+  resolveTraceContext?: (entries: AgentActivityEntry[]) => Promise<void>;
+  /** Cached multimodal policy; IDE + CLI extraction when enabled. */
+  multimodal?: {
+    enabled: boolean;
+    uploadMode?: MultimodalUploadMode;
+    processor?: MultimodalProcessor;
+    allowedRootPaths?: string[];
+  };
+}
+
+const QODER_ATTACHMENTS_FIELD = 'agent.qoder.attachments';
+const IDE_SQLITE_RETRY_DELAY_MS = 1_000;
+
+function needsIdeSqliteRetry(entries: AgentActivityEntry[]): boolean {
+  return entries.some(entry => {
+    if (entry['event.name'] !== 'llm.response') return false;
+    const inputTokens = entry['gen_ai.usage.input_tokens'];
+    const outputTokens = entry['gen_ai.usage.output_tokens'];
+    // The SQLite reader only returns rows with positive input or output usage.
+    // Unmatched responses may already have zero-filled usage, so field presence
+    // alone cannot tell us whether the current batch was enriched.
+    return !entry['gen_ai.response.id'] || !(
+      (typeof inputTokens === 'number' && inputTokens > 0) ||
+      (typeof outputTokens === 'number' && outputTokens > 0)
+    );
+  });
+}
+
+function stripQoderAttachmentCarrier(entries: AgentActivityEntry[]): void {
+  for (const entry of entries) {
+    delete (entry as Record<string, unknown>)[QODER_ATTACHMENTS_FIELD];
+  }
+}
+
+function isQoderIdeaSession(entries: AgentActivityEntry[]): boolean {
+  return entries.some(e => {
+    const agentType = e['gen_ai.agent.type'] as string;
+    return agentType === ClientType.QoderIdea || agentType === 'qoder-idea';
+  });
+}
+
+const QODER_IDE_IMAGES_TAIL = path.join('SharedClientCache', 'cache', 'images');
+
+export function qoderDefaultAllowedRootPaths(): string[] {
+  const appRoot = resolveQoderAppRoot();
+  const roots = [
+    resolveHome('~/.qoder/tmp'),
+    resolveHome('~/.qoder/vibe_images'),
+    path.join(appRoot, QODER_IDE_IMAGES_TAIL),
+  ];
+  let names: string[];
+  try {
+    names = fsSync.readdirSync(appRoot);
+  } catch {
+    return roots;
+  }
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    roots.push(path.join(appRoot, name, QODER_IDE_IMAGES_TAIL));
+  }
+  return roots;
+}
+
+export function resolveQoderAllowedRootPaths(userPaths?: string[]): string[] {
+  return mergeAllowedRootPaths(qoderDefaultAllowedRootPaths(), userPaths);
 }
 
 /**
- * Multi-source merge input for qoder/qoder-cli.
+ * Multi-source merge input for qoder/qoder-cli/qoder-app.
  * Reads hook JSONL (content+structure), session segments (CLI tokens),
  * and SQLite (IDE tokens), merges by variant, outputs enriched events
  * that serve both event logs (SLS) and trace conversion (ARMS).
@@ -32,10 +116,34 @@ export class QoderTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly logPrefix = 'qoder';
+  private readonly multimodalEnabled: boolean;
+  private readonly multimodalUploadMode: MultimodalUploadMode;
+  private readonly multimodalProcessor: MultimodalProcessor | null;
+  private readonly allowedRootPaths: string[];
+  private multimodalStopped = false;
+  private readonly transcriptSource: QoderTranscriptSource;
+  private readonly legacyHookReader = new QoderLegacyHookReader();
+  private readonly ideDelegations = new QoderIdeDelegations(undefined,
+    (reason, details) => this.logger.warn('Qoder IDE delegation deferred', { reason, ...details }));
 
   constructor(opts: QoderTraceInputOptions) {
-    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? 30_000 });
+    super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qoder/history');
+    this.transcriptSource = new QoderTranscriptSource(this.logDir, 'qoder',
+      () => this.getInputRuntimeAccumulator(), (message, fields) => this.logger.warn(message, fields), opts.dataDir, opts.resolveTraceContext);
+    this.multimodalEnabled = opts.multimodal?.enabled === true && !!opts.multimodal.processor;
+    this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
+    this.multimodalProcessor = opts.multimodal?.processor ?? null;
+    this.allowedRootPaths = this.multimodalEnabled
+      ? resolveQoderAllowedRootPaths(opts.multimodal?.allowedRootPaths)
+      : [];
+  }
+
+  override async stop(): Promise<void> {
+    this.multimodalStopped = true;
+    this.transcriptSource.stop();
+    this.legacyHookReader.reset();
+    await super.stop();
   }
 
   static async checkAvailability(): Promise<boolean> {
@@ -50,6 +158,8 @@ export class QoderTraceInput extends BaseInput {
   }
 
   protected override async onStart(): Promise<void> {
+    this.multimodalStopped = false;
+    this.transcriptSource.start();
     await ensureDir(this.logDir);
     const checkpoint = await createHookHistoryStartupCheckpoint(
       this.getState(),
@@ -67,10 +177,50 @@ export class QoderTraceInput extends BaseInput {
     }
   }
 
+  protected override async onStop(): Promise<void> {
+    clearAttachedImagePathsCache();
+  }
+
+  protected readCliIntercept(): Promise<InterceptData> {
+    return readInterceptData();
+  }
+
+  protected readCliSegments(
+    sessionId: string,
+    expectedRequestIds: readonly string[],
+  ): ReturnType<typeof readSegmentTokensForSession> {
+    return readSegmentTokensForSession(sessionId, expectedRequestIds);
+  }
+
+  protected readIdeSqliteTokens(sessionId: string): Promise<SqliteTokenResult> {
+    return readSqliteTokensForSession(sessionId);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
+    // IDE association state and transcript cursors share the normal durable
+    // output/checkpoint boundary. A failed save must not consume new parents.
+    if (!this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      && this.getState().extra?.qoderIdeDelegations) return [];
+    const nativeCheckpointPersisted = this.stateStore.isPersisted(this.id, 'qoderTranscripts');
     // 1. Read new hook JSONL lines
     const rawEntries = await this.readHookJsonl();
-    if (rawEntries.length === 0) return [];
+    const native = await this.transcriptSource.read(this.getState().extra, nativeCheckpointPersisted);
+    const ide = this.stateStore.isPersisted(this.id, 'qoderIdeDelegations')
+      ? await this.ideDelegations.collect(native.records, this.getState().extra?.qoderIdeDelegations)
+      : { records: [], state: this.getState().extra?.qoderIdeDelegations, changed: false };
+    const saveNative = () => {
+      if (native.changed || ide.changed) this.setState({ extra: { ...this.getState().extra,
+        ...(native.changed ? { qoderTranscripts: native.state } : {}),
+        ...(ide.changed ? { qoderIdeDelegations: ide.state } : {}) } });
+    };
+    for (const record of [...native.records, ...ide.records]) {
+      const entry = await this.transformRecord(record);
+      if (entry) rawEntries.push(entry);
+    }
+    if (rawEntries.length === 0) {
+      saveNative();
+      return [];
+    }
 
     // 2. Group by turn.id
     const turnGroups = this.groupByTurn(rawEntries);
@@ -80,19 +230,25 @@ export class QoderTraceInput extends BaseInput {
     // Intercept data is loaded lazily on first qoder-cli turn.
     let interceptData: InterceptData | null = null;
     const ideSessionGroups = new Map<string, AgentActivityEntry[]>();
+    const cliTurns: AgentActivityEntry[][] = [];
+    const cliFallbackGroups = new Map<string, AgentActivityEntry[][]>();
     for (const [, turnEntries] of turnGroups) {
       const variant = this.inferTurnVariant(turnEntries);
       const sessionId = this.extractSessionId(turnEntries);
 
       if (variant === 'qoder-cli' && sessionId) {
-        interceptData ??= await readInterceptData();
-        const segments = await readSegmentTokensForSession(sessionId);
-        enrichCliTurn(
+        interceptData ??= await this.readCliIntercept();
+        enrichCliPrimary(
           turnEntries,
-          segments,
           interceptData.systemPrompt?.content,
           interceptData.tokens,
         );
+        if (needsCliSegmentFallback(turnEntries)) {
+          const fallbackTurns = cliFallbackGroups.get(sessionId) ?? [];
+          fallbackTurns.push(turnEntries);
+          cliFallbackGroups.set(sessionId, fallbackTurns);
+        }
+        cliTurns.push(turnEntries);
       } else if ((variant === 'qoder' || variant === 'qoder-idea') && sessionId) {
         const sessionEntries = ideSessionGroups.get(sessionId) ?? [];
         sessionEntries.push(...turnEntries);
@@ -100,9 +256,53 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    // Read once per session after seeing the whole Hook batch. The expected-id
+    // list lets the reader spend one short retry only when this batch's exact
+    // segment records are not visible yet.
+    for (const [sessionId, fallbackTurns] of cliFallbackGroups) {
+      const expectedRequestIds = fallbackTurns.flatMap(collectCliExpectedRequestIds);
+      const segments = await this.readCliSegments(sessionId, expectedRequestIds);
+      for (const turnEntries of fallbackTurns) {
+        enrichCliFromSegments(turnEntries, segments);
+      }
+    }
+
+    const ideSqliteSnapshots = new Map<string, {
+      result: SqliteTokenResult;
+      enrichedEntries: AgentActivityEntry[];
+    }>();
+    const ideRetrySessions: string[] = [];
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
-      const { rows: sqliteRows, matchedDbPath } = await readSqliteTokensForSession(sessionId);
-      enrichIdeTurn(sessionEntries, sqliteRows);
+      const result = await this.readIdeSqliteTokens(sessionId);
+      // Enrichment only changes top-level fields. Probe shallow copies so a
+      // retry does not reuse modified timestamps or partially written usage.
+      const probeEntries = sessionEntries.map(entry => ({ ...entry }));
+      enrichIdeTurn(probeEntries, result.rows);
+      ideSqliteSnapshots.set(sessionId, { result, enrichedEntries: probeEntries });
+      if (needsIdeSqliteRetry(probeEntries)) ideRetrySessions.push(sessionId);
+    }
+
+    if (ideRetrySessions.length > 0 && !this.multimodalStopped) {
+      // One shared asynchronous wait per batch, even with several IDE sessions.
+      await new Promise<void>(resolve => setTimeout(resolve, IDE_SQLITE_RETRY_DELAY_MS));
+      for (const sessionId of ideRetrySessions) {
+        if (this.multimodalStopped) break;
+        const retryResult = await this.readIdeSqliteTokens(sessionId);
+        // A transient failure or disappearing DB must not discard rows already
+        // available on the first read. Session snapshots normally only grow.
+        if (retryResult.rows.length >= ideSqliteSnapshots.get(sessionId)!.result.rows.length) {
+          const enrichedEntries = ideSessionGroups.get(sessionId)!.map(entry => ({ ...entry }));
+          enrichIdeTurn(enrichedEntries, retryResult.rows);
+          ideSqliteSnapshots.set(sessionId, { result: retryResult, enrichedEntries });
+        }
+      }
+    }
+
+    for (const [sessionId, sessionEntries] of ideSessionGroups) {
+      const { result: { matchedDbPath }, enrichedEntries } = ideSqliteSnapshots.get(sessionId)!;
+      for (let i = 0; i < sessionEntries.length; i++) {
+        Object.assign(sessionEntries[i], enrichedEntries[i]);
+      }
 
       // Fix agent type when hook processor couldn't detect qoder-idea (Node < 22 fallback).
       // If all entries are labeled 'qoder' but tokens came from the IntelliJ-specific DB, relabel.
@@ -116,19 +316,69 @@ export class QoderTraceInput extends BaseInput {
       }
     }
 
+    this.workspacePolicy.filter(rawEntries, this.agentType);
+    if (this.multimodalEnabled && this.multimodalProcessor) {
+      const pathToUri = async (filePath: string, timeUnixMs?: number) => {
+        if (this.multimodalStopped) return null;
+        return this.multimodalProcessor!.pathToUri(filePath, timeUnixMs, {
+          allowedRootPaths: this.allowedRootPaths,
+        });
+      };
+      for (const sessionEntries of ideSessionGroups.values()) {
+        if (sessionEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
+        // JetBrains shares this input but has no multimodal extractor yet.
+        if (isQoderIdeaSession(sessionEntries)) continue;
+        if (this.multimodalStopped) break;
+        const before = sessionEntries.length;
+        await enrichIdeMultimodal(sessionEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+        for (let i = before; i < sessionEntries.length; i++) {
+          const entry = sessionEntries[i];
+          insertBeforeMatchingResponse(rawEntries, entry);
+          const turnId = (entry['gen_ai.turn.id'] as string) || 'unknown';
+          const group = turnGroups.get(turnId);
+          if (group) insertBeforeMatchingResponse(group, entry);
+        }
+      }
+      for (const turnEntries of cliTurns) {
+        if (turnEntries.some(entry => !this.workspacePolicy.allows(entry, this.agentType))) continue;
+        if (this.multimodalStopped) break;
+        await enrichCliMultimodal(turnEntries, {
+          uploadMode: this.multimodalUploadMode,
+          pathToUri,
+        });
+      }
+    }
+    stripQoderAttachmentCarrier(rawEntries);
+
     // 4. Inject trace_id per turn
     for (const turnEntries of turnGroups.values()) {
       injectTraceId(turnEntries);
     }
 
+    saveNative();
     return rawEntries;
   }
 
   // ─── Hook JSONL reading (adapted from BaseHookInput) ────────────────────────
 
+  private historyCursor?: string;
+  private historyPendingFile?: string;
+
   private async readHookJsonl(): Promise<AgentActivityEntry[]> {
-    const today = getTodayDateString();
-    const logFileName = `${this.logPrefix}-${today}.jsonl`;
+    const migrated = await migrateHistoryRetention(this.getState(), this.logDir, this.logPrefix);
+    if (migrated) this.setState({ extra: migrated });
+    const file = await nextHistoryFile(this.getState(), this.logDir, this.logPrefix, this.historyCursor, this.historyPendingFile);
+    if (!file) return [];
+    this.historyCursor = file;
+    this.historyPendingFile = undefined;
+    return this.readHookFile(file);
+  }
+
+  private async readHookFile(logFileName: string): Promise<AgentActivityEntry[]> {
+    const runtime = this.getInputRuntimeAccumulator();
     const logFile = path.join(this.logDir, logFileName);
 
     let stat;
@@ -139,37 +389,97 @@ export class QoderTraceInput extends BaseInput {
     }
 
     const state = this.getState();
-    let offset = state.lastFile === logFileName ? (state.lastOffset ?? 0) : 0;
+    const identities = state.extra?.hookLogIdentities as Record<string, string> | undefined;
+    const offsets = state.extra?.hookLogOffsets as Record<string, number> | undefined;
+    let offset = matchesFileIdentity(identities?.[logFileName], stat)
+      ? offsets?.[logFileName] ?? 0 : 0;
 
     if (offset > 0 && stat.size < offset) {
       this.logger.info('file truncated, resetting offset', { file: logFile, recorded: offset, actual: stat.size });
       offset = 0;
     }
+    const observed = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix, logFileName, stat, offset);
+    if (observed) this.setState({ extra: observed });
     if (stat.size <= offset) return [];
+    runtime?.observeBacklog(stat.size - offset);
 
-    const handle = await fs.open(logFile, 'r');
     let entries: AgentActivityEntry[] = [];
-    try {
-      // NOTE: No MAX_READ_BYTES cap here. Hook JSONL is daily-rotated and typically <100KB/day.
-      // If a cap is added in the future, must truncate to last newline to avoid splitting JSONL lines.
-      const buf = Buffer.alloc(stat.size - offset);
-      await handle.read(buf, 0, buf.length, offset);
-      const text = buf.toString('utf-8');
-      this.setState({ lastFile: logFileName, lastOffset: stat.size });
+    {
+      const batch = await this.legacyHookReader.read(logFile, offset, runtime);
+      if (historyFileIdentity(batch.stat) !== historyFileIdentity(stat)) {
+        this.legacyHookReader.reset();
+        throw new Error('legacy Hook source replaced before read');
+      }
+      const progress = historyRetentionExtra(this.getState(), this.logDir, this.logPrefix,
+        logFileName, batch.stat, batch.nextOffset, batch.quarantine.length > 0);
+      if (progress) this.setState({ extra: progress });
+      if (batch.scanPending) this.historyPendingFile = logFileName;
+      const completeBytes = batch.buffer;
+      const completeLength = batch.nextOffset - offset;
+      const skipped = batch.quarantine.filter(record => record.to !== null);
+      const skippedMax = Math.max(0, ...skipped.map(record => record.bytes));
+      if (batch.quarantine.length) {
+        const previous = Array.isArray(state.extra?.qoderLegacyQuarantine) ? state.extra.qoderLegacyQuarantine : [];
+        this.setState({ extra: { ...this.getState().extra,
+          qoderLegacyQuarantine: [...previous, ...batch.quarantine.map(record => ({ file: logFileName, ...record }))].slice(-32) } });
+        for (const record of batch.quarantine) this.logger.warn('oversized legacy Hook record quarantined; source retained', { file: logFile, ...record });
+      }
+      if (completeLength) this.setState({ lastFile: logFileName, lastOffset: batch.nextOffset });
+      if (!completeBytes.length) {
+        if (completeLength) runtime?.observeCommittedBatch({ records: skipped.length,
+          bytes: completeLength, parseSuccessRecords: 0, parseFailedRecords: skipped.length, maxRecordBytes: skippedMax });
+        return [];
+      }
 
-      const lines = text.split('\n').filter(l => l.trim().length > 0);
+      const completeText = completeBytes.toString('utf-8');
+      const asciiBatch = completeText.length === completeBytes.length;
+      const lines = completeText.split('\n');
+      let records = skipped.length;
+      let parseSuccessRecords = 0;
+      let parseFailedRecords = skipped.length;
+      let maxRecordBytes = skippedMax;
+      let recordStartOffset = 0;
 
       for (const line of lines) {
+        let recordBytes = line.length + 1;
+        if (!asciiBatch) {
+          const newline = completeBytes.indexOf(0x0a, recordStartOffset);
+          if (newline < 0) break;
+          recordBytes = newline - recordStartOffset + 1;
+          recordStartOffset = newline + 1;
+        }
+        if (!line.trim()) continue;
+        records++;
+        maxRecordBytes = Math.max(maxRecordBytes, recordBytes);
+        let record: Record<string, unknown>;
         try {
-          const record = JSON.parse(line) as Record<string, unknown>;
+          const parsed: unknown = JSON.parse(line);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            parseFailedRecords++;
+            continue;
+          }
+          record = parsed as Record<string, unknown>;
+          parseSuccessRecords++;
+        } catch (err) {
+          parseFailedRecords++;
+          this.logger.warn('invalid JSONL line', { error: String(err) });
+          continue;
+        }
+
+        try {
           const entry = await this.transformRecord(record);
           if (entry) entries.push(entry);
         } catch (err) {
           this.logger.warn('invalid JSONL line', { error: String(err) });
         }
       }
-    } finally {
-      await handle.close();
+      runtime?.observeCommittedBatch({
+        records,
+        bytes: completeLength,
+        parseSuccessRecords,
+        parseFailedRecords,
+        maxRecordBytes,
+      });
     }
 
     entries = filterBootstrapHistoryTurns(entries);
@@ -180,7 +490,12 @@ export class QoderTraceInput extends BaseInput {
   // ─── Record transformation (canonical passthrough) ──────────────────────────
 
   private async transformRecord(record: Record<string, unknown>): Promise<AgentActivityEntry | null> {
-    const canonicalEntry = buildCanonicalHookEntry(record, ClientType.QoderCli);
+    const canonicalEntry = buildCanonicalHookEntry(
+      record,
+      ClientType.QoderCli,
+      undefined,
+      { preserveSafeCustomTopLevelFields: true },
+    );
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
       return canonicalEntry;
@@ -206,7 +521,7 @@ export class QoderTraceInput extends BaseInput {
   private inferTurnVariant(entries: AgentActivityEntry[]): 'qoder-cli' | 'qoder' | 'qoder-idea' {
     for (const entry of entries) {
       const agentType = entry['gen_ai.agent.type'] as string;
-      if (agentType === ClientType.QoderCli || agentType === 'qoder-cli') return 'qoder-cli';
+      if (agentType === ClientType.QoderCli || agentType === ClientType.QoderApp) return 'qoder-cli';
       if (agentType === ClientType.QoderIdea || agentType === 'qoder-idea') return 'qoder-idea';
       if (agentType === ClientType.Qoder || agentType === 'qoder') return 'qoder';
     }
@@ -220,4 +535,16 @@ export class QoderTraceInput extends BaseInput {
     }
     return undefined;
   }
+}
+
+function insertBeforeMatchingResponse(
+  target: AgentActivityEntry[],
+  request: AgentActivityEntry,
+): void {
+  const requestId = request['gen_ai.request.id'];
+  const idx = target.findIndex(e =>
+    e['event.name'] === 'llm.response' && e['gen_ai.request.id'] === requestId,
+  );
+  if (idx >= 0) target.splice(idx, 0, request);
+  else target.push(request);
 }

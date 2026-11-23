@@ -28,7 +28,7 @@ describe('HookManager', () => {
   });
 
   it('builds QwenWorkCN hooks with an independent entrypoint', () => {
-    const [def] = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot');
+    const [def, promptDef] = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot');
 
     expect(def.agentId).toBe('qwen-work-cn');
     expect(def.settingsPath).toContain('.qwenworkcn/settings.json');
@@ -36,6 +36,31 @@ describe('HookManager', () => {
     expect(def.hookCommand).toContain('qwenworkcn-loongsuite-pilot-hook');
     expect(def.hookCommand).not.toContain('qoderwork');
     expect(def.useNestedFormat).toBe(true);
+    expect(promptDef).toEqual({ ...def, hookJsonPath: ['hooks', 'UserPromptSubmit'] });
+  });
+
+  it('repairs QwenWorkCN prompt registration idempotently and preserves third-party hooks on uninstall', async () => {
+    const settingsPath = path.join(tmpDir, 'settings.json');
+    const thirdParty = { matcher: '*', hooks: [{ type: 'command', command: '/other/prompt-hook' }] };
+    const defs = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot')
+      .map(def => ({ ...def, settingsPath }));
+    const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+    await fs.writeFile(settingsPath, JSON.stringify({ hooks: { UserPromptSubmit: [thirdParty] } }));
+    for (const def of defs) {
+      await manager.installHook(def);
+      await manager.installHook(def);
+      expect(await manager.isHookInstalled(def)).toBe(true);
+    }
+    const installed = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(installed.hooks.Stop).toHaveLength(1);
+    expect(installed.hooks.UserPromptSubmit).toHaveLength(2);
+    await manager.uninstallHook(defs[1]);
+    expect(await manager.isHookInstalled(defs[1])).toBe(false);
+    await manager.installHook(defs[1]);
+    for (const def of defs) await manager.uninstallHook(def);
+    const restored = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(restored.hooks.UserPromptSubmit).toEqual([thirdParty]);
+    expect(restored.hooks.Stop ?? []).toEqual([]);
   });
 
   it('replaces the legacy Qoder Work hook command during install', async () => {
@@ -487,6 +512,173 @@ describe('HookManager', () => {
         matcher: '*',
         useNestedFormat: true,
       })).resolves.toBe(true);
+    });
+  });
+
+  describe('interceptor hook install', () => {
+    const COLLECT = '/opt/pilot/hooks/qoder-loongsuite-pilot-hook.sh';
+    const INTERCEPT = '/opt/pilot/hooks/interceptor-hook.sh';
+
+    it('inserts the interceptor hook at the head and persists timeout', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 15,
+        insert: 'head',
+      });
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.UserPromptSubmit[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 15,
+      });
+      expect(settings.hooks.UserPromptSubmit[1].hooks[0].command).toBe(COLLECT);
+    });
+
+    it('moves an existing interceptor hook back to the head and repairs timeout', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+            {
+              matcher: '*',
+              hooks: [{ command: INTERCEPT, type: 'command', timeout: 3 }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      const def = {
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 10,
+        insert: 'head' as const,
+      };
+      expect(await manager.isHookInstalled(def)).toBe(false);
+      expect(await manager.installHook(def)).toBe(true);
+      expect(await manager.isHookInstalled(def)).toBe(true);
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.PreToolUse[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 10,
+      });
+      expect(settings.hooks.PreToolUse[1].hooks[0].command).toBe(COLLECT);
+    });
+
+    it('repairs timeout while moving an existing JSONC interceptor hook to the head', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      const original = `{
+  // Keep this comment.
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "${COLLECT}", "type": "command" }]
+      },
+      {
+        "matcher": "*",
+        "hooks": [{ "command": "${INTERCEPT}", "type": "command", "timeout": 3 }]
+      }
+    ]
+  }
+}
+`;
+      await fs.writeFile(settingsPath, original, 'utf-8');
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      const ok = await manager.installHook({
+        agentId: 'qoder',
+        settingsPath,
+        settingsSyntax: 'jsonc',
+        hookJsonPath: ['hooks', 'PreToolUse'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+        timeout: 10,
+        insert: 'head',
+      });
+
+      expect(ok).toBe(true);
+      const updated = await fs.readFile(settingsPath, 'utf-8');
+      expect(updated).toContain('// Keep this comment.');
+      const errors: ParseError[] = [];
+      const parsed = parseJsonc(updated, errors, { allowTrailingComma: true });
+      expect(errors).toEqual([]);
+      expect(parsed.hooks.PreToolUse[0].hooks[0]).toEqual({
+        command: INTERCEPT,
+        type: 'command',
+        timeout: 10,
+      });
+      expect(parsed.hooks.PreToolUse[1].hooks[0].command).toBe(COLLECT);
+    });
+
+    it('uninstalls only the interceptor command', async () => {
+      const settingsPath = path.join(tmpDir, '.qoder', 'settings.json');
+      await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+      await fs.writeFile(settingsPath, JSON.stringify({
+        hooks: {
+          UserPromptSubmit: [
+            {
+              matcher: '*',
+              hooks: [{ command: INTERCEPT, type: 'command', timeout: 15 }],
+            },
+            {
+              matcher: '*',
+              hooks: [{ command: COLLECT, type: 'command' }],
+            },
+          ],
+        },
+      }, null, 2));
+
+      const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+      await manager.uninstallHook({
+        agentId: 'qoder',
+        settingsPath,
+        hookJsonPath: ['hooks', 'UserPromptSubmit'],
+        hookCommand: INTERCEPT,
+        matcher: '*',
+        useNestedFormat: true,
+      });
+
+      const settings = JSON.parse(await fs.readFile(settingsPath, 'utf-8'));
+      expect(settings.hooks.UserPromptSubmit).toEqual([
+        {
+          matcher: '*',
+          hooks: [{ command: COLLECT, type: 'command' }],
+        },
+      ]);
     });
   });
 });

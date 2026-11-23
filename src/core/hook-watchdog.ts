@@ -1,12 +1,16 @@
 import { spawn, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
+import { existsSync, readFileSync, statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists } from '../utils/fs-utils.js';
+import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
+import { directoryExists, fileExists, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
+import { HookAssetLockError, hookUpgradeInProgress, withHookAssetLock } from '../utils/hook-asset-lock.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('HookWatchdog');
@@ -14,6 +18,31 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
+
+/** `current` and `versions/` live in the cache dir. pilotDir is versions/<name>. */
+export function getControlDir(pilotDir: string, dataDir: string): string {
+  const versionsDir = path.dirname(pilotDir);
+  return path.basename(versionsDir) === 'versions' ? path.dirname(versionsDir) : dataDir;
+}
+
+/** An upgrade in progress, or a newer active version. */
+export async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
+  const controlDir = getControlDir(pilotDir, dataDir);
+  if (await hookUpgradeInProgress(controlDir)) return true;
+  const active = readActiveVersionDir(controlDir);
+  return active !== null && path.resolve(active) !== path.resolve(pilotDir);
+}
+
+export function readActiveVersionDir(controlDir: string): string | null {
+  try {
+    const versionName = readFileSync(path.join(controlDir, 'current'), 'utf8').trim();
+    if (!versionName) return null;
+    const versionDir = path.join(controlDir, 'versions', versionName);
+    return existsSync(versionDir) ? versionDir : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface PluginCheckTarget {
   agentId: string;
@@ -30,6 +59,16 @@ export interface PluginCheckTarget {
   installArgs?: string[];
   /** Direct repair function (for hook-type repair via HookManager). Takes precedence over binPath. */
   repairFn?: () => Promise<boolean>;
+
+  /**
+   * Optional config file whose strategy-level health check is only evaluated
+   * after its filesystem identity changes from the initial baseline.
+   * Codex uses this for config.toml trust reconciliation without reparsing TOML
+   * on every watchdog interval.
+   */
+  changeWatchPath?: string;
+  /** Returns true when the changed config requires the normal repairFn. */
+  needsRepairOnChange?: () => Promise<boolean>;
 
   /**
    * Whether the owning agent is enabled by the user's selection
@@ -63,28 +102,148 @@ export interface InterceptCheckTarget {
   cleanup?: () => Promise<void>;
 }
 
-export interface MacRuntimeInterceptDefinition {
+/** A runtime override that is only ever removed, never injected. */
+export interface RetiredRuntimeInterceptDefinition {
   id: string;
   envName: string;
+}
+
+/** Retired override that also left a LaunchAgent plist behind. */
+export interface MacRetiredRuntimeInterceptDefinition extends RetiredRuntimeInterceptDefinition {
   plistLabel: string;
-  agentIds: string[];
-  appNames: string[];
+}
+
+/**
+ * Prefix shared by every block this file writes into an rc file. It marks where
+ * a block whose END marker went missing has to stop: at the next block's BEGIN.
+ */
+const MARKER_BEGIN_PREFIX = 'loongsuite-pilot BEGIN ';
+
+/** True when `line` opens some block other than the one `begin` delimits. */
+function startsAnotherBlock(line: string, begin: string): boolean {
+  return line.includes(MARKER_BEGIN_PREFIX) && !line.includes(begin);
 }
 
 /**
  * Remove a marker-delimited block (inclusive of the BEGIN/END marker lines)
  * from rc-file content. Any line containing `begin` starts the cut and any
  * line containing `end` ends it; non-block lines are preserved verbatim.
+ *
+ * A block whose END marker is missing stops at the next block's BEGIN line
+ * instead of running to EOF. Running to EOF would drop every block written
+ * after it along with whatever the user keeps below them -- PATH edits, nvm
+ * init, aliases -- because repair() writes the stripped result back over the
+ * file. A repeated BEGIN for this same block keeps the cut open, so a file that
+ * accumulated duplicates collapses to a single removal.
  */
 export function stripMarkerBlock(content: string, begin: string, end: string): string {
   const out: string[] = [];
   let inBlock = false;
   for (const line of content.split('\n')) {
-    if (!inBlock && line.includes(begin)) { inBlock = true; continue; }
-    if (inBlock && line.includes(end)) { inBlock = false; continue; }
-    if (!inBlock) out.push(line);
+    if (!inBlock) {
+      if (line.includes(begin)) inBlock = true;
+      else out.push(line);
+      continue;
+    }
+    if (line.includes(end)) { inBlock = false; continue; }
+    if (startsAnotherBlock(line, begin)) { inBlock = false; out.push(line); continue; }
+    // Still inside the block: dropped.
   }
   return out.join('\n');
+}
+
+/**
+ * Return the marker-delimited block, or null when the BEGIN marker is absent.
+ * `text` is inclusive of the marker lines and `terminated` reports whether the
+ * END marker was found; an unterminated block stops before the next block's
+ * BEGIN line rather than running to EOF.
+ *
+ * Callers use this instead of scanning whole-file content when they need to
+ * answer a question ABOUT one block: two blocks in the same rc file can share
+ * substrings, and a file-wide `includes` would let one satisfy the other's
+ * check. Bounding an unterminated block at the next BEGIN keeps that scoping
+ * intact even when the END marker was lost, and `terminated` lets callers treat
+ * the damaged block as something to rewrite rather than as already current.
+ */
+export function extractMarkerBlock(
+  content: string,
+  begin: string,
+  end: string,
+): { text: string; terminated: boolean } | null {
+  const lines = content.split('\n');
+  const start = lines.findIndex(line => line.includes(begin));
+  if (start === -1) return null;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.includes(end)) {
+      return { text: lines.slice(start, i + 1).join('\n'), terminated: true };
+    }
+    if (startsAnotherBlock(line, begin)) {
+      return { text: lines.slice(start, i).join('\n'), terminated: false };
+    }
+  }
+  return { text: lines.slice(start).join('\n'), terminated: false };
+}
+
+export function parseWindowsUserEnv(output: string, envName: string): string {
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.match(/^\s*(\S+)\s+REG_(?:EXPAND_)?SZ\s+(.*)$/);
+    if (match?.[1]?.toLowerCase() === envName.toLowerCase()) return match[2]?.trim() ?? '';
+  }
+  return '';
+}
+
+function windowsPathsEqual(left: string, right: string): boolean {
+  return left.toLowerCase() === right.toLowerCase();
+}
+
+async function readWindowsUserEnv(envName: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync('reg.exe', [
+      'query', 'HKCU\\Environment', '/v', envName,
+    ], { encoding: 'utf8', timeout: 10_000, windowsHide: true });
+    return parseWindowsUserEnv(stdout, envName);
+  } catch {
+    return '';
+  }
+}
+
+async function broadcastWindowsUserEnv(envName: string): Promise<void> {
+  const command = [
+    "$ErrorActionPreference = 'Stop'",
+    "try { [Environment]::SetEnvironmentVariable($env:LOONGSUITE_PILOT_RUNTIME_ENV_NAME, $null, 'User'); exit 0 } catch { exit 1 }",
+  ].join('; ');
+  try {
+    await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+      timeout: 10_000,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        LOONGSUITE_PILOT_RUNTIME_ENV_NAME: envName,
+      },
+    });
+  } catch {
+    logger.warn('windows runtime environment persisted but broadcast failed', {
+      envName,
+      action: 'sign out and back in to refresh Explorer',
+    });
+  }
+}
+
+async function removeWindowsUserEnv(envName: string): Promise<void> {
+  await execFileAsync('reg.exe', [
+    'delete', 'HKCU\\Environment', '/v', envName, '/f',
+  ], { timeout: 10_000, windowsHide: true });
+  await broadcastWindowsUserEnv(envName);
+}
+
+async function cleanupOwnedWindowsUserEnv(envName: string, wrapperPath: string): Promise<boolean> {
+  const current = await readWindowsUserEnv(envName);
+  if (current && windowsPathsEqual(current, wrapperPath)) {
+    await removeWindowsUserEnv(envName);
+    return true;
+  }
+  return false;
 }
 
 export interface CheckResult {
@@ -116,9 +275,14 @@ export class HookWatchdog {
   private readonly targets: PluginCheckTarget[];
   private readonly interceptTargets: InterceptCheckTarget[];
   private readonly lastRepairAt: Map<string, number> = new Map();
+  private readonly lastChangeSignature: Map<string, string> = new Map();
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
+  private readonly assetRoots?: { pilotDir: string; dataDir: string };
+  private readonly redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+  private hookRedownloadAttempted = false;
+  private assetCheckInFlight = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -126,10 +290,18 @@ export class HookWatchdog {
     config: HookWatchdogConfig,
     targets?: PluginCheckTarget[],
     interceptTargets?: InterceptCheckTarget[],
+    assetRoots?: {
+      pilotDir: string;
+      dataDir: string;
+      redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+    },
   ) {
     this.config = config;
     this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
+    this.assetRoots = assetRoots;
+    this.redownloadHooks = assetRoots?.redownloadHooks;
+    this.captureInitialChangeSignatures();
   }
 
   start(): void {
@@ -164,6 +336,15 @@ export class HookWatchdog {
   async runCheck(): Promise<CheckResult> {
     const summary: CheckResult = { checked: 0, repaired: 0, skipped: 0 };
 
+    try {
+      await this.checkHookAssets();
+    } catch (err) {
+      logger.error('hook-watchdog.repair-failed', {
+        action: 'hook-asset',
+        error: String(err),
+      });
+    }
+
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
@@ -185,6 +366,198 @@ export class HookWatchdog {
     await this.checkInterceptTargets(summary);
 
     return summary;
+  }
+
+  /** Restore deployed hook files whose bytes no longer match HOOK_ASSET_MANIFEST. */
+  private async checkHookAssets(): Promise<void> {
+    if (!this.assetRoots) return;
+    if (this.assetCheckInFlight) {
+      logger.debug('hook-watchdog.skipped', { reason: 'asset-check-in-flight' });
+      return;
+    }
+    this.assetCheckInFlight = true;
+    try {
+      const { pilotDir, dataDir } = this.assetRoots;
+      // A recent marker can also cover a postinstall worker surviving an updater exit.
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      await this.restoreDeployedHookAssets(pilotDir, dataDir);
+    } finally {
+      this.assetCheckInFlight = false;
+    }
+  }
+
+  private async restoreDeployedHookAssets(pilotDir: string, dataDir: string): Promise<void> {
+    const listed = Object.keys(HOOK_ASSET_MANIFEST);
+    if (listed.length === 0) return;
+    this.hookRedownloadAttempted = false;
+
+    const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
+    const sourceKind = (await this.classifyPath(sourceRoot)).kind;
+    if (sourceKind !== 'directory') {
+      logger.warn('hook-watchdog.skipped', { reason: sourceKind === 'symlink' ? 'symlink' : 'hook-assets-missing', path: sourceRoot });
+      return;
+    }
+    const targetRoot = path.join(dataDir, 'hooks');
+    if ((await this.classifyPath(targetRoot)).kind === 'symlink') {
+      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: targetRoot });
+      return;
+    }
+
+    for (const relativePath of listed) {
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      try {
+        await this.restoreListedHookAsset(
+          sourceRoot,
+          targetRoot,
+          relativePath,
+          HOOK_ASSET_MANIFEST[relativePath],
+        );
+      } catch (err) {
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, error: String(err) });
+      }
+    }
+  }
+
+  /** Classify a path without following symlinks. */
+  private async classifyPath(filePath: string): Promise<{ kind: 'directory' | 'file' | 'symlink' | 'missing'; mode: number }> {
+    let stat: Stats;
+    try {
+      stat = await fs.lstat(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', mode: 0 };
+      throw err;
+    }
+    if (stat.isSymbolicLink()) return { kind: 'symlink', mode: stat.mode };
+    if (stat.isDirectory()) return { kind: 'directory', mode: stat.mode };
+    if (stat.isFile()) return { kind: 'file', mode: stat.mode };
+    return { kind: 'missing', mode: stat.mode };
+  }
+
+  /** Restore one listed hook file so its deployed bytes match the manifest. */
+  private async restoreListedHookAsset(
+    sourceRoot: string,
+    targetRoot: string,
+    relativePath: string,
+    expected: string,
+  ): Promise<void> {
+    if (await this.parentIsSymlink(targetRoot, relativePath)) {
+      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: relativePath });
+      return;
+    }
+
+    const source = path.join(sourceRoot, relativePath);
+    const target = path.join(targetRoot, relativePath);
+    const executable = relativePath.endsWith('.sh') || relativePath.endsWith('.ps1');
+    const mode = executable ? 0o755 : 0o644;
+    // Compare the deployed file with the manifest.
+    const targetPath = await this.classifyPath(target);
+    if (targetPath.kind === 'file') {
+      const targetHash = createHash('sha256').update(await fs.readFile(target)).digest('hex');
+      if (targetHash === expected) {
+        if (executable && process.platform !== 'win32' && (targetPath.mode & 0o111) === 0) {
+          const fixed = await this.withHookAssets(async () => {
+            await fs.chmod(target, mode);
+            logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath, reason: 'mode' });
+            return 'written' as const;
+          });
+          if (fixed === 'blocked') return;
+        }
+        return;
+      }
+    }
+
+    // Replace it from the install copy when that copy matches.
+    const wrote = await this.writeMatchingAsset(source, target, relativePath, expected, mode);
+    if (wrote !== 'mismatch') return;
+
+    // Re-download the current version once, then try the install copy again.
+    if (!this.hookRedownloadAttempted && this.redownloadHooks) {
+      this.hookRedownloadAttempted = true;
+      let downloaded = false;
+      try {
+        downloaded = await this.redownloadHooks(HOOK_ASSET_MANIFEST);
+      } catch (err) {
+        logger.warn('hook-watchdog.redownload-skipped', { reason: 'redownload', error: String(err) });
+      }
+      if (!downloaded) {
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason: 'redownload' });
+        return;
+      }
+      // The download can outlast the check at the start of this file.
+      const roots = this.assetRoots;
+      if (roots && await upgradeBlocksRepair(roots.pilotDir, roots.dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      const restored = await this.writeMatchingAsset(source, target, relativePath, expected, mode);
+      if (restored !== 'mismatch') return;
+    }
+    const reason = (await this.classifyPath(source)).kind === 'file' ? 'asset-hash-mismatch' : 'asset-missing';
+    logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason });
+  }
+
+  /**
+   * Read and write one deployed file while holding the hook-asset lock.
+   * An upgrade holds the same lock through activation or rollback.
+   */
+  private async withHookAssets(
+    body: () => Promise<'written' | 'mismatch'>,
+  ): Promise<'written' | 'blocked' | 'mismatch'> {
+    const roots = this.assetRoots;
+    if (!roots) return 'blocked';
+    try {
+      return await withHookAssetLock(getControlDir(roots.pilotDir, roots.dataDir), async () => {
+        if (await upgradeBlocksRepair(roots.pilotDir, roots.dataDir)) {
+          logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+          return 'blocked';
+        }
+        return body();
+      });
+    } catch (err) {
+      if (!(err instanceof HookAssetLockError)) throw err;
+      logger.warn('hook-watchdog.skipped', { reason: 'hook-asset-lock', error: err.message });
+      return 'blocked';
+    }
+  }
+
+  /** Copy the install file onto the deployed path when its bytes hash to `expected`. */
+  private async writeMatchingAsset(
+    source: string,
+    target: string,
+    relativePath: string,
+    expected: string,
+    mode: number,
+  ): Promise<'written' | 'blocked' | 'mismatch'> {
+    return this.withHookAssets(async () => {
+      if ((await this.classifyPath(source)).kind !== 'file') return 'mismatch';
+      const sourceBytes = await fs.readFile(source);
+      if (createHash('sha256').update(sourceBytes).digest('hex') !== expected) return 'mismatch';
+
+      await writeTextFileAtomic(target, sourceBytes.toString('utf8'), { mode, preserveMode: true });
+      await fs.chmod(target, mode);
+      logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath });
+      return 'written';
+    });
+  }
+
+  /** True when an existing parent of relativePath is a symlink. The file itself is lstat'd by the caller. */
+  private async parentIsSymlink(root: string, relativePath: string): Promise<boolean> {
+    const parts = relativePath.split(/[\\/]/).filter(part => part && part !== '.');
+    parts.pop();
+    let current = root;
+    for (const part of parts) {
+      current = path.join(current, part);
+      const kind = (await this.classifyPath(current)).kind;
+      if (kind === 'symlink') return true;
+      if (kind === 'missing') return false;
+    }
+    return false;
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {
@@ -233,6 +606,29 @@ export class HookWatchdog {
     const settings = document.status === 'ok' ? document.data : null;
     const missing = this.findMissingHooks(settings, target);
     const found = target.expectedHooks.length - missing.length;
+    let pendingChangeSignature: { key: string; value: string } | undefined;
+
+    if (
+      missing.length === 0
+      && target.changeWatchPath
+      && target.needsRepairOnChange
+    ) {
+      const signature = await this.changeSignature(target.changeWatchPath);
+      const signatureKey = this.changeSignatureKey(target);
+      if (!this.lastChangeSignature.has(signatureKey)) {
+        // Deployment has already reconciled the startup state. The watchdog
+        // establishes a baseline here and reacts only to later external edits.
+        this.lastChangeSignature.set(signatureKey, signature);
+      } else if (this.lastChangeSignature.get(signatureKey) !== signature) {
+        const needsRepair = await target.needsRepairOnChange();
+        if (needsRepair) {
+          missing.push('codex-trust');
+          pendingChangeSignature = { key: signatureKey, value: signature };
+        } else {
+          this.lastChangeSignature.set(signatureKey, signature);
+        }
+      }
+    }
 
     if (missing.length === 0) {
       logger.info('hook-watchdog.check', {
@@ -277,6 +673,9 @@ export class HookWatchdog {
     if (!ok) {
       return { agentId: target.agentId, status: 'repair-failed', missing };
     }
+    if (pendingChangeSignature) {
+      this.lastChangeSignature.set(pendingChangeSignature.key, pendingChangeSignature.value);
+    }
     return { agentId: target.agentId, status: 'repaired', missing };
   }
 
@@ -301,6 +700,57 @@ export class HookWatchdog {
 
   private invalidConfigTargetKey(target: PluginCheckTarget): string {
     return `${target.agentId}\0${target.settingsPath}`;
+  }
+
+  private changeSignatureKey(target: PluginCheckTarget): string {
+    return `${target.agentId}\0${target.changeWatchPath}`;
+  }
+
+  /**
+   * Deployment reconciles Codex trust before constructing the watchdog. Capture
+   * that exact post-deployment state synchronously so an edit made before the
+   * first delayed check is still observed as a change instead of becoming the
+   * baseline.
+   */
+  private captureInitialChangeSignatures(): void {
+    for (const target of this.targets) {
+      if (!target.changeWatchPath || !target.needsRepairOnChange) continue;
+      try {
+        this.lastChangeSignature.set(
+          this.changeSignatureKey(target),
+          this.changeSignatureSync(target.changeWatchPath),
+        );
+      } catch (err) {
+        logger.warn('hook-watchdog baseline capture failed', {
+          agent: target.agentId,
+          path: target.changeWatchPath,
+          error: String(err),
+        });
+      }
+    }
+  }
+
+  private changeSignatureSync(filePath: string): string {
+    try {
+      return this.formatChangeSignature(statSync(filePath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private async changeSignature(filePath: string): Promise<string> {
+    try {
+      const stat = await fs.stat(filePath);
+      return this.formatChangeSignature(stat);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'missing';
+      throw err;
+    }
+  }
+
+  private formatChangeSignature(stat: Stats): string {
+    return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
   }
 
   private findMissingHooks(
@@ -486,7 +936,7 @@ export class HookWatchdog {
 
 
   /**
-   * Shell-rc intercept block definitions (qodercli + claude-code).
+   * Shell-rc intercept block definitions (qodercli + qoderclicn + claude-code).
    *
    * blockFn must stay byte-identical to the block written by the installer
    * (deploy/installer-opensource.sh inject_*), so the marker-based idempotency
@@ -502,7 +952,9 @@ export class HookWatchdog {
    * `signature` is a substring unique to the CURRENT block shape. check()/
    * repair() use it — not just `marker` — to detect and migrate
    * an older block that shares the same marker (e.g. the released bare
-   * `<cli>() {...}` form). Keep it byte-identical to the installer's grep.
+   * `<cli>() {...}` form). It is matched WITHIN the block's own marker region,
+   * not across the whole rc file, so a neighbouring block cannot vouch for a
+   * stale one. Keep it byte-identical to the installer's grep.
    * `endMarker` bounds the block for removal/migration.
    */
   static interceptRcBlockDefs(): Array<{
@@ -516,11 +968,15 @@ export class HookWatchdog {
   }> {
     return [
       {
+        // `signature` is this block's own function definition, not the wrapper
+        // script name: one wrapper serves both product lines, so the script name
+        // also occurs inside the qoderclicn block and could not tell a stale
+        // block of this shape apart from a current CN one.
         id: 'qodercli-rc',
         agentId: 'qoder',
         marker: 'loongsuite-pilot BEGIN qodercli-intercept',
         endMarker: 'loongsuite-pilot END qodercli-intercept',
-        signature: 'qodercli-runtime-wrapper.sh',
+        signature: "eval 'qodercli() {",
         scriptName: 'qodercli-runtime-wrapper.sh',
         blockFn: (p) => [
           '',
@@ -529,6 +985,26 @@ export class HookWatchdog {
           `  eval 'qodercli() { "${p}" "$@"; }'`,
           'fi',
           '# loongsuite-pilot END qodercli-intercept',
+        ].join('\n'),
+      },
+      {
+        // Same wrapper script as qodercli, told apart by the flavor variable the
+        // block exports. `signature` is that assignment rather than the script
+        // name, for the same reason as above: the shared script name cannot
+        // distinguish this block from the qodercli one.
+        id: 'qoderclicn-rc',
+        agentId: 'qoder-cn',
+        marker: 'loongsuite-pilot BEGIN qoderclicn-intercept',
+        endMarker: 'loongsuite-pilot END qoderclicn-intercept',
+        signature: 'LOONGSUITE_QODERCLI_FLAVOR=qoderclicn',
+        scriptName: 'qodercli-runtime-wrapper.sh',
+        blockFn: (p) => [
+          '',
+          '# loongsuite-pilot BEGIN qoderclicn-intercept',
+          'if ! alias qoderclicn >/dev/null 2>&1 && ! typeset -f qoderclicn >/dev/null 2>&1; then',
+          `  eval 'qoderclicn() { LOONGSUITE_QODERCLI_FLAVOR=qoderclicn "${p}" "$@"; }'`,
+          'fi',
+          '# loongsuite-pilot END qoderclicn-intercept',
         ].join('\n'),
       },
       {
@@ -564,68 +1040,21 @@ export class HookWatchdog {
     // ── QoderWork-family launchctl env + LaunchAgent plists (macOS only) ──
     if (process.platform === 'darwin') {
       const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
-      for (const def of HookWatchdog.macRuntimeInterceptDefs()) {
+      // Retired overrides: `enabled: false` routes every cycle into the
+      // watchdog's disabled-cleanup path, so a leftover injection is removed
+      // without depending on which agents the user currently has enabled.
+      for (const def of HookWatchdog.macRetiredRuntimeInterceptDefs()) {
         const plistPath = path.join(home, 'Library', 'LaunchAgents', `${def.plistLabel}.plist`);
-        const appPaths = def.appNames.flatMap(appName => [
-          path.join('/Applications', appName),
-          path.join(home, 'Applications', appName),
-        ]);
-
         targets.push({
           id: def.id,
-          enabled: () => def.agentIds.some(agentId => isAgentEnabled(agentId)),
-          precondition: async () => {
-            if (!await fileExists(wrapperPath)) return false;
-            for (const appPath of appPaths) {
-              if (await directoryExists(appPath)) return true;
-            }
-            return false;
-          },
-          check: async () => {
-            try {
-              const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
-              if (stdout.trim() !== wrapperPath) return false;
-              // Also verify plist exists — without it, env is lost on reboot.
-              return fileExists(plistPath);
-            } catch {
-              return false;
-            }
-          },
-          repair: async () => {
-            await execFileAsync('launchctl', ['setenv', def.envName, wrapperPath]);
-            const plistContent = [
-              '<?xml version="1.0" encoding="UTF-8"?>',
-              '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
-              '<plist version="1.0">',
-              '<dict>',
-              '    <key>Label</key>',
-              `    <string>${def.plistLabel}</string>`,
-              '    <key>ProgramArguments</key>',
-              '    <array>',
-              '        <string>/bin/launchctl</string>',
-              '        <string>setenv</string>',
-              `        <string>${def.envName}</string>`,
-              `        <string>${wrapperPath}</string>`,
-              '    </array>',
-              '    <key>RunAtLoad</key>',
-              '    <true/>',
-              '</dict>',
-              '</plist>',
-              '',
-            ].join('\n');
-            await fs.mkdir(path.dirname(plistPath), { recursive: true });
-            await fs.writeFile(plistPath, plistContent);
-            // NOTE: launchctl load/unload is deprecated since macOS 10.11 in
-            // favour of `launchctl bootstrap/bootout gui/<uid>`. We keep
-            // load/unload for now because it still works reliably across all
-            // supported macOS versions and avoids the uid lookup complexity.
-            await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
-            await execFileAsync('launchctl', ['load', plistPath]).catch(() => {});
-          },
+          enabled: () => false,
+          precondition: async () => false,
+          check: async () => true,
+          repair: async () => {},
           cleanup: async () => {
-            // Each product-specific target only removes its own env/plist.
             try {
               const { stdout } = await execFileAsync('launchctl', ['getenv', def.envName]);
+              // Exact match only: a third-party override must survive untouched.
               if (stdout.trim() === wrapperPath) {
                 await execFileAsync('launchctl', ['unsetenv', def.envName]).catch(() => {});
               }
@@ -636,6 +1065,28 @@ export class HookWatchdog {
               await execFileAsync('launchctl', ['unload', plistPath]).catch(() => {});
               await fs.rm(plistPath, { force: true }).catch(() => {});
             }
+          },
+        });
+      }
+    }
+
+    // ── QoderWork-family Windows User env vars ──
+    // HKCU\Environment is permanent across reboots and inherited by every new
+    // GUI process. Native reg.exe keeps this path compatible with CLM/WDAC.
+    if (process.platform === 'win32') {
+      const wrapperPath = path.join(dataDir, 'hooks', 'qoderwork-runtime-wrapper.mjs');
+      // Retired overrides: see the macOS loop above. `enabled: false` sends
+      // every cycle into the disabled-cleanup path, and the helper only deletes
+      // a value that is exactly our wrapper, so a third-party override stays.
+      for (const def of HookWatchdog.winRetiredRuntimeInterceptDefs()) {
+        targets.push({
+          id: def.id,
+          enabled: () => false,
+          precondition: async () => false,
+          check: async () => true,
+          repair: async () => {},
+          cleanup: async () => {
+            await cleanupOwnedWindowsUserEnv(def.envName, wrapperPath);
           },
         });
       }
@@ -676,8 +1127,12 @@ export class HookWatchdog {
             if (!await fileExists(rcPath)) continue;
             anyRcExists = true;
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) anyCurrent = true;
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // A block that lost its END marker is damaged whatever it holds:
+              // the blocks written after it sit inside its unclosed region.
+              if (!block.terminated) return false;
+              if (block.text.includes(rc.signature)) anyCurrent = true;
               else return false; // marker present but old shape → migrate
             }
           }
@@ -690,8 +1145,11 @@ export class HookWatchdog {
           for (const rcPath of rcPaths) {
             if (!await fileExists(rcPath)) continue; // never create rc files
             const content = await fs.readFile(rcPath, 'utf-8');
-            if (content.includes(rc.marker)) {
-              if (content.includes(rc.signature)) continue; // already current
+            const block = extractMarkerBlock(content, rc.marker, rc.endMarker);
+            if (block !== null) {
+              // Unterminated blocks fall through to the rewrite below, which
+              // re-emits both markers.
+              if (block.terminated && block.text.includes(rc.signature)) continue; // already current
               // Stale block: strip the old marker region, then append fresh.
               const stripped = stripMarkerBlock(content, rc.marker, rc.endMarker).replace(/\n+$/, '\n');
               await fs.writeFile(rcPath, stripped + rc.blockFn(scriptPath) + '\n');
@@ -716,22 +1174,36 @@ export class HookWatchdog {
     return targets;
   }
 
-  /** Keep the watchdog's product/env/app mapping aligned with the installer. */
-  static macRuntimeInterceptDefs(): MacRuntimeInterceptDefinition[] {
+  /**
+   * Runtime overrides that no longer have a collection consumer. They are never
+   * (re)injected; the watchdog only retires Pilot-owned leftovers from earlier
+   * releases so an unused JSON monkey patch stops loading into the host app.
+   */
+  static macRetiredRuntimeInterceptDefs(): MacRetiredRuntimeInterceptDefinition[] {
     return [
       {
         id: 'qoderwork-env',
         envName: 'QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qoderwork-env',
-        agentIds: ['qoder-work', 'qoder-work-cn'],
-        appNames: ['QoderWork.app', 'QoderWork CN.app', 'QoderWorkCN.app'],
       },
       {
         id: 'qwenworkcn-env',
         envName: 'QW_QODER_WORKER_RUNTIME_PATH',
         plistLabel: 'com.loongsuite-pilot.qwenworkcn-env',
-        agentIds: ['qwen-work-cn'],
-        appNames: ['QwenWorkCN.app'],
+      },
+    ];
+  }
+
+  /** Windows counterpart of {@link macRetiredRuntimeInterceptDefs}. */
+  static winRetiredRuntimeInterceptDefs(): RetiredRuntimeInterceptDefinition[] {
+    return [
+      {
+        id: 'qoderwork-win-env',
+        envName: 'QODER_WORKER_RUNTIME_PATH',
+      },
+      {
+        id: 'qwenworkcn-win-env',
+        envName: 'QW_QODER_WORKER_RUNTIME_PATH',
       },
     ];
   }

@@ -2,20 +2,39 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OssUploader } from '../../../src/multimodal/uploader/oss-uploader.js';
 import * as ossClient from '../../../src/multimodal/uploader/oss-client.js';
 
+const { mockWarn } = vi.hoisted(() => ({ mockWarn: vi.fn() }));
+vi.mock('../../../src/utils/logger.js', () => ({
+  createLogger: () => ({
+    info: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+    debug: vi.fn(),
+  }),
+}));
+
 describe('OssUploader', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
+    mockWarn.mockClear();
   });
 
-  const oss = {
-    endpoint: 'https://oss-cn-shanghai.aliyuncs.com',
-    accessKeyId: 'ak',
-    accessKeySecret: 'sk',
-  };
+  const ossStorage = (storageBasePath = 'oss://bucket/mm') => ({
+    type: 'oss' as const,
+    target: {
+      endpoint: 'https://oss-cn-shanghai.aliyuncs.com',
+      storageBasePath,
+    },
+    auth: {
+      mode: 'ak' as const,
+      accessKeyId: 'ak',
+      accessKeySecret: 'sk',
+    },
+  });
 
   it('rejects invalid payload size without calling put', async () => {
     const put = vi.spyOn(ossClient, 'ossPutObject');
-    const uploader = new OssUploader(oss, 'oss://bucket/mm');
+    const uploader = new OssUploader(ossStorage());
     const ok = await uploader.upload({
       targetPath: '20260101/a.png',
       contentType: 'image/png',
@@ -32,7 +51,7 @@ describe('OssUploader', () => {
       ok: true,
       statusCode: 200,
     });
-    const uploader = new OssUploader(oss, 'oss://bucket/mm');
+    const uploader = new OssUploader(ossStorage());
     const item = {
       targetPath: '20260101/a.png',
       contentType: 'image/png',
@@ -52,7 +71,7 @@ describe('OssUploader', () => {
       error: 'forbidden',
       retryable: false,
     });
-    const uploader = new OssUploader(oss, 'oss://bucket/mm');
+    const uploader = new OssUploader(ossStorage());
     const ok = await uploader.upload({
       targetPath: '20260101/a.png',
       contentType: 'image/png',
@@ -63,8 +82,39 @@ describe('OssUploader', () => {
     expect(ok).toBe(false);
   });
 
+  it('warns once per status and error per minute', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    let request = 0;
+    vi.spyOn(ossClient, 'ossPutObject').mockImplementation(async () => ({
+      ok: false,
+      statusCode: 403,
+      requestId: `oss-req-403-${request++}`,
+      error: 'oss putObject status 403',
+      retryable: false,
+    }));
+    const uploader = new OssUploader(ossStorage());
+    const item = (targetPath: string) => ({
+      targetPath,
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    });
+    for (let i = 0; i < 5; i++) {
+      expect(await uploader.upload(item(`20260101/a${i}.png`))).toBe(false);
+    }
+    const failed = () => mockWarn.mock.calls.filter(call => call[0] === 'oss upload failed');
+    expect(failed()).toHaveLength(1);
+    expect(failed()[0]?.[1]).toMatchObject({ requestId: 'oss-req-403-0' });
+
+    vi.setSystemTime(new Date('2026-01-01T00:01:01Z'));
+    expect(await uploader.upload(item('20260101/b.png'))).toBe(false);
+    expect(failed()).toHaveLength(2);
+  });
+
   it('throws in constructor for invalid storageBasePath', () => {
-    expect(() => new OssUploader(oss, 's3://bucket/mm')).toThrow(/invalid oss storageBasePath/);
+    expect(() => new OssUploader(ossStorage('s3://bucket/mm'))).toThrow(/invalid oss storageBasePath/);
   });
 
   it('rejects uploads after shutdown and clears successKeys', async () => {
@@ -72,7 +122,7 @@ describe('OssUploader', () => {
       ok: true,
       statusCode: 200,
     });
-    const uploader = new OssUploader(oss, 'oss://bucket/mm');
+    const uploader = new OssUploader(ossStorage());
     const item = {
       targetPath: '20260101/a.png',
       contentType: 'image/png',
@@ -94,7 +144,7 @@ describe('OssUploader', () => {
       resolvePut = resolve;
     });
     const put = vi.spyOn(ossClient, 'ossPutObject').mockImplementation(async () => putGate);
-    const uploader = new OssUploader(oss, 'oss://bucket/mm');
+    const uploader = new OssUploader(ossStorage());
     const item = {
       targetPath: '20260101/race.png',
       contentType: 'image/png',
@@ -114,6 +164,25 @@ describe('OssUploader', () => {
     put.mockResolvedValue({ ok: true, statusCode: 200 });
     expect(await uploader.upload(item)).toBe(false);
     expect(put).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts in-flight put on shutdown', async () => {
+    let seenSignal: AbortSignal | undefined;
+    vi.spyOn(ossClient, 'ossPutObject').mockImplementation(async (params) => {
+      seenSignal = params.signal;
+      return new Promise(() => {});
+    });
+    const uploader = new OssUploader(ossStorage());
+    void uploader.upload({
+      targetPath: '20260101/hang.png',
+      contentType: 'image/png',
+      meta: {},
+      data: Buffer.from('x'),
+      expectedSize: 1,
+    });
+    await Promise.resolve();
+    await uploader.shutdown();
+    expect(seenSignal?.aborted).toBe(true);
   });
 });
 

@@ -90,6 +90,38 @@ describe('DshYamlPatchStrategy', () => {
     expect(content.indexOf('- id: user-other-plugin')).toBeLessThan(content.indexOf(`# BEGIN ${MARKER}`));
   });
 
+  it.each(['[]\n', '# shared root\r\n  [ \n ] # empty\r\n', '\uFEFF# Unicode 配置\n[]\n'])('registers within an empty flow sequence and restores its exact bytes: %j', async original => {
+    await fs.writeFile(patchPath, original);
+    const def = makeDef();
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await readPatch()).toContain('[ # BEGIN');
+    expect(await strategy.needsDeploy(def)).toBe(false);
+    const installed = await readPatch();
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await readPatch()).toBe(installed);
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe(original);
+  });
+
+  it('repairs the legacy block appended after an empty flow root', async () => {
+    const def = makeDef();
+    await strategy.deploy(def);
+    await fs.writeFile(patchPath, '[]\n' + await readPatch());
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    expect((await strategy.deploy(def)).success).toBe(true);
+    expect(await readPatch()).toContain('[ # BEGIN');
+    expect(await strategy.undeploy(def)).toBe(true);
+    expect(await readPatch()).toBe('[]\n');
+  });
+
+  it('preserves a non-empty flow sequence instead of appending invalid YAML', async () => {
+    const original = '[{ id: customer, name: customer-plugin }]\n';
+    await fs.writeFile(patchPath, original);
+    expect((await strategy.deploy(makeDef())).success).toBe(false);
+    expect(await readPatch()).toBe(original);
+    await expect(fs.stat(enabledMarkerPath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('preserves user bytes verbatim (no js-yaml.dump whole-file rewrite)', async () => {
     const userBlock = [
       '# user comment line',
@@ -397,6 +429,19 @@ describe('DshYamlPatchStrategy', () => {
     const def = makeDef();
     const ok = await strategy.undeploy(def);
     expect(ok).toBe(true);
+  });
+
+  it('undeploy does not recreate a missing persisted DSH home', async () => {
+    const missingHome = path.join(tmpDir, 'missing-persisted-home');
+    const missingPatch = path.join(missingHome, 'cordis.patch.yml');
+    const record = {
+      deployMode: 'dsh-yaml-patch' as const,
+      deployedAt: new Date().toISOString(),
+      dshPatchPath: missingPatch,
+    };
+
+    expect(await strategy.undeploy(makeDef(), record)).toBe(true);
+    await expect(fs.stat(missingHome)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('returns false from needsDeploy when dshYamlPatch is missing', async () => {

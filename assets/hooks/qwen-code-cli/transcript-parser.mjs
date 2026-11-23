@@ -22,8 +22,8 @@
  *   → { turns, nextOffset }
  * nextOffset = current file size; caller persists for next invocation.
  *
- * Subagent records (isSidechain=true or agentId set) are filtered out in v1
- * (those belong to child sessions; v2 will unfurl them into the trace).
+ * Subagent records (isSidechain=true or agentId set) are excluded from the main
+ * parser. subagents.mjs reads their independent transcript/meta files.
  */
 
 import fs from 'node:fs';
@@ -65,7 +65,7 @@ export function parseQwenTranscript(transcriptPath, byteOffset = 0, mainSessionI
     let r;
     try { r = JSON.parse(trimmed); } catch { continue; }
     if (!r || typeof r !== 'object' || !r.type) continue;
-    // v1: skip subagent (sidechain) records entirely
+    // Child records belong to the dedicated subagent parser.
     if (r.isSidechain === true || r.agentId) continue;
     records.push(r);
   }
@@ -157,7 +157,7 @@ export function splitIntoTurns(records) {
 
 // ─── enrichment: per-turn llmCalls + tool pairings ───
 
-function enrichTurn(turn, mainSessionId) {
+export function enrichTurn(turn, mainSessionId, subagent = false) {
   const userRec = turn.userRecord;
   const promptText = extractUserPromptText(userRec);
   const turnRecords = turn.records;
@@ -185,6 +185,12 @@ function enrichTurn(turn, mainSessionId) {
 
   for (let i = 0; i < turnRecords.length; i++) {
     const r = turnRecords[i];
+
+    if (subagent && r.type === 'user') {
+      inputDeltaBuffer.push(r);
+      if (r.timestamp) prevStepEndTimestamp = r.timestamp;
+      continue;
+    }
 
     if (r.type === 'tool_result') {
       // Tool result accumulates into the NEXT step's input delta (the model
@@ -253,7 +259,7 @@ function enrichTurn(turn, mainSessionId) {
   }
 
   // Pair each declared tool with a tool_result in this turn (using callId or fallback).
-  const pairStats = pairToolCallsWithResults(llmCalls, turnRecords);
+  const pairStats = pairToolCallsWithResults(llmCalls, turnRecords, subagent);
 
   return {
     sessionId: userRec.sessionId,
@@ -306,7 +312,7 @@ function extractApiResponseEvent(rec) {
  * Returns `{ positionalFallbacksUsed }` so callers can surface a warning when
  * the brittle fallback path actually fires (PR #37 review: A1 + B4).
  */
-export function pairToolCallsWithResults(llmCalls, turnRecords) {
+export function pairToolCallsWithResults(llmCalls, turnRecords, strict = false) {
   const toolResults = turnRecords.filter((r) => r.type === 'tool_result');
   const claimedToolResults = new Set();
 
@@ -323,6 +329,8 @@ export function pairToolCallsWithResults(llmCalls, turnRecords) {
       }
     }
   }
+
+  if (strict) return { positionalFallbacksUsed: 0 };
 
   // Pass 2: positional fallback for tools with no callId or unmatched.
   // This is brittle when a turn has multiple tool calls with missing IDs
@@ -364,6 +372,7 @@ function extractToolResult(toolResultRec) {
     uuid: toolResultRec.uuid,
     timestamp: toolResultRec.timestamp,
     response,
+    durationMs: tcr.durationMs,
     status,
     error: errorContent,
   };

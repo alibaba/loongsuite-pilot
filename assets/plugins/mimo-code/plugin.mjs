@@ -37,6 +37,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { readPilotConfig } from "../shared/pilot-config.mjs";
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -152,13 +154,7 @@ function truncateContent(val) {
 // ---------------------------------------------------------------------------
 
 function loadPilotConfig() {
-  try {
-    const cfgPath = path.join(resolveDataDir(), "config.json");
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(cfg) {
@@ -175,6 +171,28 @@ function resolveUserId(cfg) {
 // ---------------------------------------------------------------------------
 
 let _logDirReady = false;
+// MiMo passes the project directory at server initialization. Individual
+// message.updated events can provide a more precise per-session path.
+let agentCwd;
+let captureContent = true;
+
+const CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages', 'gen_ai.input.messages_delta',
+  'gen_ai.output.messages', 'gen_ai.output.messages_delta',
+  'gen_ai.system_instructions', 'gen_ai.tool.definitions',
+  'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'error.message',
+]);
+
+function contentEnabled(config) {
+  const value = config.agents?.['mimo-code']?.captureMessageContent;
+  return value !== false && !(typeof value === 'string' && value.trim().toLowerCase() === 'false');
+}
+
+function contentSafeRecord(record) {
+  return captureContent ? record : Object.fromEntries(
+    Object.entries(record).filter(([key]) => !CONTENT_FIELDS.has(key)),
+  );
+}
 
 function writeRecord(record) {
   try {
@@ -183,7 +201,7 @@ function writeRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `mimo-code-${todayStamp()}.jsonl`);
-    fs.appendFileSync(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(contentSafeRecord(record)) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -227,6 +245,7 @@ function getSession(sessionID) {
       stepStartTimeMs: null,
       stepFinishData: null,
       stepEmittedResponse: false,
+      cwd: agentCwd,
     };
     sessions.set(sessionID, s);
     if (sessions.size > MAX_SESSIONS) {
@@ -256,6 +275,7 @@ function clearSession(sessionID) {
 
 function buildCommonFields(sessionID, session, userId) {
   const turn = session.currentTurn;
+  const cwd = session.cwd || agentCwd;
   return {
     time_unix_nano: nowNanos(),
     "event.id": crypto.randomUUID(),
@@ -266,6 +286,7 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": session.agentMeta?.name || AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.id || undefined,
+    ...(cwd ? { [`agent.${AGENT_TYPE}.cwd`]: cwd } : {}),
     // ARMS GenAI semconv: every span should carry gen_ai.framework so CMS can
     // route the trace to the right pipeline. The OTLP trace flusher also sets
     // it as a resource attribute, but mirroring it here on every record keeps
@@ -438,6 +459,13 @@ function handleChatMessage(inp, out, userId) {
   if (!sessionID) return;
 
   const session = getSession(sessionID);
+  session.cwd = selectCwd(
+    out?.message?.path?.cwd,
+    inp?.directory,
+    inp?.cwd,
+    session.cwd,
+    agentCwd,
+  );
 
   const msg = out?.message;
   const userMessageID = msg?.id || inp.messageID;
@@ -757,6 +785,7 @@ function handleMessageUpdated(props, userId) {
   if (!sessionID) return;
 
   const session = getSession(sessionID);
+  session.cwd = selectCwd(info.path?.cwd, session.cwd, agentCwd);
 
   // User message: turn boundary. This is the fallback path when the
   // chat.message hook did not fire (e.g. --pure mode). When chat.message
@@ -1062,6 +1091,13 @@ function safe(fn) {
   };
 }
 
+function selectCwd(...values) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin entry point
 // ---------------------------------------------------------------------------
@@ -1072,7 +1108,10 @@ export default {
   server: async (input, _options) => {
     ensureDir(logDir());
 
+    agentCwd = selectCwd(input?.directory, input?.cwd, process.cwd());
+
     const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
     const userId = resolveUserId(cfg);
 
     return {

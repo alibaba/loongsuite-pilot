@@ -49,6 +49,12 @@ describe('AlarmManager', () => {
     expect(entries[1].endpoint_name).toBe('ep2');
   });
 
+  it('preserves coalesced worker occurrence counts alongside single alarms', () => {
+    manager.record('INTERCEPTOR_REGEX_ALARM', '2', 'first', { input_name: 'interceptor' }, 8);
+    manager.record('INTERCEPTOR_REGEX_ALARM', '2', 'latest', { input_name: 'interceptor' });
+    expect(manager.serialize()[0]).toMatchObject({ alarm_count: '9', alarm_message: 'latest' });
+  });
+
   it('clears alarms after serialize', () => {
     manager.record('HOOK_INSTALL_ALARM', '2', 'install failed');
     manager.serialize();

@@ -1,8 +1,11 @@
-// Cross-runtime preload script for qodercli token & system prompt capture.
+// Cross-runtime preload script for token & system prompt capture, shared by the
+// qodercli (international) and qoderclicn (CN) product lines.
 // Injected via:
-//   Bun:  BUN_OPTIONS="--preload=<this-file>" qodercli ...
-//   Node: NODE_OPTIONS="--import=<this-file>" qodercli ...
-// Writes to: ~/.loongsuite-pilot/logs/qodercli-intercept.jsonl
+//   Bun:  BUN_OPTIONS="--preload=<this-file>" <cli> ...
+//   Node: NODE_OPTIONS="--import=<this-file>" <cli> ...
+// Writes to: ~/.loongsuite-pilot/logs/<LOONGSUITE_INTERCEPT_FILE>, defaulting to
+// qodercli-intercept.jsonl. The runtime wrapper sets the variable per product
+// line so two installs on one machine do not interleave into one stream.
 //
 // Two hooks:
 //   JSON.parse  → captures token usage from SSE response (last event with .usage + .choices)
@@ -14,7 +17,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 const INTERCEPT_DIR = path.join(process.env.HOME || "/tmp", ".loongsuite-pilot", "logs");
-const INTERCEPT_FILE = path.join(INTERCEPT_DIR, "qodercli-intercept.jsonl");
+// basename() keeps the value inside the log dir no matter what it holds.
+const INTERCEPT_FILE = path.join(
+  INTERCEPT_DIR,
+  path.basename(process.env.LOONGSUITE_INTERCEPT_FILE || "qodercli-intercept.jsonl"),
+);
 const MIN_SYSTEM_PROMPT_LENGTH = 100;
 
 try { fs.mkdirSync(INTERCEPT_DIR, { recursive: true }); } catch {}

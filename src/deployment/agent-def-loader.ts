@@ -1,20 +1,40 @@
 import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { AgentDefinition } from '../types/index.js';
+import type { AgentDefinition, ListenerConfig } from '../types/index.js';
 import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
+import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, resolveDoubaoWorkPaths } from '../utils/doubao-work-paths.js';
 import { createLogger } from '../utils/logger.js';
+import { resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome } from './env-agent-dirs.js';
 
 const logger = createLogger('AgentDefLoader');
 
 const REQUIRED_FIELDS: (keyof AgentDefinition)[] = ['id', 'displayName', 'deployMode', 'detection'];
+
+/** Locations supported by the bundled Hermes definition, in its existing priority order. */
+export function hermesCliCandidatePaths(hermesHome: string): string[] {
+  const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+  const bundledCli = resolveHome(path.join(
+    hermesHome,
+    'hermes-agent',
+    'venv',
+    process.platform === 'win32' ? 'Scripts' : 'bin',
+    executable,
+  ));
+  const homeDir = process.platform === 'win32'
+    ? process.env.USERPROFILE || resolveHome('~')
+    : process.env.HOME || resolveHome('~');
+  return [bundledCli, path.join(homeDir, '.local', 'bin', executable)];
+}
 
 export interface AgentDefLoaderOptions {
   builtinDir: string;
   localDir: string;
   pilotDir: string;
   dataDir: string;
+  doubaoWork?: Partial<ListenerConfig>;
+  doubao?: Partial<ListenerConfig>;
 }
 
 export class AgentDefLoader {
@@ -22,12 +42,16 @@ export class AgentDefLoader {
   private readonly localDir: string;
   private readonly pilotDir: string;
   private readonly dataDir: string;
+  private readonly doubaoWork: AgentDefLoaderOptions['doubaoWork'];
+  private readonly doubao: AgentDefLoaderOptions['doubao'];
 
   constructor(opts: AgentDefLoaderOptions) {
     this.builtinDir = opts.builtinDir;
     this.localDir = opts.localDir;
     this.pilotDir = opts.pilotDir;
     this.dataDir = opts.dataDir;
+    this.doubaoWork = opts.doubaoWork ? { ...opts.doubaoWork } : undefined;
+    this.doubao = opts.doubao ? { ...opts.doubao } : undefined;
   }
 
   async load(): Promise<AgentDefinition[]> {
@@ -42,7 +66,9 @@ export class AgentDefLoader {
       merged.set(def.id, def);
     }
 
-    const result = [...merged.values()];
+    const sources = { 'doubao-work': this.doubaoWork ?? {}, ...(this.doubao ? { doubao: this.doubao } : {}) };
+    const result = [...merged.values()].filter(def => def.id !== 'doubao'
+      || (resolveDoubaoAppEnabled(sources) && !doubaoAppUsesLegacySource(sources)));
     logger.info('agent definitions loaded', {
       builtin: builtin.length,
       local: local.length,
@@ -99,6 +125,7 @@ export class AgentDefLoader {
       && mode !== 'directory-plugin'
       && mode !== 'detection-only'
       && mode !== 'dsh-yaml-patch'
+      && mode !== 'copilot-plugin'
     ) {
       logger.warn('invalid agent definition: unknown deployMode', { file: filePath, deployMode: mode });
       return false;
@@ -170,11 +197,25 @@ export class AgentDefLoader {
   private resolveString(s: string): string {
     const hermesHome = process.env.HERMES_HOME || '~/.hermes';
     const hermesCli = this.resolveHermesCli(hermesHome);
+    const piCodingAgentDir = resolvePiCodingAgentDir();
+    const grokHome = resolveGrokHome();
+    const dshHome = resolveDshHome();
     let result = s
       .replace(/\$PILOT_DIR/g, this.pilotDir)
       .replace(/\$PILOT_DATA/g, this.dataDir)
+      .replace(/\$DOUBAO_LOG_DIR/g, () => this.doubaoWork?.logDir
+        ? path.resolve(resolveHome(this.doubaoWork.logDir))
+        : resolveDoubaoWorkPaths(this.doubaoWork?.client).logDir ?? '$DOUBAO_LOG_DIR')
+      .replace(/\$DOUBAO_APP_LOG_DIR/g, () => this.doubao?.logDir
+        ? path.resolve(resolveHome(this.doubao.logDir))
+        : resolveDoubaoWorkPaths('doubao').logDir ?? '$DOUBAO_APP_LOG_DIR')
+      .replace(/\$DOUBAO_WORK_DATA/g, () => resolveDoubaoWorkPaths().userDataRoot ?? '$DOUBAO_WORK_DATA')
+      .replace(/\$DOUBAO_APP_DATA/g, () => resolveDoubaoWorkPaths('doubao').userDataRoot ?? '$DOUBAO_APP_DATA')
       .replace(/\$HERMES_CLI/g, hermesCli)
-      .replace(/\$HERMES_HOME/g, hermesHome);
+      .replace(/\$HERMES_HOME/g, hermesHome)
+      .replace(/\$PI_CODING_AGENT_DIR/g, piCodingAgentDir)
+      .replace(/\$GROK_HOME/g, grokHome)
+      .replace(/\$DSH_HOME/g, dshHome);
 
     result = resolveHome(result);
 
@@ -187,14 +228,9 @@ export class AgentDefLoader {
 
   private resolveHermesCli(hermesHome: string): string {
     if (process.env.HERMES_CLI) return process.env.HERMES_CLI;
-    const bundledCli = resolveHome(path.join(
-      hermesHome,
-      'hermes-agent',
-      'venv',
-      process.platform === 'win32' ? 'Scripts' : 'bin',
-      process.platform === 'win32' ? 'hermes.exe' : 'hermes',
-    ));
-    if (existsSync(bundledCli)) return bundledCli;
+    for (const candidate of hermesCliCandidatePaths(hermesHome)) {
+      if (existsSync(candidate)) return candidate;
+    }
     return process.platform === 'win32' ? 'hermes.exe' : 'hermes';
   }
 }
