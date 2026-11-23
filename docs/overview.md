@@ -30,6 +30,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Hermes Agent | Native directory plugin | Yes | Yes | Yes | Yes |
 | Kiro CLI | Hook / local session polling | Yes | Yes | No | Yes |
 | MiMo Code | Plugin injection | Yes | Yes | Yes | Yes |
+| [MiniMax Code CLI (macOS/Linux)](agents.md#minimax-code-cli) | Native plugin + session polling | Yes | Yes | Yes | Yes |
 | OpenClaw | Plugin injection | Yes | Yes | Yes | Yes |
 | OpenCode | Plugin injection | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension injection | Yes | Yes | Yes | Yes |

@@ -2864,6 +2864,73 @@ try {
     esac
 }
 
+# Remove only this installation's MiniMax Code plugin. The native profile,
+# plugin preferences, and transcripts belong to MiniMax Code.
+remove_minimax_code_plugin() {
+    local profile="${MINIMAX_DATA_DIR:-${MAVIS_DATA_DIR:-$HOME/.minimax}}"
+    local state_file="$DATA_DIR/deployed-agents.json"
+    local active_file="$DATA_DIR/state/minimax-code/active-plugin.json"
+    local node_bin="" result
+    case "$profile" in /*) ;; *) profile="$HOME/.minimax" ;; esac
+    if [ -f "$DATA_DIR/node-bin" ]; then
+        local pinned
+        pinned=$(tr -d '\r\n' < "$DATA_DIR/node-bin")
+        if _node_is_suitable "$pinned"; then node_bin="$pinned"; fi
+    fi
+    if [ -z "$node_bin" ]; then node_bin=$(resolve_node) || node_bin=""; fi
+    if [ -z "$node_bin" ]; then
+        # The authority is sufficient to revoke cached commands even when an
+        # owned directory's marker cannot be inspected without Node.
+        rm -f -- "$active_file" || return 1
+        if grep -q '"minimax-code"' "$state_file" 2>/dev/null ||
+            [ -e "$profile/plugins/loongsuite-pilot/.loongsuite-pilot-managed.json" ]; then
+            msg "    ⚠️  MiniMax Code 插件清理需要 Node.js" "    ⚠️  MiniMax Code plugin cleanup requires Node.js"
+        fi
+        return 0
+    fi
+    result=$("$node_bin" -e '
+const fs = require("fs");
+const path = require("path");
+const [stateFile, activeFile, profile, dataDir] = process.argv.slice(1);
+const targets = new Set([path.join(profile, "plugins", "loongsuite-pilot")]);
+function addTarget(target) {
+  if (typeof target === "string" && path.isAbsolute(target) &&
+      path.basename(target) === "loongsuite-pilot" && path.basename(path.dirname(target)) === "plugins") {
+    targets.add(target);
+  }
+}
+try {
+  addTarget(JSON.parse(fs.readFileSync(stateFile, "utf8"))?.["minimax-code"]?.targetDir);
+} catch {}
+try {
+  if (fs.lstatSync(activeFile).isFile()) addTarget(JSON.parse(fs.readFileSync(activeFile, "utf8"))?.targetDir);
+} catch {}
+try {
+  fs.rmSync(activeFile, { force: true });
+} catch { process.exit(1); }
+for (const target of targets) {
+  try {
+    if (!fs.lstatSync(target).isDirectory()) continue;
+    const file = path.join(target, ".loongsuite-pilot-managed.json");
+    if (!fs.lstatSync(file).isFile()) continue;
+    const marker = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (marker?.schemaVersion === 1 && marker.owner === "loongsuite-pilot" &&
+        marker.agentId === "minimax-code" && marker.dataDir === path.resolve(dataDir) &&
+        (marker.targetDir === undefined || marker.targetDir === path.resolve(target))) {
+      fs.rmSync(target, { recursive: true, force: true });
+      process.stdout.write(target + "\n");
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") process.exitCode = 1;
+  }
+}
+' "$state_file" "$active_file" "$profile" "$DATA_DIR" 2>/dev/null) || {
+        msg "    ⚠️  MiniMax Code 插件需手动清理" "    ⚠️  MiniMax Code plugin requires manual cleanup"
+        return 0
+    }
+    if [ -n "$result" ]; then msg "    ✅ 已清理: $result" "    ✅ Cleaned: $result"; fi
+}
+
 # ============================================================
 # Remove Pi Coding Agent extension injection
 # ============================================================
@@ -3271,6 +3338,10 @@ cmd_uninstall() {
     # Read the persisted target before the data/install directory is removed.
     msg "==> 清理 Hermes 插件..." "==> Cleaning up Hermes plugin..."
     remove_hermes_plugin
+    echo ""
+
+    msg "==> 清理 MiniMax Code 插件..." "==> Cleaning up MiniMax Code plugin..."
+    remove_minimax_code_plugin
     echo ""
 
     msg "==> 清理 OpenClaw 插件配置..." "==> Cleaning up OpenClaw plugin config..."

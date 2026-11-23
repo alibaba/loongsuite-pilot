@@ -20,6 +20,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'opencode': 'opencode',
   'openclaw': 'openclaw',
   'mimo-code': 'mimo-code',
+  'minimax-code': 'minimax-code',
   'pi-coding-agent': 'pi',
   'grok-build': 'grok',
   'hermes': 'hermes',

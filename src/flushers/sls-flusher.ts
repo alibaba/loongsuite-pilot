@@ -1,7 +1,7 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
 import { Agent as UndiciAgent } from 'undici';
-import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError, type BatchDelivery, type BatchDeliveryOptions } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
@@ -230,6 +230,47 @@ export class SlsFlusher extends BaseFlusher {
     if (codex.length) await this.sendCodexBatch(codex, signal);
   }
 
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal,
+    options?: BatchDeliveryOptions,
+  ): BatchDelivery {
+    if (!options?.requireAcceptance) return super.createBatchDelivery(entries, logicalBytes, signal);
+    const perType = new Map<string, Record<string, string>[]>();
+    for (const entry of entries) {
+      const type = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
+      const logs = perType.get(type) ?? [];
+      logs.push({ ...serialiseLogEntry(entry, { dropAgentScopedFields: true }), version: this.pilotVersion });
+      perType.set(type, logs);
+    }
+    const targets = this.config.endpoints.map(endpoint => {
+      const batches: QueuedLog[][] = [];
+      const limit = Math.max(1, this.config.batchMaxSize || BATCH_MAX_SIZE);
+      for (const [type, records] of perType) {
+        const logs = records.map(content => this.createQueuedLog(endpoint,
+          endpoint.redact ? redactCodeGenerationFields(content) : content, type));
+        for (let i = 0; i < logs.length; i += limit) {
+          const chunk = logs.slice(i, i + limit);
+          batches.push(...(endpoint.mode === 'webtracking' ? this.splitForWebtracking(chunk) : [chunk]));
+        }
+      }
+      return { endpoint, batches, next: 0 };
+    });
+
+    return async (attemptSignal = signal) => {
+      await this.runWithConcurrency(targets.map(target => async () => {
+        // Retain successful endpoints and earlier chunks while the input
+        // retries. A failure at one endpoint cannot replay another's receipt.
+        for (; target.next < target.batches.length; target.next++) {
+          if (!await this.deliverDirectBatch(target.endpoint, target.batches[target.next], attemptSignal)) return;
+        }
+      }), this.resolvedFlushConcurrency);
+      attemptSignal?.throwIfAborted();
+      if (targets.some(target => target.next < target.batches.length)) {
+        throw new Error('SLS did not acknowledge all batches');
+      }
+    };
+  }
+
   private async sendCodexBatch(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) throw new CodexOutputDurabilityError('SLS');
     const serialized = entries.map(entry => ({
@@ -240,28 +281,33 @@ export class SlsFlusher extends BaseFlusher {
       if (signal?.aborted) { failed = true; return; }
       const logs = serialized.map(content => this.createQueuedLog(endpoint,
         endpoint.redact ? redactCodeGenerationFields(content) : content, 'codex'));
-      const counter = this.endpointCounters.get(endpoint.name);
-      const startMs = Date.now();
-      try {
-        const outcome = await this.flushEndpoint(endpoint, logs, signal);
-        if (counter) {
-          counter.outEntries += outcome.sentEntries;
-          counter.outBytes += outcome.sentBytes;
-          counter.outFailed += outcome.failedEntries;
-          counter.totalDelayMs += Date.now() - startMs;
-          if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
-        }
-        if (outcome.failedEntries > 0) failed = true;
-      } catch (error) {
-        failed = true;
-        if (counter) {
-          counter.outFailed += logs.length;
-          counter.totalDelayMs += Date.now() - startMs;
-        }
-        if (!signal?.aborted) logger.error('SLS endpoint flush failed', { endpoint: endpoint.name, error: String(error) });
-      }
+      if (!await this.deliverDirectBatch(endpoint, logs, signal)) failed = true;
     }), this.resolvedFlushConcurrency);
     if (failed || signal?.aborted) throw new CodexOutputDurabilityError('SLS');
+  }
+
+  private async deliverDirectBatch(endpoint: SlsEndpoint, logs: QueuedLog[], signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) return false;
+    const counter = this.endpointCounters.get(endpoint.name);
+    const startMs = Date.now();
+    try {
+      const outcome = await this.flushEndpoint(endpoint, logs, signal);
+      if (counter) {
+        counter.outEntries += outcome.sentEntries;
+        counter.outBytes += outcome.sentBytes;
+        counter.outFailed += outcome.failedEntries;
+        counter.totalDelayMs += Date.now() - startMs;
+        if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
+      }
+      return outcome.failedEntries === 0;
+    } catch (error) {
+      if (counter) {
+        counter.outFailed += logs.length;
+        counter.totalDelayMs += Date.now() - startMs;
+      }
+      if (!signal?.aborted) logger.error('SLS endpoint flush failed', { endpoint: endpoint.name, error: String(error) });
+      return false;
+    }
   }
 
   async flush(): Promise<void> {

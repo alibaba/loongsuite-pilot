@@ -65,6 +65,7 @@
 | Kiro CLI | `kiro-cli` | Hook | `BaseHookInput` / `BaseInput` | `inputs/kiro-cli-*/` | `agents.d/kiro-cli.json` |
 | OpenCode | `opencode` | Plugin-Inject | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
 | MiMo Code | `mimo-code` | Plugin-Inject | `BaseHookInput` | `inputs/mimo-code-log/` | `agents.d/mimo-code.json` |
+| MiniMax Code CLI | `minimax-code` | Directory-Plugin | `BaseInput`（原生插件唤醒 + 持久会话） | `inputs/minimax-code-session/` | `agents.d/minimax-code.json` |
 | Hermes Agent | `hermes-agent` | Directory-Plugin | `BaseSessionInput` | `inputs/hermes-log/` | `agents.d/hermes-agent.json` |
 | OpenClaw | `openclaw` | Plugin-Inject | `BaseHookInput` | `inputs/openclaw-plugin/` | `agents.d/openclaw.json` |
 | Pi Coding Agent | `pi-coding-agent` | Plugin-Inject（Extension） | `BaseHookInput` | `inputs/pi-coding-agent-log/` | `agents.d/pi-coding-agent.json` |

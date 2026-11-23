@@ -137,16 +137,16 @@ export class DeploymentManager {
   }
 
   /**
-   * Handle a hook or DSH YAML agent the user has turned off. Skipping
+   * Handle an agent with a removable hook or plugin the user has turned off. Skipping
    * (re)deployment alone is not enough: an already-installed intercept keeps
-   * firing, so a prior deployment record triggers its DSH-specific cleanup.
+   * firing, so a prior deployment record triggers its strategy's cleanup.
    *
    * Gated on an existing state record: an agent the user has never enabled has
    * no record, so we never touch its settings file (matching the "does not
    * detect or deploy disabled agents" contract).
    *
-   * Scope includes hook, dsh-yaml-patch and copilot-plugin. Other deployment modes
-   * retain their existing lifecycle behavior.
+   * Scope includes hook, dsh-yaml-patch, copilot-plugin and the MiniMax Code
+   * directory plugin. Other deployment modes retain their existing lifecycle.
    *
    * The record is dropped only once cleanup succeeds. Hook uninstall is
    * idempotent (a no-op when nothing matches — hook-manager.ts), so a failure
@@ -163,9 +163,10 @@ export class DeploymentManager {
       reason: 'disabled',
     };
 
+    const minimaxPlugin = def.id === 'minimax-code' && def.deployMode === 'directory-plugin';
     if (
-      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin')
-      || !this.state[def.id]
+      (def.deployMode !== 'hook' && def.deployMode !== 'dsh-yaml-patch' && def.deployMode !== 'copilot-plugin' && !minimaxPlugin)
+      || (!this.state[def.id] && !minimaxPlugin)
     ) {
       logger.debug('agent excluded from deployment', { agentId: def.id });
       return result;
@@ -178,12 +179,12 @@ export class DeploymentManager {
     let ok = false;
     try {
       if (supportsSystemTomlHooks(def.id) && !(await this.recoverHookMigration(def))) throw new Error('Hook migration cleanup remains pending');
-      const target = applyPersistedDeployTargets(def, this.state[def.id]);
-      ok = target.deployMode === 'hook'
-        ? await this.hookStrategy.undeploy(target)
-        : target.deployMode === 'copilot-plugin'
-          ? await this.copilotPluginStrategy.undeploy(target)
-          : await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
+      const target = this.definitionForUndeploy(def);
+      if (target.deployMode === 'dsh-yaml-patch') {
+        ok = await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id]);
+      } else {
+        ok = await this.getStrategy(target).undeploy(target);
+      }
     } catch (err) {
       logger.error('agent disable undeploy failed', { agentId: def.id, error: String(err) });
     }
@@ -239,7 +240,7 @@ export class DeploymentManager {
     if (!('undeploy' in strategy) || typeof (strategy as { undeploy?: unknown }).undeploy !== 'function') {
       return false;
     }
-    const target = applyPersistedDeployTargets(def, this.state[def.id]);
+    const target = this.definitionForUndeploy(def);
     const ok = target.deployMode === 'dsh-yaml-patch'
       ? await this.dshYamlPatchStrategy.undeploy(target, this.state[def.id])
       : await (strategy as { undeploy: (def: AgentDefinition) => Promise<boolean> }).undeploy(target);
@@ -249,6 +250,14 @@ export class DeploymentManager {
       await this.saveState();
     }
     return ok;
+  }
+
+  private definitionForUndeploy(def: AgentDefinition): AgentDefinition {
+    const record = this.state[def.id];
+    const target = applyPersistedDeployTargets(def, record);
+    if (def.id !== 'minimax-code' || !target.directoryPlugin || !record?.targetDir
+      || !path.isAbsolute(record.targetDir)) return target;
+    return { ...target, directoryPlugin: { ...target.directoryPlugin, targetDir: record.targetDir } };
   }
 
   /** Load definitions and persisted state without deploying. */
