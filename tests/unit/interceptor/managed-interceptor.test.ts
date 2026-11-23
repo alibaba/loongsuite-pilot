@@ -854,6 +854,8 @@ describeUnix('interceptor service with managed rules', () => {
   async function evaluate(port: number, body: HookRequest): Promise<unknown> {
     const res = await fetch(`http://127.0.0.1:${port}/v1/hooks/evaluate`, {
       method: 'POST',
+      // Test cases shut down and rebind the same local address.
+      headers: { connection: 'close' },
       body: JSON.stringify(body),
     });
     return res.json();
