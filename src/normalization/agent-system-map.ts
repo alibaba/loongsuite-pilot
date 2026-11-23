@@ -30,6 +30,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'dsh': 'dsh',
   'antigravity': 'antigravity',
   'antigravity-cli': 'antigravity',
+  'trae-cn': 'trae',
 };
 
 export function resolveAgentSystem(agentType: string): string {
