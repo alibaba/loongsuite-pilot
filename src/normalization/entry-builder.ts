@@ -271,11 +271,7 @@ export function projectLogEntry(
     if (LEGACY_ALIAS_FIELDS.has(key)) continue;
     if (key === OPENCLAW_SESSION_KEY) {
       if (entry['gen_ai.agent.type'] !== 'openclaw' || !isOpenClawSessionKey(value)) continue;
-    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) {
-      if (!(key === 'agent.qoder.usage.billable' && typeof value === 'boolean'
-        && (entry['event.name'] === 'llm.response' || entry['event.name'] === 'gen_ai.model.response')
-        && ['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea'].includes(entry['gen_ai.agent.type']))) continue;
-    }
+    } else if (options.dropAgentScopedFields && AGENT_SCOPED_FIELD_RE.test(key)) continue;
     out[key] = value;
   }
 

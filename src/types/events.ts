@@ -98,11 +98,8 @@ export interface AgentActivityEntry {
   'gen_ai.usage.cache_read.input_cost'?: number;
   'gen_ai.usage.cache_creation.input_cost'?: number;
   'gen_ai.usage.total_cost'?: number;
-  'gen_ai.usage.cost.amount'?: number;
-  'gen_ai.usage.cost.currency'?: string;
-  'gen_ai.usage.cost.unit'?: string;
-  'gen_ai.usage.cost.source'?: 'provider' | 'local';
-  'agent.qoder.usage.billable'?: boolean;
+  'gen_ai.usage.credits.amount'?: number;
+  'gen_ai.usage.credits.billable'?: boolean;
   'gen_ai.input.messages_hash'?: string;
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;

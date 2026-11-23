@@ -18,7 +18,6 @@ import {
   enrichCliPrimary,
   enrichIdeTurn,
   injectTraceId,
-  omitUnavailableCreditOnlyTokens,
 } from '../qoder-trace/token-enricher.js';
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
@@ -301,7 +300,6 @@ export class QoderCnTraceInput extends BaseInput {
       ordered.push(...turnEntries);
     }
     if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
-    omitUnavailableCreditOnlyTokens(ordered);
     return ordered;
   }
 

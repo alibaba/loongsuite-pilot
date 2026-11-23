@@ -71,6 +71,26 @@ afterEach(() => { collector.stop(); fs.rmSync(dataDir, { recursive: true, force:
 describe.each(['qoder', 'qoder-cn'])('native %s transcript collection', id => {
   beforeEach(() => { agentId = id; collector = new QoderTranscriptCollector({ dataDir, agentId, now: () => clock }); });
 
+  it('settles a desktop turn once when its bill misses the deadline', async () => {
+    clock = base + 500;
+    const rows = turn(0, { tool: true });
+    Object.assign(rows[1], { businessIdentity: { product: 'app' }, sessionId: 'session', requestSetId: 'turn-0' });
+    const resolveTurnCredits = vi.fn().mockResolvedValue(null);
+    collector = new QoderTranscriptCollector({ dataDir, agentId, now: () => clock, resolveTurnCredits });
+    write([...rows, { type: 'last-prompt' }]);
+    wake();
+    expect((await collect()).records).toEqual([]);
+    expect(resolveTurnCredits).toHaveBeenCalledWith('session', 'turn-0');
+    clock += 10_000;
+    const settled = (await collect()).records;
+    expect(userTexts(settled)).toEqual(['prompt 0']);
+    expect(settled.filter(row => row['event.name'] === 'llm.response')).toHaveLength(2);
+    expect(settled.every(row => row['gen_ai.usage.credits.amount'] === undefined)).toBe(true);
+    resolveTurnCredits.mockResolvedValue(0.31);
+    wake();
+    expect((await collect()).records).toEqual([]);
+  });
+
   it('bootstraps only the Hook-anchored turn and retains all later queued turns', async () => {
     write([...turn(0), ...turn(1)]);
     wake();

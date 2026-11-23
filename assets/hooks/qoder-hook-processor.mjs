@@ -916,21 +916,12 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       finishReason = 'stop';
     }
 
-    const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
-      && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
-    const reportedCredits = nativeUsage?.credits;
-    const hasCredits = typeof reportedCredits === 'number' && Number.isFinite(reportedCredits) && reportedCredits >= 0;
-    const billable = nativeUsage?.billable;
-    const costFields = hasCredits ? {
-      'gen_ai.usage.cost.amount': reportedCredits,
-      'gen_ai.usage.cost.unit': agentId === 'qoder-cn' ? 'qodercn_credit' : 'qoder_credit',
-      'gen_ai.usage.cost.source': 'provider',
-    } : {};
-
-    if (outputParts.length > 0 || hasCredits || typeof billable === 'boolean') {
+    if (outputParts.length > 0) {
       // SDK/CLI native transcripts can carry per-response usage, including
       // sidechains absent from the parent's token database. One closing usage
       // belongs to one model boundary; never add repeated streaming snapshots.
+      const nativeUsage = [...content].reverse().find(row => row.type === 'assistant'
+        && row.message?.usage && typeof row.message.usage === 'object')?.message.usage;
       const usageFields = {};
       for (const [source, target] of [
         ['input_tokens', 'gen_ai.usage.input_tokens'], ['output_tokens', 'gen_ai.usage.output_tokens'],
@@ -951,8 +942,6 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.response.model': stepModel,
         'gen_ai.response.id': responseId,
         ...usageFields,
-        ...costFields,
-        ...(typeof billable === 'boolean' ? { 'agent.qoder.usage.billable': billable } : {}),
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
         'user.id': userId,
         'gen_ai.output.messages': [{

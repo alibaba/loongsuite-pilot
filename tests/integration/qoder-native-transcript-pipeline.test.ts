@@ -6,6 +6,9 @@ import { convertEventLogToReadableSpans, type EventLogRecord } from '@loongsuite
 import { QoderTraceInput } from '../../src/inputs/qoder-trace/qoder-trace-input.js';
 import { QoderCnTraceInput } from '../../src/inputs/qoder-cn-trace/qoder-cn-trace-input.js';
 import { InputManager } from '../../src/core/input-manager.js';
+import { StateStore } from '../../src/checkpoints/state-store.js';
+import { loadDatabaseSync } from '../../src/utils/node-sqlite.js';
+import * as creditsReader from '../../src/inputs/qoder-trace/turn-credits-reader.js';
 import { MockStateStore } from '../helpers/mock-state-store.js';
 import { MockFlusher } from '../helpers/mock-flusher.js';
 import { publishQoderWakeup } from '../../assets/hooks/qoder/hook-wakeup.mjs';
@@ -14,18 +17,18 @@ import type { AgentActivityEntry } from '../../src/types/index.js';
 const secret = 'sk-' + 'synthetic'.repeat(4); // Construct an artificial mask fixture, never a credential.
 const maskedSecret = '[APIKEY_MASKED]{sk-s' + '*'.repeat(31) + 'etic}';
 const epoch = Date.now() - 60_000;
-const at = (turn: number, ms: number) => new Date(epoch + turn * 10_000 + ms).toISOString();
-function rows(turn: number, cli: boolean) {
+const historicalTime = (turn: number, ms: number) => new Date(epoch + turn * 10_000 + ms).toISOString();
+function rows(turn: number, cli: boolean, at = historicalTime) {
   const progress = (hookEvent: string, ms: number) => ({ type: 'progress', timestamp: at(turn, ms), data: { hookEvent } });
   return [progress('UserPromptSubmit', 0),
     { type: 'user', uuid: `user-${turn}`, timestamp: at(turn, 10), ...(cli ? { entrypoint: 'cli' } : {}), message: { role: 'user', content: `prompt ${turn} ${secret}` } },
     // Native progress can arrive after its user row; it must not split the Turn.
     progress('UserPromptSubmit', 20),
-    { type: 'assistant', timestamp: at(turn, 100), message: { id: `response-${turn}-0`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-0`, credits: turn + 0.125, billable: false }, content: [{ type: 'tool_use', id: `tool-${turn}`, name: 'Read', input: { path: secret } }], stop_reason: 'tool_use' } },
+    { type: 'assistant', timestamp: at(turn, 100), message: { id: `response-${turn}-0`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-0` }, content: [{ type: 'tool_use', id: `tool-${turn}`, name: 'Read', input: { path: secret } }], stop_reason: 'tool_use' } },
     progress('PreToolUse', 120),
     { type: 'user', timestamp: at(turn, 200), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `tool-${turn}`, content: `result ${secret}` }] } },
     progress('PostToolUse', 220),
-    { type: 'assistant', timestamp: at(turn, 300), message: { id: `response-${turn}-1`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-1`, credits: turn + 0.25, billable: true }, content: [{ type: 'text', text: `answer ${turn} ${secret}` }], stop_reason: 'end_turn' } },
+    { type: 'assistant', timestamp: at(turn, 300), message: { id: `response-${turn}-1`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-1` }, content: [{ type: 'text', text: `answer ${turn} ${secret}` }], stop_reason: 'end_turn' } },
     progress('Stop', 400), { type: 'last-prompt' },
     // Real CLI 1.1.81 also persists local command envelopes as user records.
     // They must not add execution IDs or inputs between the model turns.
@@ -39,6 +42,88 @@ afterEach(async () => {
   await manager?.stopAll(); manager = undefined;
   if (root) await fs.rm(root, { recursive: true, force: true });
   vi.restoreAllMocks();
+});
+
+describe.skipIf(!loadDatabaseSync()).each(['qoder', 'qoder-cn'] as const)('%s desktop turn Credits', agentId => {
+  it('joins late native charges after a restart and keeps them off model and input copies', async () => {
+    root = await fs.mkdtemp(path.join(os.tmpdir(), 'qoder-turn-credits-'));
+    const transcript = path.join(root, 'native.jsonl');
+    const statePath = path.join(root, 'state.json');
+    const dbPath = path.join(root, 'main.sqlite');
+    vi.spyOn(creditsReader, 'resolveQoderTurnCreditsDbPath').mockReturnValue(dbPath);
+    const Database = loadDatabaseSync()!;
+    const sessionId = 'desktop-session';
+    const db = new Database(dbPath);
+    const flusher = new MockFlusher();
+    const wake = () => expect(publishQoderWakeup({
+      session_id: sessionId, transcript_path: transcript, hook_event_name: 'Stop', cwd: root,
+    }, { dataDir: root, agentId })).toBe(true);
+    const now = Date.now() - 2500;
+    const desktopRows = (turn: number) => rows(turn, false, (t, ms) => new Date(now + t * 1000 + ms).toISOString())
+      .map(row => {
+        if (row.type === 'user' && 'uuid' in row) {
+          return { ...row, sessionId, requestSetId: `turn-${turn}`, businessIdentity: { product: 'app' } };
+        }
+        if (row.type === 'assistant') {
+          // Per-call Credits can still appear in compatible clients. The
+          // actual turn debit is independent of those reported amounts.
+          return { ...row, message: { ...row.message, usage: { input_tokens: 100, output_tokens: 10, credits: 9 } } };
+        }
+        return row;
+      });
+    const start = async () => {
+      const stateStore = new StateStore(statePath);
+      await stateStore.load();
+      const Ctor = agentId === 'qoder' ? QoderTraceInput : QoderCnTraceInput;
+      const input = new Ctor({ stateStore, dataDir: root, logDir: path.join(root, 'history'), pollIntervalMs: 60_000 });
+      vi.spyOn(input as any, 'readIdeSqliteTokens').mockResolvedValue({ rows: [], matchedDbPath: null });
+      vi.spyOn(input as any, 'readCliIntercept').mockResolvedValue({ systemPrompt: null, tokens: [] });
+      vi.spyOn(input as any, 'readCliSegments').mockResolvedValue([]);
+      manager = new InputManager();
+      manager.setFlusher(flusher);
+      manager.registerInput(input);
+      await input.start();
+      await (input as any).cyclePromise;
+      return input;
+    };
+
+    try {
+      db.exec(`CREATE TABLE chat_session_messages (
+        session_id TEXT, turn_id TEXT, turn_credits_request_set_id TEXT,
+        role TEXT, status TEXT, turn_credits REAL)`);
+      const addCharge = db.prepare("INSERT INTO chat_session_messages VALUES (?, ?, ?, 'assistant', 'completed', ?)");
+      addCharge.run(sessionId, 'turn-0', 'previous-request', 12);
+      addCharge.run('another-session', 'turn-0', 'turn-0', 8);
+      addCharge.run(sessionId, 'turn-1', 'turn-1', 0);
+      const first = desktopRows(0);
+      await fs.writeFile(transcript, jsonl(first.slice(0, 2)));
+      wake();
+      // The next prompt closes the first turn before its debit is written.
+      await fs.appendFile(transcript, jsonl([...first.slice(2, -1), ...desktopRows(1)]));
+      wake();
+      await start();
+      expect(flusher.batchCalls).toEqual([]);
+      await manager!.stopAll();
+      expect(await fs.readFile(statePath, 'utf8')).toContain('"pendingCreditClose": "next-prompt"');
+
+      addCharge.run(sessionId, 'turn-0', 'turn-0', 0.31);
+      const input = await start();
+      const entries = flusher.batchCalls.flat();
+      const openers = entries.filter(row => row['gen_ai.turn.start'] === true);
+      expect(openers.map(row => row['gen_ai.usage.credits.amount'])).toEqual([0.31, 0]);
+      expect(openers.map(row => row['gen_ai.usage.credits.billable'])).toEqual([true, undefined]);
+      expect(entries.filter(row => !openers.includes(row)).every(row =>
+        row['gen_ai.usage.credits.amount'] === undefined && row['gen_ai.usage.credits.billable'] === undefined)).toBe(true);
+      expect(entries.filter(row => row['event.name'] === 'llm.response').map(row =>
+        row['gen_ai.usage.input_tokens'])).toEqual([100, 100, 100, 100]);
+      expect(new Set(entries.map(row => row['event.id'])).size).toBe(entries.length);
+      wake();
+      await (input as any).runCycle();
+      expect(flusher.batchCalls.flat()).toHaveLength(entries.length);
+    } finally {
+      db.close();
+    }
+  });
 });
 
 describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched output', agentId => {
@@ -105,8 +190,6 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     const entries = flusher.batchCalls.flat();
     const responses = entries.filter(row => row['event.name'] === 'llm.response');
     expect(responses).toHaveLength(6);
-    expect(responses.map(row => row['gen_ai.usage.cost.amount'])).toEqual([0.125, 0.25, 1.125, 1.25, 2.125, 2.25]);
-    expect(responses.map(row => row['agent.qoder.usage.billable'])).toEqual([false, true, false, true, false, true]);
     expect(entries.filter(row => row['event.name'] === 'llm.request')).toHaveLength(6);
     expect(entries.filter(row => row['event.name'] === 'tool.call')).toHaveLength(3);
     expect(entries.filter(row => row['event.name'] === 'tool.result')).toHaveLength(3);

@@ -32,6 +32,8 @@ export function expandAgentInputEvents(
     const derivedEntry = { ...entry };
     delete derivedEntry['gen_ai.turn.start'];
     delete derivedEntry['gen_ai.turn.end'];
+    delete derivedEntry['gen_ai.usage.credits.amount'];
+    delete derivedEntry['gen_ai.usage.credits.billable'];
     expanded.push({
       ...derivedEntry,
       'event.id': derivedEventId,
