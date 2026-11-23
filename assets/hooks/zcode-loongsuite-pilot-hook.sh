@@ -24,6 +24,10 @@ case "$SUBCOMMAND" in
     ;;
 esac
 
+if [[ -z "${LOONGSUITE_PILOT_DATA_DIR:-}" ]]; then
+  export LOONGSUITE_PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
+
 log_error() {
   local stage="$1"
   local message="$2"
@@ -79,11 +83,11 @@ node_is_suitable() {
   return 0
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="${LOONGSUITE_PILOT_CACHE_DIR:-$LOONGSUITE_PILOT_DATA_DIR}/node-bin"
 NODE_BIN=""
 
 if [[ -f "$NODE_PIN_FILE" ]]; then
-  pinned="$(cat "$NODE_PIN_FILE" 2>/dev/null | tr -d '[:space:]')"
+  pinned="$(tr -d '\r\n' < "$NODE_PIN_FILE" 2>/dev/null)"
   if [[ -n "$pinned" ]] && node_is_suitable "$pinned"; then
     NODE_BIN="$pinned"
   fi

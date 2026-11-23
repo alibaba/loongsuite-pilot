@@ -57,7 +57,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -93,7 +93,7 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
@@ -105,10 +105,10 @@ function legacyHookCommands(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([

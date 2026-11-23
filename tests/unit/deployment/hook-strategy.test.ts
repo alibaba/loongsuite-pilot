@@ -344,6 +344,38 @@ describe('HookStrategy', () => {
       }
     });
 
+    it.each(['darwin', 'win32'] as const)('registers the nested ZCode Stop hook on %s with a spaced install path', async platform => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = platform === 'win32'
+          ? 'C:/Users/Test User/Pilot/hooks/zcode-loongsuite-pilot-hook.ps1'
+          : '/Users/Test User/Pilot/hooks/zcode-loongsuite-pilot-hook.sh';
+        await strategy.needsDeploy(makeDef({
+          id: 'zcode',
+          hook: {
+            settingsPath: '/home/test/.zcode/cli/config.json',
+            events: ['Stop'],
+            hookCommand: script,
+            format: 'nested',
+            eventsRoot: 'events',
+            eventSubcommand: 'kebab-case',
+          },
+        }));
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'events', 'Stop'],
+          hookCommand: platform === 'win32'
+            ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}" stop`
+            : `'${script}' stop`,
+          replaceHookCommands: [`${script} stop`, ...(platform === 'darwin' ? [`"${script}" stop`] : [])],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('preserves the existing Windows command format for non-Codex hook agents', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
