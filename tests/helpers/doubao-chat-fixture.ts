@@ -3,14 +3,14 @@ import { DOUBAO_EPOCH } from './doubao-work-fixture.js';
 import { chatCrc32c, readVarint } from '../../src/inputs/doubao-work/doubao-chat-table.js';
 
 export function chatBatch(options: { sequence?: number; session?: string; finished?: boolean; output?: string;
-  input?: string; conversation?: string; localMessage?: string; queryMs?: number } = {}): Buffer {
+  input?: string; reused?: boolean; conversation?: string; localMessage?: string; queryMs?: number } = {}): Buffer {
   const session = options.session ?? 'synthetic-chat-turn';
   const conversation = options.conversation ?? 'synthetic-conversation';
   const local = options.localMessage ?? 'synthetic-local-message';
   const text = (value: string, finished = true) => [{ block_type: 10000, is_finish: finished, content: { text_block: { text: value } } }];
   const task = {
     sessionId: session,
-    requestQuery: { syncTask: { option: { unique_key: session, conversation_mode: 1, agent_mode: 2,
+    requestQuery: { syncTask: { option: { unique_key: session, ...(options.reused ? {} : { conversation_mode: 1 }), agent_mode: 2,
       create_time_ms: options.queryMs ?? DOUBAO_EPOCH + 10 } } },
     sentMessages: { 'synthetic-query': { sessionId: session, uniqueId: local, extra: {
       user_type: 1, message_id: 'synthetic-query', conversation_id: conversation, content_blocks_v2: text(options.input ?? 'SYNTHETIC_CHAT_INPUT'),

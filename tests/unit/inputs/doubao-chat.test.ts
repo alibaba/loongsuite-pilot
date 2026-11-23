@@ -140,7 +140,7 @@ describe('Doubao ordinary chat collection', () => {
     await appendFile(file, chatWal([chatBatch({ sequence: 2 })]));
     const first = await input.poll(); expect(first).toHaveLength(2);
     await appendFile(log, lifecycle('next-chat-turn', DOUBAO_EPOCH + 100));
-    await appendFile(file, chatWal([chatBatch({ sequence: 3, session: 'next-chat-turn', queryMs: DOUBAO_EPOCH + 110 })]));
+    await appendFile(file, chatWal([chatBatch({ sequence: 3, session: 'next-chat-turn', reused: true, queryMs: DOUBAO_EPOCH + 110 })]));
     const second = await input.poll(); expect(second).toHaveLength(2);
     expect(second[0].trace_id).not.toBe(first[0].trace_id); expect(await input.poll()).toEqual([]);
   });

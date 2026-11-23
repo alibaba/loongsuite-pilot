@@ -290,7 +290,7 @@ function projectChatTask(sessionId: string, value: unknown): DoubaoChatContent |
   const task = value as Record<string, any>;
   const query = task?.requestQuery?.syncTask;
   if (!ID.test(sessionId) || task?.sessionId !== sessionId || query?.option?.unique_key !== sessionId
-    || query.option.conversation_mode !== 1 || query.option.agent_mode !== 2
+    || (query.option.conversation_mode !== undefined && query.option.conversation_mode !== 1) || query.option.agent_mode !== 2
     || !Number.isSafeInteger(query.option.create_time_ms)) return undefined;
   const sent = Object.values(task.sentMessages ?? {}) as Record<string, any>[];
   const received = Object.values(task.receivedMessages ?? {}) as Record<string, any>[];
