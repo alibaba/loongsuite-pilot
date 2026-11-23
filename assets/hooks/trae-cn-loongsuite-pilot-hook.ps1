@@ -12,6 +12,10 @@ $EMPTY_RESULT = '{}'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "trae-cn-hook-processor.mjs"
+$NodeRuntime = Join-Path $ScriptDir "shared\common.ps1"
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = Split-Path $ScriptDir -Parent
+}
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 if ($Subcommand -notin @("session-start", "user-prompt-submit", "pre-tool-use", "post-tool-use", "stop", "notification")) {
@@ -35,60 +39,21 @@ function Log-Error {
     } catch {}
 }
 
-if (-not (Test-Path $Processor)) {
+if (-not (Test-Path -LiteralPath $Processor)) {
     Write-Error "[trae-cn-hook] processor not found: $Processor"
     Log-Error "missing_processor" "hook processor not found: $Processor"
     Write-Output $EMPTY_RESULT
     exit 0
 }
 
-$MIN_NODE_MAJOR = 18
-
-function Test-NodeSuitable {
-    param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
-    try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
-        return $major -ge $MIN_NODE_MAJOR
-    } catch { return $false }
+$nodeBin = $null
+if (Test-Path -LiteralPath $NodeRuntime) {
+    . $NodeRuntime
+    $nodeBin = Resolve-NodeBin
 }
-
-function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
-    }
-
-    $candidates = @()
-    $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
-    }
-    $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
-    }
-    $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
-    $candidates += "C:\Program Files\nodejs\node.exe"
-    $candidates += "C:\Program Files (x86)\nodejs\node.exe"
-    $pathNode = Get-Command node -ErrorAction SilentlyContinue
-    if ($pathNode) { $candidates += $pathNode.Source }
-
-    foreach ($c in $candidates) {
-        if (Test-NodeSuitable $c) { return $c }
-    }
-    return $null
-}
-
-$nodeBin = Resolve-NodeBin
 if (-not $nodeBin) {
-    Write-Error "[trae-cn-hook] node >= $MIN_NODE_MAJOR not found"
-    Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
+    Write-Error "[trae-cn-hook] node >= 18 not found"
+    Log-Error "missing_node" "node >= 18 not found"
     Write-Output $EMPTY_RESULT
     exit 0
 }
