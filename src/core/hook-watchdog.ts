@@ -1,13 +1,16 @@
 import { spawn, execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
-import { statSync, type Stats } from 'node:fs';
+import { existsSync, readFileSync, statSync, type Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import type { HookWatchdogConfig } from '../types/index.js';
-import { directoryExists, fileExists } from '../utils/fs-utils.js';
+import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
+import { directoryExists, fileExists, writeTextFileAtomic } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { createLogger } from '../utils/logger.js';
+import { HookAssetLockError, hookUpgradeInProgress, withHookAssetLock } from '../utils/hook-asset-lock.js';
 
 const execFileAsync = promisify(execFile);
 const logger = createLogger('HookWatchdog');
@@ -15,6 +18,31 @@ const logger = createLogger('HookWatchdog');
 const STARTUP_DELAY_MS = 30_000;
 const REPAIR_TIMEOUT_MS = 30_000;
 const MAX_INTERCEPT_REPAIRS_PER_DAY = 3;
+
+/** `current` and `versions/` live in the cache dir. pilotDir is versions/<name>. */
+export function getControlDir(pilotDir: string, dataDir: string): string {
+  const versionsDir = path.dirname(pilotDir);
+  return path.basename(versionsDir) === 'versions' ? path.dirname(versionsDir) : dataDir;
+}
+
+/** An upgrade in progress, or a newer active version. */
+export async function upgradeBlocksRepair(pilotDir: string, dataDir: string): Promise<boolean> {
+  const controlDir = getControlDir(pilotDir, dataDir);
+  if (await hookUpgradeInProgress(controlDir)) return true;
+  const active = readActiveVersionDir(controlDir);
+  return active !== null && path.resolve(active) !== path.resolve(pilotDir);
+}
+
+export function readActiveVersionDir(controlDir: string): string | null {
+  try {
+    const versionName = readFileSync(path.join(controlDir, 'current'), 'utf8').trim();
+    if (!versionName) return null;
+    const versionDir = path.join(controlDir, 'versions', versionName);
+    return existsSync(versionDir) ? versionDir : null;
+  } catch {
+    return null;
+  }
+}
 
 export interface PluginCheckTarget {
   agentId: string;
@@ -251,6 +279,10 @@ export class HookWatchdog {
   private readonly lastInvalidConfigByTarget: Map<string, string> = new Map();
   private readonly dailyRepairCount: Map<string, number> = new Map();
   private dailyRepairResetDate = '';
+  private readonly assetRoots?: { pilotDir: string; dataDir: string };
+  private readonly redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+  private hookRedownloadAttempted = false;
+  private assetCheckInFlight = false;
   private startupTimer: ReturnType<typeof setTimeout> | null = null;
   private intervalTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -258,10 +290,17 @@ export class HookWatchdog {
     config: HookWatchdogConfig,
     targets?: PluginCheckTarget[],
     interceptTargets?: InterceptCheckTarget[],
+    assetRoots?: {
+      pilotDir: string;
+      dataDir: string;
+      redownloadHooks?: (expected: Readonly<Record<string, string>>) => Promise<boolean>;
+    },
   ) {
     this.config = config;
     this.targets = targets ?? [];
     this.interceptTargets = interceptTargets ?? [];
+    this.assetRoots = assetRoots;
+    this.redownloadHooks = assetRoots?.redownloadHooks;
     this.captureInitialChangeSignatures();
   }
 
@@ -297,6 +336,15 @@ export class HookWatchdog {
   async runCheck(): Promise<CheckResult> {
     const summary: CheckResult = { checked: 0, repaired: 0, skipped: 0 };
 
+    try {
+      await this.checkHookAssets();
+    } catch (err) {
+      logger.error('hook-watchdog.repair-failed', {
+        action: 'hook-asset',
+        error: String(err),
+      });
+    }
+
     for (const target of this.targets) {
       try {
         const result = await this.checkTarget(target);
@@ -318,6 +366,198 @@ export class HookWatchdog {
     await this.checkInterceptTargets(summary);
 
     return summary;
+  }
+
+  /** Restore deployed hook files whose bytes no longer match HOOK_ASSET_MANIFEST. */
+  private async checkHookAssets(): Promise<void> {
+    if (!this.assetRoots) return;
+    if (this.assetCheckInFlight) {
+      logger.debug('hook-watchdog.skipped', { reason: 'asset-check-in-flight' });
+      return;
+    }
+    this.assetCheckInFlight = true;
+    try {
+      const { pilotDir, dataDir } = this.assetRoots;
+      // A recent marker can also cover a postinstall worker surviving an updater exit.
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      await this.restoreDeployedHookAssets(pilotDir, dataDir);
+    } finally {
+      this.assetCheckInFlight = false;
+    }
+  }
+
+  private async restoreDeployedHookAssets(pilotDir: string, dataDir: string): Promise<void> {
+    const listed = Object.keys(HOOK_ASSET_MANIFEST);
+    if (listed.length === 0) return;
+    this.hookRedownloadAttempted = false;
+
+    const sourceRoot = path.join(pilotDir, 'assets', 'hooks');
+    const sourceKind = (await this.classifyPath(sourceRoot)).kind;
+    if (sourceKind !== 'directory') {
+      logger.warn('hook-watchdog.skipped', { reason: sourceKind === 'symlink' ? 'symlink' : 'hook-assets-missing', path: sourceRoot });
+      return;
+    }
+    const targetRoot = path.join(dataDir, 'hooks');
+    if ((await this.classifyPath(targetRoot)).kind === 'symlink') {
+      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: targetRoot });
+      return;
+    }
+
+    for (const relativePath of listed) {
+      if (await upgradeBlocksRepair(pilotDir, dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      try {
+        await this.restoreListedHookAsset(
+          sourceRoot,
+          targetRoot,
+          relativePath,
+          HOOK_ASSET_MANIFEST[relativePath],
+        );
+      } catch (err) {
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, error: String(err) });
+      }
+    }
+  }
+
+  /** Classify a path without following symlinks. */
+  private async classifyPath(filePath: string): Promise<{ kind: 'directory' | 'file' | 'symlink' | 'missing'; mode: number }> {
+    let stat: Stats;
+    try {
+      stat = await fs.lstat(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'missing', mode: 0 };
+      throw err;
+    }
+    if (stat.isSymbolicLink()) return { kind: 'symlink', mode: stat.mode };
+    if (stat.isDirectory()) return { kind: 'directory', mode: stat.mode };
+    if (stat.isFile()) return { kind: 'file', mode: stat.mode };
+    return { kind: 'missing', mode: stat.mode };
+  }
+
+  /** Restore one listed hook file so its deployed bytes match the manifest. */
+  private async restoreListedHookAsset(
+    sourceRoot: string,
+    targetRoot: string,
+    relativePath: string,
+    expected: string,
+  ): Promise<void> {
+    if (await this.parentIsSymlink(targetRoot, relativePath)) {
+      logger.warn('hook-watchdog.skipped', { reason: 'symlink', path: relativePath });
+      return;
+    }
+
+    const source = path.join(sourceRoot, relativePath);
+    const target = path.join(targetRoot, relativePath);
+    const executable = relativePath.endsWith('.sh') || relativePath.endsWith('.ps1');
+    const mode = executable ? 0o755 : 0o644;
+    // Compare the deployed file with the manifest.
+    const targetPath = await this.classifyPath(target);
+    if (targetPath.kind === 'file') {
+      const targetHash = createHash('sha256').update(await fs.readFile(target)).digest('hex');
+      if (targetHash === expected) {
+        if (executable && process.platform !== 'win32' && (targetPath.mode & 0o111) === 0) {
+          const fixed = await this.withHookAssets(async () => {
+            await fs.chmod(target, mode);
+            logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath, reason: 'mode' });
+            return 'written' as const;
+          });
+          if (fixed === 'blocked') return;
+        }
+        return;
+      }
+    }
+
+    // Replace it from the install copy when that copy matches.
+    const wrote = await this.writeMatchingAsset(source, target, relativePath, expected, mode);
+    if (wrote !== 'mismatch') return;
+
+    // Re-download the current version once, then try the install copy again.
+    if (!this.hookRedownloadAttempted && this.redownloadHooks) {
+      this.hookRedownloadAttempted = true;
+      let downloaded = false;
+      try {
+        downloaded = await this.redownloadHooks(HOOK_ASSET_MANIFEST);
+      } catch (err) {
+        logger.warn('hook-watchdog.redownload-skipped', { reason: 'redownload', error: String(err) });
+      }
+      if (!downloaded) {
+        logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason: 'redownload' });
+        return;
+      }
+      // The download can outlast the check at the start of this file.
+      const roots = this.assetRoots;
+      if (roots && await upgradeBlocksRepair(roots.pilotDir, roots.dataDir)) {
+        logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+        return;
+      }
+      const restored = await this.writeMatchingAsset(source, target, relativePath, expected, mode);
+      if (restored !== 'mismatch') return;
+    }
+    const reason = (await this.classifyPath(source)).kind === 'file' ? 'asset-hash-mismatch' : 'asset-missing';
+    logger.error('hook-watchdog.repair-failed', { action: 'hook-asset', path: relativePath, reason });
+  }
+
+  /**
+   * Read and write one deployed file while holding the hook-asset lock.
+   * An upgrade holds the same lock through activation or rollback.
+   */
+  private async withHookAssets(
+    body: () => Promise<'written' | 'mismatch'>,
+  ): Promise<'written' | 'blocked' | 'mismatch'> {
+    const roots = this.assetRoots;
+    if (!roots) return 'blocked';
+    try {
+      return await withHookAssetLock(getControlDir(roots.pilotDir, roots.dataDir), async () => {
+        if (await upgradeBlocksRepair(roots.pilotDir, roots.dataDir)) {
+          logger.info('hook-watchdog.skipped', { reason: 'upgrade-in-progress' });
+          return 'blocked';
+        }
+        return body();
+      });
+    } catch (err) {
+      if (!(err instanceof HookAssetLockError)) throw err;
+      logger.warn('hook-watchdog.skipped', { reason: 'hook-asset-lock', error: err.message });
+      return 'blocked';
+    }
+  }
+
+  /** Copy the install file onto the deployed path when its bytes hash to `expected`. */
+  private async writeMatchingAsset(
+    source: string,
+    target: string,
+    relativePath: string,
+    expected: string,
+    mode: number,
+  ): Promise<'written' | 'blocked' | 'mismatch'> {
+    return this.withHookAssets(async () => {
+      if ((await this.classifyPath(source)).kind !== 'file') return 'mismatch';
+      const sourceBytes = await fs.readFile(source);
+      if (createHash('sha256').update(sourceBytes).digest('hex') !== expected) return 'mismatch';
+
+      await writeTextFileAtomic(target, sourceBytes.toString('utf8'), { mode, preserveMode: true });
+      await fs.chmod(target, mode);
+      logger.warn('hook-watchdog.repair', { action: 'hook-asset', path: relativePath });
+      return 'written';
+    });
+  }
+
+  /** True when an existing parent of relativePath is a symlink. The file itself is lstat'd by the caller. */
+  private async parentIsSymlink(root: string, relativePath: string): Promise<boolean> {
+    const parts = relativePath.split(/[\\/]/).filter(part => part && part !== '.');
+    parts.pop();
+    let current = root;
+    for (const part of parts) {
+      current = path.join(current, part);
+      const kind = (await this.classifyPath(current)).kind;
+      if (kind === 'symlink') return true;
+      if (kind === 'missing') return false;
+    }
+    return false;
   }
 
   private async checkTarget(target: PluginCheckTarget): Promise<TargetResult> {

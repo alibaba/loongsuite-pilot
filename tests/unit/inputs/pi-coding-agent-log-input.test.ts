@@ -183,11 +183,12 @@ describe('PiCodingAgentLogInput', () => {
     );
 
     let cpuTimeMs = 0;
+    const historyReplay = { cpuNow: () => cpuTimeMs };
     const input = new PiCodingAgentLogInput({
       stateStore: stateStore as never,
       logDir: tmpDir,
       pollIntervalMs: 10,
-      historyReplay: { cpuNow: () => cpuTimeMs },
+      historyReplay,
       agentEnabled: agentType => {
         if (agentType !== 'disabled-code') return true;
         // A replay cycle can run out of processing time after this record.
@@ -211,6 +212,7 @@ describe('PiCodingAgentLogInput', () => {
     const restarted = new PiCodingAgentLogInput({
       stateStore: stateStore as never,
       logDir: tmpDir,
+      historyReplay,
       agentEnabled: () => true,
     });
     const replayed: AgentActivityEntry[] = [];
