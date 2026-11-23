@@ -1,5 +1,5 @@
 import { readJournal } from '../../helpers/codex-journal.js';
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { CodexTurnJournal, codexTurnJournalGroupKey } from '../../../src/flushers/codex-turn-journal.js';
@@ -111,7 +111,13 @@ describe('CodexTurnJournal', () => {
     const next = entry('next', { 'gen_ai.turn.id': 'next-turn' });
     journal.bindConfiguredUserId(next);
     await journal.append([next]);
-    await journal.acknowledge([next]);
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 60_000);
+    try {
+      await journal.acknowledge([next]);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(await journal.isAcknowledged(next)).toBe(true);
     const expired = entry('expired', { 'user.id': 'corrected' });
     journal.bindConfiguredUserId(expired, 'original');
     expect(expired['user.id']).toBe('corrected');

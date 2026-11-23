@@ -5,6 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
@@ -56,6 +57,12 @@ function groupKeyForUserId(entry: AgentActivityEntry, userId: string): string {
     // must not split one pending execution into differently ordered files.
     return createHash('sha256').update(JSON.stringify([
       'openclaw-cron-v1', entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
+    ])).digest('hex');
+  }
+  if (resolveAgentSystem(entry['gen_ai.agent.type']) === 'antigravity') {
+    // Match the flusher's native session and turn scope across identity changes.
+    return createHash('sha256').update(JSON.stringify([
+      entry['gen_ai.agent.type'], entry['gen_ai.session.id'], entry['gen_ai.turn.id'],
     ])).digest('hex');
   }
   const identity = [
@@ -294,8 +301,10 @@ export class CodexTurnJournal {
           const temporary = path.join(this.dir, `.codex-done-${randomUUID()}.tmp`);
           const configuredOwner = this.configuredOwners.get(key);
           await fs.writeFile(temporary, JSON.stringify({ version: 1, key, configuredOwner }), { mode: 0o600 });
+          // Use the same filesystem clock for new and restored acknowledgements.
+          const { mtimeMs } = await fs.stat(temporary);
           await fs.rename(temporary, this.doneFile(key));
-          acknowledged.set(key, Date.now());
+          acknowledged.set(key, mtimeMs);
         }
         // The durable acknowledgement must exist before deleting pending content.
         await fs.unlink(this.file(key)).catch(error => { if (error.code !== 'ENOENT') throw error; });

@@ -2490,4 +2490,26 @@ describe('ConfigLoader', () => {
       expect(config.mask).toEqual(mask);
     });
   });
+
+  describe('Antigravity family default listeners', () => {
+    it('enables the shared App and IDE listener and the CLI listener with 30-second polling', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners).not.toHaveProperty('antigravity-ide');
+    });
+
+    it('respects per-variant Antigravity listener overrides from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          antigravity: { enabled: false },
+          'antigravity-cli': { enabled: true, pollInterval: 5_000 },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: false, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 5_000 });
+    });
+  });
 });

@@ -1,7 +1,11 @@
 import { readFileSync } from 'node:fs';
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
-import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
+import {
+  DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+  globalPollIntervalMs,
+} from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
@@ -884,6 +888,8 @@ function buildListenersConfig(
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
+    'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
