@@ -2062,6 +2062,28 @@ impl HookStrategy {
             )
             .ok()?;
             let cache = hook_cache_dir(data);
+            // publish-package deploys hooks from the staged candidate before
+            // committing the current pointer. Only that candidate's own process
+            // may pin its sibling during the install transaction.
+            if crate::utils::runtime_paths::runtime_metadata(&cache.join("update-recovery.json"))
+                .is_ok_and(|meta| meta.is_file())
+                && pilot.parent()?.canonicalize().ok()?
+                    == cache.join("versions").canonicalize().ok()?
+                && std::env::current_exe().ok()?.canonicalize().ok()?
+                    == crate::utils::runtime_paths::resource_file(
+                        pilot,
+                        &format!("bin/{}", pilot_binary_name()),
+                    )
+                    .ok()?
+                    .canonicalize()
+                    .ok()?
+            {
+                return Some(
+                    super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                        .ok()?
+                        .map_or(binary, |runtime| runtime.hook_path().to_owned()),
+                );
+            }
             if super::native_install::read_pointer(&cache.join("current"))
                 .ok()?
                 .is_some()
