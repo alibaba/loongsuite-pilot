@@ -29,6 +29,7 @@ export enum ClientType {
   CodexSession = 'codex-session',
   QoderCli = 'qoder-cli',
   CursorCli = 'cursor-cli',
+  AntigravityCli = 'antigravity-cli',
   PiCodingAgent = 'pi-coding-agent',
   TraeAgent = 'trae-agent',
 
