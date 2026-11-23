@@ -1442,7 +1442,18 @@ fn packaged_hook_companion_write_failure_rolls_back_and_retries() {
             )
             .unwrap();
             assert_eq!(settings_data["userField"], "保留🚀");
-            assert!(data.join("hooks/pilot-bin").is_file());
+            if id == "codex" {
+                assert!(!data.join("hooks/pilot-bin").exists());
+                let handlers = settings_data["hooks"]["Stop"].as_array().unwrap();
+                assert!(handlers
+                    .iter()
+                    .flat_map(|group| group["hooks"].as_array().unwrap())
+                    .any(|hook| hook["command"]
+                        .as_str()
+                        .is_some_and(|cmd| cmd.contains(" sdk-hook --channel "))));
+            } else {
+                assert!(data.join("hooks/pilot-bin").is_file());
+            }
             if let Some(before) = before {
                 assert_eq!(
                     (fs::read(&settings).unwrap(), fs::read(&companion).unwrap()),
