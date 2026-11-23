@@ -26,6 +26,7 @@ interface Source {
   tableEntries?: Generator<{ key: Buffer; value: Buffer; sequence: bigint }>;
   tableBytes?: number;
   tableTasks?: Map<string, { sequence: bigint; value: DoubaoChatContent }>;
+  readError?: unknown;
 }
 
 export interface DoubaoChatContent {
@@ -90,7 +91,9 @@ export class DoubaoChatReader {
         if (error instanceof DoubaoWorkDeferred) throw error;
         readError = error; continue;
       }
-      const task = this.files.get(name)?.tasks.get(sessionId);
+      const source = this.files.get(name);
+      if (source?.readError) { readError = source.readError; continue; }
+      const task = source?.tasks.get(sessionId);
       if (!task) continue;
       const database = path.dirname(name), previous = candidates.get(database);
       if (!previous || task.sequence > previous.sequence) candidates.set(database, task);
@@ -98,7 +101,7 @@ export class DoubaoChatReader {
     }
     const results = [...candidates.values()];
     if (results.length > 1 && results.some(task => JSON.stringify(task.value) !== JSON.stringify(results[0].value))) return undefined;
-    if (!results.length && readError) throw readError;
+    if (readError) throw readError;
     return results[0]?.value;
   }
 
@@ -181,25 +184,29 @@ export class DoubaoChatReader {
           if (chatCrc32c(buffer.subarray(position + 6, position + 7 + length)) !== unmaskChatCrc(buffer.readUInt32LE(position))) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;
-            throw new Error('Doubao chat WAL checksum mismatch');
+            source.readError = new Error('Doubao chat WAL checksum mismatch');
+            throw source.readError;
           }
           if (type === 1 || type === 2) { source.fragment = []; source.fragmentBytes = 0; }
           if (![1, 2, 3, 4].includes(type) || ((type === 3 || type === 4) && source.fragmentBytes === 0)) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;
-            throw new Error('Invalid Doubao chat WAL fragment');
+            source.readError = new Error('Invalid Doubao chat WAL fragment');
+            throw source.readError;
           }
           const fragments = [...source.fragment, Buffer.from(payload)];
           const fragmentBytes = source.fragmentBytes + payload.length;
           if (fragmentBytes > MAX_RECORD_BYTES) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;
-            throw new Error('Doubao chat WAL record capacity exceeded');
+            source.readError = new Error('Doubao chat WAL record capacity exceeded');
+            throw source.readError;
           }
           if (type === 1 || type === 4) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;
-            this.consume(decodeChatWriteBatch(Buffer.concat(fragments)), source, sessionId);
+            try { this.consume(decodeChatWriteBatch(Buffer.concat(fragments)), source, sessionId); }
+            catch (error) { source.readError = error; throw error; }
             source.fragment = []; source.fragmentBytes = 0;
           } else { source.fragment = fragments; source.fragmentBytes = fragmentBytes; }
           budget.record();
@@ -227,6 +234,7 @@ export class DoubaoChatReader {
   }
 
   private consume(entries: { sequence: bigint; value: DoubaoChatContent }[], source: Source, sessionId: string): void {
+    if (entries.length) source.readError = undefined;
     for (const entry of entries) {
       const current = source.tasks.get(entry.value.sessionId);
       if (!current || entry.sequence > current.sequence) source.tasks.set(entry.value.sessionId, entry);

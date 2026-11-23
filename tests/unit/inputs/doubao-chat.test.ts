@@ -102,6 +102,20 @@ describe('Doubao ordinary chat collection', () => {
     expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('replacement'.repeat(300));
   });
 
+  it('keeps a request pending when another source could contain a newer unreadable record', async () => {
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([chatBatch()]));
+    const newer = path.join(path.dirname(file), '000004.log');
+    const corrupt = chatWal([chatBatch({ sequence: 2, output: 'NEWER_OUTPUT' })]);
+    corrupt[50] ^= 1;
+    await writeFile(newer, corrupt);
+    const reader = new DoubaoChatReader(root);
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('checksum');
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('checksum');
+    await writeFile(newer, chatWal([chatBatch({ sequence: 3, output: 'RECOVERED_OUTPUT' })]));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('RECOVERED_OUTPUT');
+  });
+
   it('preserves pending content through checkpoint reload and late final write', async () => {
     const { store, file, log } = await setup();
     const input = new Probe({ stateStore: store, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
