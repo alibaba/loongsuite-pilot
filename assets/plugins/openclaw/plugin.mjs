@@ -745,9 +745,9 @@ function getRun(runId, event, ctx) {
       pendingAssistantResponses: new Map(),
       modelCallStartedAtNanos: new Map(),
       assistantResponseCallIds: new Set(),
-      toolStepCallIds: new Map(),
+      latestToolInvocations: new Map(),
       pendingToolInputMessages: [],
-      persistedToolCallIds: new Set(),
+      persistedToolInvocations: new Set(),
       perCallUsage: new Map(),
       delegatedToolCallIds: new Set(),
     };
@@ -862,9 +862,9 @@ function resetCompletedRunState(run) {
   run.pendingAssistantResponses.clear();
   run.modelCallStartedAtNanos.clear();
   run.assistantResponseCallIds.clear();
-  run.toolStepCallIds.clear();
+  run.latestToolInvocations.clear();
   run.pendingToolInputMessages.length = 0;
-  run.persistedToolCallIds.clear();
+  run.persistedToolInvocations.clear();
   run.perCallUsage.clear();
 }
 
@@ -1538,7 +1538,7 @@ function handleBeforeToolCall(event, ctx, userId, emit) {
     // Keep invocation state together. Reusing a native ID in a later step must
     // not overwrite a pending result's span, step or start time.
     pushBounded(run.pendingToolInvocations, invocation);
-    if (stepId) setBounded(run.toolStepCallIds, toolCallId, stepId);
+    setBounded(run.latestToolInvocations, toolCallId, { spanId, stepId });
   }
   const record = {
     ...common,
@@ -1596,9 +1596,9 @@ function handleAfterToolCall(event, ctx, userId, emit) {
   const stepId = invocation ? invocation.stepId : run.currentStepCallId || run.lastCallId;
   const common = buildCommonFields(run, run.sessionId, userId);
   const startedAtNanos = invocation?.startedAtNanos;
-  if (invocation && stepId) {
+  if (invocation) {
     // Persistence hooks must see the invocation that just completed.
-    setBounded(run.toolStepCallIds, invocation.toolCallId, stepId);
+    setBounded(run.latestToolInvocations, invocation.toolCallId, { spanId: invocation.spanId, stepId });
   }
   const nativeCompletedAtNanos = completionNanos(startedAtNanos, event?.durationMs);
   const observedAtNanos = common.observed_time_unix_nano;
@@ -1699,22 +1699,25 @@ function handleAfterToolCall(event, ctx, userId, emit) {
 
 function handleToolResultPersist(event, ctx, userId, emit) {
   const run = resolveContextRun(event, ctx);
-  if (!run) return;
+  if (!run) return false;
   const toolCallId = event?.message?.toolCallId || event?.toolCallId;
-  if (toolCallId && !run.persistedToolCallIds.has(toolCallId)) {
+  const invocation = toolCallId ? run.latestToolInvocations.get(toolCallId) : undefined;
+  // Native IDs can be reused across steps. The invocation's span stays
+  // stable across duplicate persistence hooks for the same result.
+  const persistenceKey = invocation ? `span:${invocation.spanId}` : toolCallId && `native:${toolCallId}`;
+  const firstPersist = Boolean(persistenceKey && !run.persistedToolInvocations.has(persistenceKey));
+  if (firstPersist) {
     const inputMessage = buildToolResultInputMessage(event);
     if (inputMessage) pushBounded(run.pendingToolInputMessages, inputMessage);
-    addBounded(run.persistedToolCallIds, toolCallId);
+    addBounded(run.persistedToolInvocations, persistenceKey);
   }
-  const stepId = run
-    ? ((toolCallId && run.toolStepCallIds.get(toolCallId)) || run.currentStepCallId || run.lastCallId)
-    : undefined;
+  const stepId = invocation?.stepId || run.currentStepCallId || run.lastCallId;
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
     "gen_ai.step.id": stepId,
     "gen_ai.tool.name": event?.toolName,
-    "gen_ai.tool.call.id": event?.toolCallId,
+    "gen_ai.tool.call.id": toolCallId,
     "agent.openclaw.hook": "tool_result_persist",
     "agent.openclaw.persisted_message": event?.message
       ? truncateContent(safeJsonClone(event.message))
@@ -1722,6 +1725,7 @@ function handleToolResultPersist(event, ctx, userId, emit) {
     "agent.openclaw.is_synthetic": event?.isSynthetic,
   };
   emit(record);
+  return firstPersist;
 }
 
 function buildAssistantOutputMessagesFromOpenClawMessage(message) {

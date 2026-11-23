@@ -282,6 +282,30 @@ describe('OpenClaw plugin stateful pipeline', () => {
     expect(missing[0].span_id).not.toBe(missing[1].span_id);
   });
 
+  it('passes each persisted result once to the next model request after a tool ID is reused', async () => {
+    const handlers = registerPlugin(await loadPlugin());
+    const ctx = { runId: 'persisted-tool-reuse', sessionId: 'reuse-session', sessionKey: 'agent:main:reuse' };
+    const tool = { toolName: 'read', toolCallId: 'reused-id' };
+    handlers.model_call_started({ callId: 'model-0' }, ctx);
+    for (const [index, response] of ['first result', 'second result'].entries()) {
+      await handlers.before_tool_call(tool, ctx);
+      handlers.after_tool_call({ ...tool, result: response }, ctx);
+      const persisted = { ...tool, message: { toolCallId: tool.toolCallId, role: 'toolResult',
+        content: [{ type: 'text', text: response }] } };
+      const persistenceContext = { sessionKey: ctx.sessionKey, agentId: 'main' };
+      handlers.tool_result_persist(persisted, persistenceContext);
+      handlers.tool_result_persist(persisted, persistenceContext);
+      handlers.model_call_started({ callId: `model-${index + 1}` }, ctx);
+    }
+
+    const records = readOutputRecords();
+    assertCompleteToolPairs(records);
+    const requests = records.filter(record => record['event.name'] === 'llm.request').slice(1);
+    expect(requests.map(record => (record['gen_ai.input.messages_delta'] ?? [])
+      .filter(message => message.role === 'tool').flatMap(message => message.parts.map(part => part.response))))
+      .toEqual([['first result'], ['second result']]);
+  });
+
   it.each([false, true])('pairs delayed reused tool IDs with invocation state (same step: %s)', async sameStep => {
     const handlers = registerPlugin(await loadPlugin());
     const ctx = { runId: 'overlap-span-run', sessionId: 'session' };

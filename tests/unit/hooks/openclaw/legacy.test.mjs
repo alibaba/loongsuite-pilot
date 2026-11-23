@@ -98,6 +98,32 @@ describe('OpenClaw 3.8 legacy adapter', () => {
     expect(result.every(r => r['agent.openclaw.session_key'] === ctx.sessionKey)).toBe(true);
   });
 
+  it('keeps the persisted result and timing for each reuse of a legacy tool ID', () => {
+    input();
+    const toolCallId = 'legacy-reused';
+    for (const [index, text] of ['first result', 'second result'].entries()) {
+      fire('before_message_write', { message: message(`tool-model-${index}`, [
+        { type: 'toolCall', id: toolCallId, name: 'read', arguments: { path: String(index) } },
+      ], 'toolUse') });
+      const tool = { runId: 'run-1', toolCallId, toolName: 'read' };
+      fire('before_tool_call', tool);
+      fire('after_tool_call', { ...tool, result: text });
+      const persisted = { toolCallId, toolName: 'read',
+        message: { role: 'toolResult', toolCallId, content: [{ type: 'text', text }] } };
+      fire('tool_result_persist', persisted);
+      fire('tool_result_persist', persisted);
+    }
+    fire('before_message_write', { message: message('final-model') });
+    finish();
+
+    const requests = records().filter(record => record['event.name'] === 'llm.request').slice(1);
+    expect(requests.map(record => record['agent.openclaw.timing.source']))
+      .toEqual(['tool_result_persist', 'tool_result_persist']);
+    expect(requests.map(record => (record['gen_ai.input.messages_delta'] ?? [])
+      .filter(message => message.role === 'tool').flatMap(message => message.parts.map(part => part.response))))
+      .toEqual([['first result'], ['second result']]);
+  });
+
   it('preserves parallel tool IDs, per-call tokens and inferred timing through final spans', async () => {
     input();
     fire('before_message_write', { message: message('r1', [
