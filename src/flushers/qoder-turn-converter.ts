@@ -15,6 +15,8 @@ export const QODER_TRANSCRIPT_AGENT_TYPES = new Set(['qoder', 'qoder-cli', 'qode
 const WORK_KEYS = ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.agent.scope',
   'gen_ai.agent.parent.id', 'gen_ai.agent.parent.invocation.id', 'gen_ai.subagent.parent_tool_call.id'] as const;
 const OUTGOING_KEYS = ['gen_ai.agent.invocation.id', 'gen_ai.agent.peer.id', 'gen_ai.agent.peer.name'] as const;
+const COST_KEYS = ['gen_ai.usage.cost.amount', 'gen_ai.usage.cost.currency',
+  'gen_ai.usage.cost.unit', 'gen_ai.usage.cost.source', 'agent.qoder.usage.billable'] as const;
 
 function consensus(records: EventLogRecord[], keys: readonly string[]): Record<string, unknown> {
   const fields: Record<string, unknown> = {};
@@ -87,12 +89,17 @@ export function prepareQoderTurn(
   const work = consensus(records, WORK_KEYS);
   const byStep = new Map<unknown, EventLogRecord[]>();
   const byTool = new Map<unknown, EventLogRecord[]>();
+  const byResponse = new Map<unknown, EventLogRecord[]>();
   for (const record of records) {
     if (record['event.name'] === 'other') continue;
     const step = record['gen_ai.step.id'];
     if (step) byStep.set(step, [...(byStep.get(step) ?? []), record]);
     const call = record['gen_ai.tool.call.id'];
     if (call) byTool.set(call, [...(byTool.get(call) ?? []), record]);
+    const response = record['gen_ai.response.id'];
+    if (record['event.name'] === 'llm.response' && response) {
+      byResponse.set(response, [...(byResponse.get(response) ?? []), record]);
+    }
   }
   const steps = [...byStep.keys()];
   let stepIndex = 0;
@@ -113,7 +120,7 @@ export function prepareQoderTurn(
   }
   function attributes(inv: { passthroughAttributes?: Record<string, unknown> }, own: Record<string, unknown>) {
     const fields = { ...inv.passthroughAttributes };
-    for (const key of [...WORK_KEYS, ...OUTGOING_KEYS, 'gen_ai.step.id']) delete fields[key];
+    for (const key of [...WORK_KEYS, ...OUTGOING_KEYS, ...COST_KEYS, 'gen_ai.step.id']) delete fields[key];
     inv.passthroughAttributes = { ...fields, ...own };
   }
   const overrides: Partial<ExtendedTelemetryHandler> = {
@@ -139,8 +146,13 @@ export function prepareQoderTurn(
       return reserved(stableId('step', currentStep), () => handler.startReactStep(invocation, context, start));
     },
     startLlm(invocation, context, start) {
+      const candidates = invocation.responseId ? byResponse.get(invocation.responseId) ?? []
+        : (byStep.get(currentStep) ?? []).filter(record => record['event.name'] === 'llm.response');
+      const ownResponse = candidates.length === 1 ? candidates[0] : undefined;
+      const cost = ownResponse ? Object.fromEntries(COST_KEYS
+        .filter(key => ownResponse[key] !== undefined).map(key => [key, ownResponse[key]])) : {};
       attributes(invocation, { ...consensus(byStep.get(currentStep) ?? [], WORK_KEYS),
-        ...(currentStep ? { 'gen_ai.step.id': currentStep } : {}) });
+        ...(currentStep ? { 'gen_ai.step.id': currentStep } : {}), ...cost });
       return reserved(stableId('llm', currentStep), () => handler.startLlm(invocation, context, start));
     },
     startExecuteTool(invocation, context, start) {

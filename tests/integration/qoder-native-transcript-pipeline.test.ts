@@ -21,11 +21,11 @@ function rows(turn: number, cli: boolean) {
     { type: 'user', uuid: `user-${turn}`, timestamp: at(turn, 10), ...(cli ? { entrypoint: 'cli' } : {}), message: { role: 'user', content: `prompt ${turn} ${secret}` } },
     // Native progress can arrive after its user row; it must not split the Turn.
     progress('UserPromptSubmit', 20),
-    { type: 'assistant', timestamp: at(turn, 100), message: { id: `response-${turn}-0`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-0` }, content: [{ type: 'tool_use', id: `tool-${turn}`, name: 'Read', input: { path: secret } }], stop_reason: 'tool_use' } },
+    { type: 'assistant', timestamp: at(turn, 100), message: { id: `response-${turn}-0`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-0`, credits: turn + 0.125, billable: false }, content: [{ type: 'tool_use', id: `tool-${turn}`, name: 'Read', input: { path: secret } }], stop_reason: 'tool_use' } },
     progress('PreToolUse', 120),
     { type: 'user', timestamp: at(turn, 200), message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: `tool-${turn}`, content: `result ${secret}` }] } },
     progress('PostToolUse', 220),
-    { type: 'assistant', timestamp: at(turn, 300), message: { id: `response-${turn}-1`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-1` }, content: [{ type: 'text', text: `answer ${turn} ${secret}` }], stop_reason: 'end_turn' } },
+    { type: 'assistant', timestamp: at(turn, 300), message: { id: `response-${turn}-1`, model: 'synthetic-model', role: 'assistant', usage: { request_id: `req-${turn}-1`, credits: turn + 0.25, billable: true }, content: [{ type: 'text', text: `answer ${turn} ${secret}` }], stop_reason: 'end_turn' } },
     progress('Stop', 400), { type: 'last-prompt' },
     // Real CLI 1.1.81 also persists local command envelopes as user records.
     // They must not add execution IDs or inputs between the model turns.
@@ -105,6 +105,8 @@ describe.each(['qoder', 'qoder-cn'] as const)('%s native transcript to enriched 
     const entries = flusher.batchCalls.flat();
     const responses = entries.filter(row => row['event.name'] === 'llm.response');
     expect(responses).toHaveLength(6);
+    expect(responses.map(row => row['gen_ai.usage.cost.amount'])).toEqual([0.125, 0.25, 1.125, 1.25, 2.125, 2.25]);
+    expect(responses.map(row => row['agent.qoder.usage.billable'])).toEqual([false, true, false, true, false, true]);
     expect(entries.filter(row => row['event.name'] === 'llm.request')).toHaveLength(6);
     expect(entries.filter(row => row['event.name'] === 'tool.call')).toHaveLength(3);
     expect(entries.filter(row => row['event.name'] === 'tool.result')).toHaveLength(3);

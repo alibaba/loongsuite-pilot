@@ -52,6 +52,28 @@ async function flush(input: AgentActivityEntry[]) {
 }
 
 describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flusher and SDK', agentType => {
+  it('exports fractional Credits only on their own LLM and preserves non-billable and zero values', async () => {
+    const input = records(agentType);
+    const responses = input.filter(record => record['event.name'] === 'llm.response');
+    Object.assign(responses[0], { 'gen_ai.usage.cost.amount': 0.125, 'gen_ai.usage.cost.unit': 'qoder_credit',
+      'gen_ai.usage.cost.source': 'provider', 'agent.qoder.usage.billable': false });
+    Object.assign(responses[1], { 'gen_ai.usage.cost.amount': 0, 'gen_ai.usage.cost.unit': 'qoder_credit',
+      'gen_ai.usage.cost.source': 'provider' });
+    const spans = await flush(input);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms.find(span => span.attributes['gen_ai.response.id'] === 'r1')!.attributes).toMatchObject({
+      'gen_ai.usage.cost.amount': 0.125, 'gen_ai.usage.cost.unit': 'qoder_credit',
+      'gen_ai.usage.cost.source': 'provider', 'agent.qoder.usage.billable': false,
+      'gen_ai.usage.input_tokens': 10, 'gen_ai.usage.output_tokens': 2 });
+    expect(llms.find(span => span.attributes['gen_ai.response.id'] === 'r2')!.attributes['gen_ai.usage.cost.amount']).toBe(0);
+    expect(llms.find(span => span.attributes['gen_ai.response.id'] === 'r2')!.attributes['agent.qoder.usage.billable']).toBeUndefined();
+    for (const span of spans.filter(span => !llms.includes(span))) {
+      expect(span.attributes['gen_ai.usage.cost.amount']).toBeUndefined();
+      expect(span.attributes['gen_ai.usage.cost.unit']).toBeUndefined();
+    }
+    expect(spans.every(span => span.attributes['gen_ai.usage.cost.currency'] === undefined)).toBe(true);
+  });
+
   it('exports a complete root without changing source trace, messages, tools or per-LLM tokens', async () => {
     const input = records(agentType);
     const before = structuredClone(input);
@@ -111,6 +133,17 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
 });
 
 describe('Qoder root converter compatibility', () => {
+  it('matches costs by response identity when multiple responses share a step', async () => {
+    const input = records('qoder-cn').filter(record => record['event.name'] === 'llm.response').map((record, index) => ({
+      ...record, 'gen_ai.step.id': 'shared-step', 'gen_ai.usage.cost.amount': index + 0.125,
+      'gen_ai.usage.cost.unit': 'qodercn_credit', 'gen_ai.usage.cost.source': 'provider',
+    }));
+    const spans = await flush(input);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms.find(span => span.attributes['gen_ai.response.id'] === 'r1')!.attributes['gen_ai.usage.cost.amount']).toBe(0.125);
+    expect(llms.find(span => span.attributes['gen_ai.response.id'] === 'r2')!.attributes['gen_ai.usage.cost.amount']).toBe(1.125);
+  });
+
   it.each(['shared', 'missing'])('keeps response-only LLM IDs unique and replay-stable with %s step identity', async shape => {
     const input = records('qoder-cn').filter(record => record['event.name'] === 'llm.response').map(record => {
       const row = { ...record, 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'response' }] }] };

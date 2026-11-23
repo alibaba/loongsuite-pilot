@@ -24,6 +24,7 @@ import {
   enrichIdeTurn,
   injectTraceId,
   needsCliSegmentFallback,
+  omitUnavailableCreditOnlyTokens,
 } from './token-enricher.js';
 import { enrichCliMultimodal } from './qoder-cli-multimodal.js';
 import { clearAttachedImagePathsCache, enrichIdeMultimodal } from './qoder-ide-multimodal.js';
@@ -359,6 +360,7 @@ export class QoderTraceInput extends BaseInput {
     }
 
     saveNative();
+    omitUnavailableCreditOnlyTokens(rawEntries);
     return rawEntries;
   }
 

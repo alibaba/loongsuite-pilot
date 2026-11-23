@@ -11,6 +11,7 @@ import {
   enrichIdeTurn,
   injectTraceId,
   needsCliSegmentFallback,
+  omitUnavailableCreditOnlyTokens,
 } from '../../../src/inputs/qoder-trace/token-enricher.js';
 import {
   clearAttachedImagePathsCache,
@@ -75,6 +76,24 @@ function makeEntry(overrides: Partial<AgentActivityEntry> = {}): AgentActivityEn
     ...overrides,
   } as AgentActivityEntry;
 }
+
+describe('Qoder Credits without exposed tokens', () => {
+  it('omits suppressed zero usage after enrichment while retaining measured tokens and legacy responses', () => {
+    const creditOnly = makeEntry({ 'gen_ai.usage.cost.amount': 0.125, 'gen_ai.usage.cost.unit': 'qodercn_credit',
+      'gen_ai.usage.input_tokens': 0, 'gen_ai.usage.output_tokens': 0, 'gen_ai.usage.total_tokens': 0 });
+    const measured = makeEntry({ 'gen_ai.usage.cost.amount': 0.25, 'gen_ai.usage.cost.unit': 'qoder_credit',
+      'gen_ai.usage.input_tokens': 42, 'gen_ai.usage.output_tokens': 0 });
+    const legacy = makeEntry({ 'gen_ai.usage.input_tokens': 0, 'gen_ai.usage.output_tokens': 0 });
+    omitUnavailableCreditOnlyTokens([creditOnly, measured, legacy]);
+    expect(creditOnly['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(creditOnly['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(creditOnly['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(creditOnly['gen_ai.usage.cost.amount']).toBe(0.125);
+    expect(measured['gen_ai.usage.input_tokens']).toBe(42);
+    expect(measured['gen_ai.usage.output_tokens']).toBe(0);
+    expect(legacy['gen_ai.usage.input_tokens']).toBe(0);
+  });
+});
 
 function makeIntercept(overrides: Partial<InterceptTokenData> = {}): InterceptTokenData {
   return {

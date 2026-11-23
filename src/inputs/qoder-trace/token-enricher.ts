@@ -373,6 +373,17 @@ function hasPositiveEntryUsage(entry: AgentActivityEntry): boolean {
     positiveNumber(entry['gen_ai.usage.total_tokens']);
 }
 
+export function omitUnavailableCreditOnlyTokens(entries: AgentActivityEntry[]): void {
+  const tokenKeys = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens',
+    'gen_ai.usage.cache_read.input_tokens', 'gen_ai.usage.cache_creation.input_tokens'] as const;
+  for (const entry of entries) {
+    if (entry['event.name'] !== 'llm.response' || typeof entry['gen_ai.usage.cost.amount'] !== 'number'
+      || !['qoder_credit', 'qodercn_credit'].includes(String(entry['gen_ai.usage.cost.unit']))
+      || tokenKeys.some(key => positiveNumber(entry[key]))) continue;
+    for (const key of tokenKeys) delete entry[key];
+  }
+}
+
 function positiveNumber(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
