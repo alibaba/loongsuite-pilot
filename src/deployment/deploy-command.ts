@@ -125,6 +125,7 @@ export async function runDeployCommand(argv: string[]): Promise<number> {
 
   const manager = new DeploymentManager({
     dataDir, pilotDir, installedBy: 'build', doubaoWork: config.listeners['doubao-work'],
+    doubao: config.listeners.doubao,
     deployInterceptorHooks: shouldDeployInterceptorHooks(config.interceptor),
   });
   const results = await manager.deployAll(def => isAgentGatedEnabled(config, def.id));
