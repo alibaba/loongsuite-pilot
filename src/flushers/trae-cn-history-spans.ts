@@ -62,7 +62,6 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         const startTime = earlier(instant, existing.startTime) ? instant : existing.startTime;
         const endTime = earlier(existing.endTime, instant) ? instant : existing.endTime;
         Object.assign(existing, { startTime, endTime, duration: hrTimeDuration(startTime, endTime) });
-        parent = existing.spanContext().spanId;
         continue;
       }
       const id = createHash('sha256').update([trace, isStream ? 'stream/' + shared : r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
@@ -135,7 +134,8 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       if ((isStream || (!shared && layer === 'round')) && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
         if (typeof call === 'string') parents.set(call, { span: observation, history: shared || r.id });
       }
-      parent = id;
+      // Stream-scoped evidence and per-history rounds are sibling STEPs.
+      if (!isStream) parent = id;
     }
   }
   let unassigned = false;

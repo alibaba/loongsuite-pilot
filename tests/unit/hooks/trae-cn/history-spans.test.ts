@@ -69,7 +69,7 @@ it('retains shared input, observed usage and tool ownership once per response st
   expect(tool.attributes['loongsuite.trae_cn.history_id']).toBeUndefined();
   for (const [i, model] of models.entries()) {
     const round = steps[i + 1];
-    expect(round.parentSpanId).toBe(steps[0].spanContext().spanId);
+    expect(round.parentSpanId).toBe(agent.spanContext().spanId);
     expect(round.attributes['gen_ai.step.id']).toBe(rounds[i].id);
     expect(model.attributes['gen_ai.step.id']).toBe(rounds[i].id);
     expect(model.parentSpanId).toBe(round.spanContext().spanId);
