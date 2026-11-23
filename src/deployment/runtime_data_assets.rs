@@ -35,6 +35,15 @@ pub(crate) const SKILLS: &[&str] = &[
 ];
 
 const NODE_HOOK_ASSETS: &[&str] = &[
+    "hooks/codex-loongsuite-pilot-hook.sh",
+    "hooks/codex-loongsuite-pilot-hook.ps1",
+    "hooks/codex-hook-processor.mjs",
+    "hooks/shared/decode-payload.mjs",
+    "hooks/shared/error-logger.mjs",
+    "hooks/shared/hook-metrics.mjs",
+    "hooks/shared/resource-context.mjs",
+    "hooks/shared/sync-file-lock.mjs",
+    "hooks/shared/upstream-context.mjs",
     "hooks/qoder-loongsuite-pilot-hook.sh",
     "hooks/qoder-loongsuite-pilot-hook.ps1",
     "hooks/interceptor-hook.sh",
@@ -43,6 +52,11 @@ const NODE_HOOK_ASSETS: &[&str] = &[
 
 const QODER_CLI_WRAPPER: &str = "hooks/qodercli-runtime-wrapper.sh";
 const QODER_CLI_PRELOAD: &str = "hooks/qodercli-token-intercept.mjs";
+
+fn executable_hook_asset(relative: &str) -> bool {
+    relative == QODER_CLI_WRAPPER
+        || (NODE_HOOK_ASSETS.contains(&relative) && !relative.ends_with(".mjs"))
+}
 
 fn qoder_cli_asset(relative: &str) -> bool {
     cfg!(unix) && matches!(relative, QODER_CLI_WRAPPER | QODER_CLI_PRELOAD)
@@ -432,7 +446,7 @@ impl RuntimeDataAssets {
             #[cfg(unix)]
             let executable_repair = {
                 use std::os::unix::fs::PermissionsExt;
-                relative == QODER_CLI_WRAPPER
+                executable_hook_asset(&relative)
                     && std::fs::metadata(&path)
                         .is_ok_and(|meta| meta.permissions().mode() & 0o100 == 0)
             };
@@ -516,11 +530,10 @@ impl RuntimeDataAssets {
         }
         for file in &self.files {
             if file.needs_write() {
-                if file.key == key(QODER_CLI_WRAPPER)
-                    || file
-                        .key
-                        .strip_prefix(binding::RESOURCE_PREFIX)
-                        .is_some_and(|path| NODE_HOOK_ASSETS.contains(&path))
+                if file
+                    .key
+                    .strip_prefix(binding::RESOURCE_PREFIX)
+                    .is_some_and(executable_hook_asset)
                 {
                     transaction.write(&file.key, &file.bytes, 0o755)?;
                 } else {
