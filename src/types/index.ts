@@ -10,9 +10,9 @@ export interface ListenerConfig {
   pollInterval: number;
   /** Restrict the Qwen Work collaboration input to these conversation IDs. */
   includeConversationIds?: string[];
-  /** Read-only source log directory override for the doubao-work listener. */
+  /** Read-only source log directory override for a Doubao product listener. */
   logDir?: string;
-  /** Product source for the doubao-work listener; defaults to Doubao Work. */
+  /** Legacy source selection on doubao-work; use separate product listeners for concurrent collection. */
   client?: 'doubao-work' | 'doubao';
 }
 
@@ -239,7 +239,13 @@ export interface MultimodalRuntimeConfig {
 }
 
 /** Agent ids with multimodal extraction implemented. */
-export const MULTIMODAL_SUPPORTED_AGENT_IDS = ['codex', 'qoder', 'qwen-work-cn'] as const;
+export const MULTIMODAL_SUPPORTED_AGENT_IDS = [
+  'codex',
+  'qoder',
+  'qwen-work-cn',
+  'antigravity',
+  'antigravity-cli',
+] as const;
 
 /** Experimental per-agent multimodal policy (`uploadMode: none` disables). */
 export interface AgentMultimodalConfig {

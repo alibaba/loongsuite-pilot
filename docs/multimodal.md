@@ -16,7 +16,7 @@ Multimodal also needs an explicit `config.multimodal.storage` block; a matching 
 | Item | Status |
 |------|--------|
 | Media types | **Images** and **video**. Audio is future work. |
-| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, and **`qwen-work-cn`**. Other agents ignore `uploadMode` until their extractors land. |
+| Implemented agents | **`codex`**, **`qoder` (IDE and CLI)**, **`qwen-work-cn`**, and **`antigravity` / `antigravity-cli`**. Other agents ignore `uploadMode` until their extractors land. |
 
 ### Detection
 
@@ -28,6 +28,7 @@ Where each agent finds images. Surfaces collected after it is enabled are in [Wh
 | Qoder IDE | SQLite attachments; transcript | Local path |
 | Qoder CLI | transcript | Local path (paste / `@` / Read / ImageGen), read from disk, then `uri` |
 | Qwen Work CN | transcript | Local path (paste tag, `Read`, `qwenwork_media_read`, generate and present tools) |
+| Antigravity App / new IDE and CLI | transcript (`transcript.jsonl`) | Local path (`media[].uri` on `USER_INPUT`, `SYSTEM_MESSAGE`, `PLANNER_RESPONSE`, and tool-result steps) |
 
 ## How To Enable
 
@@ -91,7 +92,7 @@ Unknown values fall back to `none`.
 
 ## allowedRootPaths
 
-`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`, `QwenWorkCNTraceInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
+`pathToUri` only reads files inside allowed roots. Configured under `agents.<id>.multimodal.allowedRootPaths` and **merged with that agent's defaults** (not a replace). Defaults live on the agent Input (`QoderTraceInput`, `CodexTranscriptInput`, `QwenWorkCNTraceInput`, `AntigravityInput`); the Input merges user paths with those defaults and canonicalizes them once (`~` expand, `realpath`). `multimodal` only enforces the resulting list.
 
 Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd is **not** added to the allowlist. Workspace paths and directories such as `~/Documents` need an explicit `allowedRootPaths` entry.
 
@@ -100,6 +101,7 @@ Extractors still join relative `@` / Read paths with `agent.qoder.cwd`, but cwd 
 | `qoder` | `~/.qoder/tmp` (CLI paste / clipboard), `~/.qoder/vibe_images` (ImageGen), and the desktop IDE paste cache `…/Qoder/SharedClientCache/cache/images` (`~/Library/Application Support/Qoder` / `%APPDATA%/Qoder` / `~/.config/Qoder`; Linux remote hashed profiles use `<appRoot>/<hash>/SharedClientCache/cache/images`). |
 | `codex` | `~/.codex` (reserved; Codex today uses inline base64, not disk paths). |
 | `qwen-work-cn` | `~/.qwenworkcn/workspace` (clipboard paste `uploads/`) and `~/.qwenworkcn/tmp`. |
+| `antigravity` / `antigravity-cli` | `~/.gemini/antigravity/brain` and `~/.gemini/antigravity-cli/brain` respectively. |
 
 UNC/device paths and symlinks are skipped. An image suffix is accepted only when the bytes are an image header. Video suffixes `.mp4`, `.mov`, `.m4v`, `.3gp`, and `.3g2` need `ftyp` at offset 4, and the major brand must not be `M4A `, `M4B `, or `M4P `. `.webm` and `.mkv` need an EBML header. `.avi` needs `RIFF` with `AVI ` at offset 8. A suffix and header from different families are skipped. Local paths are treated as filesystem paths. A URL query after the extension (for example `a.png?x=1` in markdown) is not stripped; `pathToUri` will not fall back to the path with the query removed.
 
@@ -112,6 +114,7 @@ The table below describes what multimodal collection actually captures per agent
 | `codex` | Yes | See [Codex](#codex) below. |
 | `qoder` | Yes | See [Qoder IDE](#qoder-ide) and [Qoder CLI](#qoder-cli) below. |
 | `qwen-work-cn` | Yes | See [Qwen Work CN](#qwen-work-cn) below. |
+| `antigravity` / `antigravity-cli` | Yes | See [Antigravity](#antigravity) below. |
 | Others | No | Setting `uploadMode` has no effect today. |
 
 ### Codex
@@ -180,6 +183,22 @@ Notes:
 - `uri` and `originalUri` on a present result repeat `filePath`. Only `filePath` is taken.
 - OSS URLs are not a collection source.
 - Selected, dragged, Read, found, and generated files live in the session directory. Reading them requires that directory in `allowedRootPaths`.
+
+### Antigravity
+
+Antigravity converts local image and video `media[].uri` entries recorded in `<dataRoot>/brain/<sessionId>/.system_generated/logs/transcript.jsonl` via `MultimodalProcessor.pathToUri`. The App and new IDE share `agents.antigravity.multimodal`. The CLI uses `agents.antigravity-cli.multimodal`. Text and token collection continue if media conversion fails.
+
+| `uploadMode` | Antigravity surface | Typical user action / event |
+|--------------|---------------------|-----------------------------|
+| `none` | No conversion | — |
+| `input` | `USER_INPUT` / step-0 `SYSTEM_MESSAGE` `media[].uri` (`other` and `llm.request` `messages_delta`) and tool-result step `media[].uri` (`tool.result` and `llm.request` `messages_delta`) | Paste/attach image or video; browser screenshots or media returned by tools |
+| `output` | `PLANNER_RESPONSE` `media[].uri` (`llm.response` `gen_ai.output.messages`) | Assistant replies attaching generated/rendered images or videos |
+| `all` | All of the above | User attachments, tool-result media, and assistant output media |
+
+Notes:
+
+- Default `allowedRootPaths` is `<dataRoot>/brain` (merged with user-configured `allowedRootPaths`, canonicalized once at startup). Files outside allowed roots, UNC/device paths, and symlinks are skipped.
+- Media resolution is cached per `(stepIndex, direction)` within a poll cycle so shared references across `other` / `tool.result` / `llm.request` do not re-read disk.
 
 ## Output Shape (Short)
 
