@@ -82,22 +82,27 @@ Recognized `saman_frontend_*` / `FRONTEND` records support the observed six-digi
 
 Newer Windows App dispatcher starts (`agent_sandbox_toolcall_exec`, `status: start`) supply explicit actor, sandbox and tool-call IDs. They pair with the existing `execution_settled` result; telemetry success/error duplicates do not replace that result. Native graph and execution identity checks still govern child association.
 
-For the Doubao App's work mode, explicitly select `listeners.doubao-work.client: "doubao"`. The default `"doubao-work"` retains the existing Work source. One collector configuration selects one product. App roots are `~/Library/Application Support/Doubao` on macOS and `%LOCALAPPDATA%/Doubao/User Data` on Windows; its native namespace is `.doubao`, while Work uses `.doubaowork`. The selection binds logs, native sessions and snapshots together without deriving native paths from a log override. On 2026-10-30, the App's work mode was exercised with real macOS and Windows clients, covering tools, menu-selected Skills, parallel/background subagents and reuse. This validates the tested work-mode source variant; ordinary chat and complete provider telemetry remain outside the supported scope.
+Doubao App work mode and Doubao Work are independent products. A default installation discovers both automatically and collects them concurrently in one Pilot process. App uses Agent/listener ID `doubao`; Work uses `doubao-work`. Both instantiate the same `DoubaoWorkInput` and share native parsers and Trace conversion, so protocol fixes do not need to be copied between implementations.
 
-Finish the old client's requests before changing selection and restarting the collector. A product switch baselines existing logs for the newly selected product instead of inheriting the other product's pending records or replaying its history. Legacy checkpoints without a client marker remain Work checkpoints. Multiple real demands remain ambiguous even when their text or timestamps are identical; text equality alone does not prove a unique invocation. Ordinary chat mode may expose request boundaries without a work trajectory; this cannot provide reconstructed LLM messages or input/output.
+App roots are `~/Library/Application Support/Doubao` on macOS and `%LOCALAPPDATA%/Doubao/User Data` on Windows, with namespace `.doubao`; Work uses `DoubaoWork` and `.doubaowork`. Watchers, checkpoints, caches and request identities remain separate. First discovery baselines each product's existing logs and collects subsequent requests. When both entrances are enabled, each receives half the existing read, work, native-cache and reconstruction-queue budgets. These cooperative limits are not a hard CPU/RSS bound.
 
-Set the listener below to `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }` for the App, without a `logDir` override. An invalid client value disables this listener during configuration loading and logs the supported values and invalid value's type. Explicit Agent-control enablement can override the listener's enabled flag; in that case an invalid client falls back to the Work source. The product is never automatically switched to App.
-
-`logDir` overrides log reading, watching and the bundled definition's detection path. Native sessions and `coding/snapshot` remain under the selected product's default data directory; they are never inferred from a custom log directory's ancestors. Installer probing, `deploy --require doubao-work` and collector discovery use the selected source, including `LOCALAPPDATA` on Windows. An App-only machine is not detected as Work with the default client; explicitly set `client: "doubao"` before probing or deployment.
-
-All newly collected events and their OTLP Spans carry `loongsuite.doubao_work.client`: `doubao-work` for Work or `doubao` for App work mode. The canonical Agent ID remains `doubao-work`. Historical records without the field remain unlabeled rather than being guessed from their IDs.
+The following configuration is optional. Disabling one product does not disable the other. Each listener's `logDir` overrides only its log reading, watching and detection path; native sessions and snapshots stay bound to its product. Installer probing, `deploy --require doubao` / `doubao-work` and collector discovery use the same path resolution.
 
 ```json
 {
-  "agents": { "doubao-work": { "enabled": true } },
-  "listeners": { "doubao-work": { "enabled": true, "pollInterval": 10000 } }
+  "agents": { "doubao": { "enabled": true }, "doubao-work": { "enabled": true } },
+  "listeners": {
+    "doubao": { "enabled": true, "pollInterval": 10000 },
+    "doubao-work": { "enabled": true, "pollInterval": 10000 }
+  }
 }
 ```
+
+Explicit legacy `listeners.doubao-work.client` retains single-product behavior: `doubao-work` does not enable App by default, and `doubao` collects App through the old entrance while suppressing the new one to prevent duplicates. To collect both, finish existing tasks, stop Pilot, back up and merge the configuration, and remove the old `client`. Move an App-specific log override to `listeners.doubao.logDir`. An old App checkpoint transfers to the independent `doubao` state, retaining pending requests and deduplication. Unlabeled legacy state still belongs to Work. Upgrades do not override explicit disablement or installer Agent selection.
+
+The independent listeners use `doubao` and `doubao-work` for `gen_ai.agent.type`, `gen_ai.framework`, fallback Agent IDs, and Agent-derived service name suffixes. The legacy App listener keeps `doubao-work` for these fields and continues to use that Agent's content policy. `loongsuite.doubao_work.client` identifies the source product in either mode. Native main and child Agent IDs retain their source values.
+
+The App work mode was exercised with real macOS and Windows clients on 2026-10-30, covering tools, menu-selected Skills, parallel/background subagents and reuse. Ordinary chat and complete provider telemetry remain outside the supported scope. Ordinary chat need not produce a work trajectory; request boundaries cannot reconstruct missing LLM messages. Multiple real demands remain ambiguous even with identical text or timestamps.
 
 The Agent definition is detection-only. Disabling the Agent/listener stops collection. Runtime Skill loading, the separate cloud partner page and complete cloud invocation lifecycles remain uncovered.
 
