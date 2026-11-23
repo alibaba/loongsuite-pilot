@@ -71,6 +71,10 @@ Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于�
 省略完整输入消息，并继续记录新产生的工具增量。安装后上下文计数标为 `native_estimate` / `active_context`。
 摘要请求用量单独记录为 `agent.codex.compaction.input_tokens` / `output_tokens`，与上下文计数分别展示。
 源端没有同范围 before 计数时省略 before 和压缩比例。只有完成时间的旧版记录保留为事件。
+同轮长上下文验证可运行 `node scripts/e2e/context-compression-codex.mjs --codex /path/to/codex`。
+脚本复用 CLI 登录态，在独立空目录提交一次任务并连续读取四份长文本，检查自动压缩的原生 turn 归属及最终结果。
+6000 token 的触发阈值仅作用于测试子进程，适用于支持该配置及原生完成记录的 Codex 版本。
+Pilot 和 CMS 采集需先按测试环境配置启动，脚本输出保留目录和原生 transcript 路径用于对账。
 Qoder / QoderCN 当前使用已有 transcript 唤醒与轮询，CLI `runtime-config.contextWindow`
 解析和 PreCompact/PostCompact 部署接入仍待补充。请求窗口从匹配的 SQLite 行提供。
 OpenClaw 缺少失败结束 Hook 时保留开始证据。未配对开始最多延缓 idle 收口一小时，并遵循现有缓冲上限。
