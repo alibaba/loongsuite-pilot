@@ -33,7 +33,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     if (round && typeof round === 'object' && !Array.isArray(round) && typeof round.request === 'string' && Array.isArray(round.toolIds))
       callsByRequest.set(round.request, round.toolIds.filter((id): id is string => typeof id === 'string'));
   }
-  let assistantParts: { type: string; id?: string; tool_call_id?: string }[] = [];
+  let assistantParts: { type: string; id?: string; tool_call_id?: string; content?: unknown }[] = [];
   const output = llm.attributes['gen_ai.output.messages'];
   if (typeof output === 'string') {
     try {
@@ -44,6 +44,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   }
   const sharedSteps = new Map<string, ReadableSpan>();
   const seen = new Set<string>();
+  let terminalModelHasMessages = false;
   for (const r of rounds) {
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || !/^[a-f0-9]{24}$/.test(r.id) ||
         typeof r.at !== 'string' || !/^\d{1,19}$/.test(r.at) || seen.has(r.id)) return spans;
@@ -131,6 +132,9 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         sharedSteps.set(shared, observation);
       }
       observed.push(observation);
+      if (isModel && r.terminal === true && hasModelMessages(observation)) {
+        terminalModelHasMessages = true;
+      }
       if ((isStream || (!shared && layer === 'round')) && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
         if (typeof call === 'string') parents.set(call, { span: observation, history: shared || r.id });
       }
@@ -178,10 +182,14 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       if (typeof value === 'number') agent.attributes['gen_ai.usage.' + metric] = value;
     }
   }
-  // A complete Hook turn can survive even when no individual history has
-  // both messages. Preserve that evidence once, without assigning a history ID.
-  if (hasModelMessages(llm) && !observed.some(s =>
-    s.attributes['gen_ai.span.kind'] === 'LLM' && hasModelMessages(s))) {
+  // An earlier model can own both messages while the final answer belongs
+  // to a shared stream. Keep the Hook summary when no exported model owns
+  // that answer, without assigning it to an individual history response.
+  const hasFinalText = assistantParts.some(part =>
+    part.type === 'text' && typeof part.content === 'string' && part.content.trim().length > 0);
+  const hasCompleteModel = observed.some(s =>
+    s.attributes['gen_ai.span.kind'] === 'LLM' && hasModelMessages(s));
+  if (hasModelMessages(llm) && (!hasCompleteModel || (hasFinalText && !terminalModelHasMessages))) {
     Object.assign(step, { name: 'turn summary' });
     delete step.attributes['gen_ai.react.round'];
     step.attributes['loongsuite.trae_cn.observation'] = 'turn_summary';

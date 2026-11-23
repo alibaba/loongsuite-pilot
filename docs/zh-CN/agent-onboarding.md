@@ -225,6 +225,11 @@ Input 应该：
 
 ### LLM 与 Tool 的时间边界
 
+千问办公 2.1.0（26111907）的 transcript 写入依赖已注册的 Hook 事件。
+Pilot 同时安装 `UserPromptSubmit` 和 `Stop`。`UserPromptSubmit` 只返回 `{}`，
+让客户端写入用户消息，并将完整轮次留给 `Stop` 采集。默认安装、运行时补装和
+HookWatchdog 都需要包含这两个事件，以便在仅安装 Pilot 的环境中采集新会话。
+
 `time_unix_nano` 表示语义事件发生时间，不是 Pilot 读取文件的时间；后者应写入
 `observed_time_unix_nano`。
 

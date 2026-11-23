@@ -121,3 +121,44 @@ it('retains one complete turn when shared history cannot supply a complete model
   expect(result.find(s => s.spanContext().spanId === llm.parentSpanId)?.name).toBe('turn summary');
   expect(result.find(s => s.spanContext().spanId === tool.parentSpanId)?.attributes['loongsuite.trae_cn.stream_request_id']).toBe('stream');
 });
+
+it.each([
+  ['shared', true],
+  ['uniquely matched', false],
+])('exports the final answer once when an attributable tool round precedes a %s terminal stream', (_label, shared) => {
+  const span = (kind: string, id: string, parentSpanId?: string) => ({
+    name: kind, spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId,
+    startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind },
+  }) as unknown as ReadableSpan;
+  const agent = span('AGENT', 'agent'), step = span('STEP', 'step', 'agent');
+  const llm = span('LLM', 'model', 'step'), tool = span('TOOL', 'tool', 'step');
+  tool.attributes['gen_ai.tool.call.id'] = 'call_one';
+  tool.attributes['gen_ai.tool.call.result'] = 'source found';
+  llm.attributes['gen_ai.input.messages'] = JSON.stringify([{ role: 'user', parts: [
+    { type: 'text', content: 'build a report' },
+  ] }]);
+  llm.attributes['gen_ai.output.messages'] = JSON.stringify([{ role: 'assistant', parts: [
+    { type: 'tool_call', name: 'Read', id: 'call_one' }, { type: 'text', content: 'report built' },
+  ] }]);
+  const firstRound = { id: 'a'.repeat(24), at: '2000000000', request: 'unique', initial: true, toolIds: ['call_one'] };
+  const terminalRounds = (shared ? ['b', 'c'] : ['b']).map(c => ({
+    id: c.repeat(24), at: '3000000000', request: 'terminal', shared, continuation: 'unique', terminal: true, toolIds: [],
+  }));
+  const records = [{ 'event.name': 'llm.response', span_id: 'model',
+    'loongsuite.trae_cn.model_responses': [firstRound, ...terminalRounds] }] as unknown as AgentActivityEntry[];
+
+  const result = omitEmptyTraeModelSpans(expandTraeHistory(records, [agent, step, llm, tool]));
+  const models = result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+  const finalModels = models.filter(s => String(s.attributes['gen_ai.output.messages']).includes('report built'));
+  expect(finalModels).toHaveLength(1);
+  if (shared) {
+    expect(finalModels[0]).toBe(llm);
+    expect(llm.attributes['loongsuite.trae_cn.observation']).toBe('turn_summary');
+  } else {
+    expect(models).not.toContain(llm);
+    expect(finalModels[0].attributes['gen_ai.response.id']).toBe(terminalRounds[0].id);
+  }
+  expect(models.find(s => s.attributes['gen_ai.response.id'] === firstRound.id)?.parentSpanId).toBe(tool.parentSpanId);
+  expect(models.every(s => s.parentSpanId !== undefined &&
+    result.some(parent => parent.spanContext().spanId === s.parentSpanId))).toBe(true);
+});

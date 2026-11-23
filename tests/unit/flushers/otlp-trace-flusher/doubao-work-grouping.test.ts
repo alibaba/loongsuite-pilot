@@ -70,4 +70,38 @@ describe.each(['darwin', 'win32'] as const)('Doubao request identity from %s log
       expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(2);
     } finally { await flusher.shutdown(); }
   });
+
+  it('keeps reused App requests and colliding background execution IDs separate from Work', async () => {
+    const work = request(platform, 0);
+    const app = request(platform, 0, '87654321').map(entry => ({ ...entry, 'gen_ai.agent.type': 'doubao',
+      'gen_ai.agent.id': 'doubao', 'gen_ai.agent.name': 'Doubao', 'loongsuite.doubao_work.client': 'doubao' }));
+    const appSecond = request(platform, 60_000, '87654321').map(entry => ({ ...entry, 'gen_ai.agent.type': 'doubao',
+      'gen_ai.agent.id': 'doubao', 'gen_ai.agent.name': 'Doubao', 'loongsuite.doubao_work.client': 'doubao' }));
+    const spans: ReadableSpan[] = [], flusher = collector(spans);
+    try {
+      await flusher.sendBatch([work[0], app[0], work[1], app[1]]);
+      await vi.waitFor(() => expect(spans).toHaveLength(4));
+      await flusher.sendBatch(appSecond);
+      await vi.waitFor(() => expect(spans).toHaveLength(6));
+      for (const records of [work, app]) {
+        const local = records.map((entry, index) => ({ ...entry,
+          time_unix_nano: String(BigInt(entry.time_unix_nano!) + 1000n),
+          'gen_ai.turn.start': undefined, 'gen_ai.turn.end': undefined,
+          'loongsuite.doubao_work.observation_scope': 'native_sandbox_execution',
+          'loongsuite.doubao_work.local_execution_phase': index ? 'end' : 'start',
+          'loongsuite.doubao_work.native_execution_id': 'same-native-execution',
+          'loongsuite.doubao_work.local_execution_span_id': '1222222222222222',
+          'loongsuite.doubao_work.root_request_start_unix_nano': records[0].time_unix_nano,
+          'loongsuite.doubao_work.root_request_end_unix_nano': records[1].time_unix_nano,
+        }));
+        await flusher.sendBatch(local);
+      }
+      await vi.waitFor(() => expect(spans).toHaveLength(8));
+      const tasks = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TASK');
+      expect(tasks).toHaveLength(2);
+      expect(tasks.map(span => span.attributes['gen_ai.framework']).sort()).toEqual(['doubao', 'doubao-work']);
+      await flusher.sendBatch(app); await flusher.sendBatch(appSecond); await flusher.sendBatch(work);
+      await flusher.flush(); expect(spans).toHaveLength(8);
+    } finally { await flusher.shutdown(); }
+  });
 });
