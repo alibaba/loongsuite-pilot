@@ -1504,6 +1504,7 @@ export function buildAutoUpdateConfig(
 
   return {
     enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    repairHooks: envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true),
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,

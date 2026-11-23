@@ -9,11 +9,9 @@ vi.mock('../../../src/utils/logger.js', () => ({
   }),
 }));
 
-const mockHookAssetLock = vi.fn<[string, () => Promise<unknown>], Promise<unknown>>();
 const mockHookUpgradeInProgress = vi.fn<[string], Promise<boolean>>();
-vi.mock('../../../src/utils/hook-asset-lock.js', async (importOriginal) => ({
-  ...await importOriginal<typeof import('../../../src/utils/hook-asset-lock.js')>(),
-  withHookAssetLock: (...args: [string, () => Promise<unknown>]) => mockHookAssetLock(...args),
+vi.mock('../../../src/utils/hook-restore-request.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/utils/hook-restore-request.js')>(),
   hookUpgradeInProgress: (dir: string) => mockHookUpgradeInProgress(dir),
 }));
 
@@ -192,7 +190,6 @@ describe('Updater', () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', mockFetch);
     tmpDir = '/tmp/test-updater';
-    mockHookAssetLock.mockImplementation((_dir, body) => body());
     mockHookUpgradeInProgress.mockResolvedValue(false);
 
     // Default fs mocks
@@ -258,19 +255,31 @@ describe('Updater', () => {
         expect.stringContaining('hook-upgrade-in-progress'),
         { force: true },
       );
+      updater.stop();
     });
 
-    it('does not start timer when disabled', () => {
+    it('does not read a hook restore request when hook repair is off', async () => {
+      const updater = new Updater(makeConfig({ repairHooks: false }), tmpDir);
+      await updater.check();
+      expect(mockFsReadFile).not.toHaveBeenCalledWith(
+        expect.stringContaining('hook-restore-request.json'),
+        'utf8',
+      );
+    });
+
+    it('uses the same check timer when version checks are disabled', () => {
       const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
       updater.start();
-      // No timers should be scheduled (besides the underlying fake timer queue)
-      expect(vi.getTimerCount()).toBe(0);
+      // setTimeout (60s) + check interval + heartbeat interval. The check skips version lookup.
+      expect(vi.getTimerCount()).toBe(3);
+      updater.stop();
+      expect(vi.getTimerCount()).toBe(1); // setTimeout remains but interval cleared
     });
 
     it('schedules initial delayed check and interval on start', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       updater.start();
-      // setTimeout (60s) + check interval + heartbeat interval
+      // setTimeout (60s) + check interval + heartbeat interval. Hook repair runs inside check.
       expect(vi.getTimerCount()).toBe(3);
       updater.stop();
     });
@@ -552,7 +561,7 @@ describe('Updater', () => {
     it.each([
       { layout: 'default', cacheOverride: '', cacheName: '.loongsuite-pilot' },
       { layout: 'split', cacheOverride: '~/custom-cache', cacheName: 'custom-cache' },
-    ])('uses the bootstrap cache for pointers and publication lock in the $layout layout', async ({
+    ])('uses the bootstrap cache for pointers and hook publication in the $layout layout', async ({
       cacheOverride, cacheName,
     }) => {
       setupForDownload();
@@ -568,7 +577,7 @@ describe('Updater', () => {
 
       await new Updater(makeConfig()).check();
 
-      expect(mockHookAssetLock).toHaveBeenCalledWith(cache, expect.any(Function));
+      expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'hook-upgrade-in-progress'), expect.any(String));
       expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'current.tmp'), '1.0.2_bbb\n');
       const postinstall = mockExecFile.mock.calls.find(([, args]) =>
         Array.isArray(args) && args.some((arg) => String(arg).endsWith('postinstall.js')));
@@ -630,24 +639,6 @@ describe('Updater', () => {
       );
     });
 
-    it('leaves active hook assets and pointers alone when acquiring the publication lock fails', async () => {
-      setupForDownload();
-      const access = mockFsAccess.getMockImplementation()!;
-      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
-      mockHookAssetLock.mockRejectedValueOnce(new Error('hook asset lock busy'));
-      const updater = new Updater(makeConfig(), tmpDir);
-      await updater.check();
-
-      expect(mockHookAssetLock).toHaveBeenCalledWith(tmpDir, expect.any(Function));
-      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
-      expect(fallback?.[2]).toMatchObject({
-        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
-      });
-      expect(pilotCommands().some((command) => command.includes('postinstall.js'))).toBe(false);
-      expect(pilotCommands()).not.toContain('restart-collector');
-      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
-    });
-
     it('defers activation while the preceding postinstall marker is still fresh', async () => {
       setupForDownload();
       mockHookUpgradeInProgress.mockResolvedValue(true);
@@ -689,7 +680,7 @@ describe('Updater', () => {
       );
     });
 
-    it('restores old hook assets and pointer under the same lock when activation fails', async () => {
+    it('restores old hook assets and the pointer when activation fails', async () => {
       setupForDownload();
       const access = mockFsAccess.getMockImplementation()!;
       mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
@@ -703,18 +694,9 @@ describe('Updater', () => {
         ? Promise.reject(new Error('copy failed'))
         : Promise.resolve());
 
-      let lockHeld = false;
-      mockHookAssetLock.mockImplementation(async (_dir, body) => {
-        lockHeld = true;
-        try { return await body(); }
-        finally { lockHeld = false; }
-      });
       const posts: string[] = [];
       mockExecFile.mockImplementation(async (_node: string, args: string[]) => {
-        if (args[0]?.endsWith('postinstall.js')) {
-          expect(lockHeld).toBe(true);
-          posts.push(args[0]);
-        }
+        if (args[0]?.endsWith('postinstall.js')) posts.push(args[0]);
         return { stdout: '', stderr: '' };
       });
       const updater = new Updater(makeConfig(), tmpDir);

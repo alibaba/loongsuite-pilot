@@ -89,6 +89,19 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.checkIntervalMs).toBe(999);
   });
 
+  it('keeps hook repair on unless hookWatchdog is disabled', () => {
+    expect(buildAutoUpdateConfig(null).repairHooks).toBe(true);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: false } }).repairHooks).toBe(false);
+  });
+
+  it('env LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED=false disables hook repair', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', 'false');
+    vi.stubEnv('LOONGSUITE_PILOT_PACKAGE_URL', 'https://example.com/pkg.tar.gz');
+    const config = buildAutoUpdateConfig(null);
+    expect(config.enabled).toBe(true);
+    expect(config.repairHooks).toBe(false);
+  });
+
   it('reads installId and canary fields from config', () => {
     const config = buildAutoUpdateConfig({
       installId: 'test-install-id',

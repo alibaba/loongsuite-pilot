@@ -27,10 +27,14 @@ async function main(): Promise<void> {
   const file = await readJsonFile<ConfigFile>(configPath);
   const config = buildAutoUpdateConfig(file);
 
-  if (!config.enabled) {
-    logger.info('auto-update disabled via config, exiting');
+  if (!config.enabled && config.repairHooks === false) {
+    logger.info('auto-update and hook repair disabled, exiting');
     flushLogsSync();
     process.exit(0);
+  }
+
+  if (!config.enabled) {
+    logger.info('auto-update disabled, repairing hook assets only');
   }
 
   // Same single-instance guard as the collector: a re-registered scheduled task

@@ -27,6 +27,7 @@ export interface AutoUpdateConfig {
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
+  repairHooks?: boolean;
 }
 
 export interface CmsConfig {
