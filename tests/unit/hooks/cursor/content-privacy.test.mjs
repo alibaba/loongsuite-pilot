@@ -368,6 +368,23 @@ it.each(['1.7.0', '2026.07.31'])('recovers two queued generations without mixing
   expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
 });
 
+it('retains an overlapping standalone conversation when another CLI turn stops', () => {
+  configure({ 'cursor-cli': { captureMessageContent: false } });
+  const version = '2026.07.31';
+  send('beforeSubmitPrompt', { generation_id: 'old', prompt: 'old' }, version, 'old-session');
+  send('beforeSubmitPrompt', { generation_id: 'new', prompt: 'new' }, version, 'new-session');
+  send('afterAgentResponse', { generation_id: 'old', text: 'old', output_tokens: 11 }, version, 'old-session');
+  send('afterAgentResponse', { generation_id: 'new', text: 'new', output_tokens: 22 }, version, 'new-session');
+  send('stop', { generation_id: 'new' }, version, 'new-session');
+  const pending = journal().trim().split('\n').map(JSON.parse);
+  expect(pending).toContainEqual(expect.objectContaining({
+    hook_event: 'afterAgentResponse', conversation_id: 'old-session', generation_id: 'old', output_tokens: 11,
+  }));
+  send('stop', { generation_id: 'old' }, version, 'old-session');
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['new', 22], ['old', 11]]);
+});
+
 it('keeps a new CLI generation pending when an old response arrives late', () => {
   configure({ 'cursor-cli': { captureMessageContent: false } });
   const version = '2026.07.31';

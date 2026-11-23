@@ -227,7 +227,9 @@ export function assembleTurn(journalEvents, options = {}) {
   const parentPromptTs = tsMs(promptEvent);
   const parentStopTs = stopEvent ? tsMs(stopEvent) : Infinity;
   const conversationIdsWithPrompt = new Set();
-  for (const ev of journalEvents) {
+  // Another conversation's prompt may predate the selected turn window.
+  // Use the full snapshot to distinguish it from unprompted child events.
+  for (const ev of options.journalSnapshot ?? journalEvents) {
     if (ev.conversation_id && ev.hook_event === 'beforeSubmitPrompt') {
       conversationIdsWithPrompt.add(ev.conversation_id);
     }

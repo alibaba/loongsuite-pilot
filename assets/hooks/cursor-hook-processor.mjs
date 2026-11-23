@@ -627,6 +627,7 @@ async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, 
           variant,
           stopConversationId: convId,
           transcriptPath,
+          journalSnapshot: snapshot,
         });
         records = result.records;
         consumedConversationIds = result.consumedConversationIds;
