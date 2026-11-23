@@ -13,6 +13,7 @@ import { MultiFlusher } from '../../../src/flushers/multi-flusher.js';
 import { JsonlFlusher } from '../../../src/flushers/jsonl-flusher.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { chatBatch, chatTable, chatWal } from '../../helpers/doubao-chat-fixture.js';
+import { readVarint } from '../../../src/inputs/doubao-work/doubao-chat-table.js';
 import { DOUBAO_EPOCH, DOUBAO_FILE, doubaoLine } from '../../helpers/doubao-work-fixture.js';
 
 const fixture = vi.hoisted(() => ({ home: '' }));
@@ -114,6 +115,67 @@ describe('Doubao ordinary chat collection', () => {
     await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('checksum');
     await writeFile(newer, chatWal([chatBatch({ sequence: 3, output: 'RECOVERED_OUTPUT' })]));
     expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('RECOVERED_OUTPUT');
+  });
+
+  it.each(['empty', 'delete', 'other-task'])('does not restore content removed by a newer task-store snapshot (%s)', async change => {
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([chatBatch()]));
+    const reader = new DoubaoChatReader(root);
+    expect((await reader.find('synthetic-chat-turn', budget()))?.finished).toBe(true);
+    const newer = path.join(path.dirname(file), '000004.log');
+    await writeFile(newer, chatWal([chatBatch({ sequence: 2, emptyStore: change === 'empty',
+      deleteStore: change === 'delete', session: change === 'other-task' ? 'other-chat-turn' : undefined })]));
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    expect(await new DoubaoChatReader(root).find('synthetic-chat-turn', budget())).toBeUndefined();
+    await appendFile(newer, chatWal([chatBatch({ sequence: 3, output: 'VALID_NEW_SNAPSHOT' })]));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('VALID_NEW_SNAPSHOT');
+  });
+
+  it.each([false, true])('applies a task-store deletion in an immutable table (compressed=%s)', async compressed => {
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([chatBatch()]));
+    const reader = new DoubaoChatReader(root);
+    expect((await reader.find('synthetic-chat-turn', budget()))?.finished).toBe(true);
+    await writeFile(path.join(path.dirname(file), '000004.ldb'), chatTable(chatBatch({ sequence: 2, deleteStore: true }), compressed));
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    expect(await new DoubaoChatReader(root).find('synthetic-chat-turn', budget())).toBeUndefined();
+  });
+
+  it('retries unsupported task-store encoding in an immutable table without accepting stale content', async () => {
+    const { root, file } = await setup();
+    await writeFile(file, chatWal([chatBatch()]));
+    const batch = chatBatch({ sequence: 2 });
+    const keyLength = readVarint(batch, 13);
+    const valueLength = readVarint(batch, keyLength.end + keyLength.value);
+    batch[valueLength.end + 1] ^= 1;
+    const newer = path.join(path.dirname(file), '000004.ldb');
+    await writeFile(newer, chatTable(batch));
+    const reader = new DoubaoChatReader(root);
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('encoding');
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('encoding');
+    await writeFile(newer, chatTable(chatBatch({ sequence: 3, output: 'RECOVERED_TABLE_RESPONSE' })));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('RECOVERED_TABLE_RESPONSE');
+  });
+
+  it('keeps a cleared request pending through the production input and checkpoint recovery', async () => {
+    const { root, store, file, log } = await setup();
+    const reader = new DoubaoChatReader(root);
+    await writeFile(file, chatWal([chatBatch()]));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.finished).toBe(true);
+    await appendFile(file, chatWal([chatBatch({ sequence: 2, emptyStore: true })]));
+    expect(await reader.find('synthetic-chat-turn', budget())).toBeUndefined();
+    const input = new Probe({ stateStore: store, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(DOUBAO_EPOCH - 1); await input.poll(); clock.mockRestore();
+    await appendFile(log, lifecycle());
+    expect(await input.poll()).toEqual([]); await store.save();
+    const reloaded = new StateStore(path.join(fixture.home, 'state.json')); await reloaded.load();
+    const next = new Probe({ stateStore: reloaded, inputId: 'doubao', workBudget: { milliseconds: Infinity } });
+    expect(await next.poll()).toEqual([]);
+    await appendFile(file, chatWal([chatBatch({ sequence: 3, output: 'LATEST_CONFIRMED_RESPONSE' })]));
+    const events = await next.poll(); expect(events).toHaveLength(2);
+    expect(JSON.stringify(events)).toContain('LATEST_CONFIRMED_RESPONSE');
+    expect(await next.poll()).toEqual([]);
   });
 
   it('preserves pending content through checkpoint reload and late final write', async () => {

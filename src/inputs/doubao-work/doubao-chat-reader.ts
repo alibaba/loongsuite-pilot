@@ -18,15 +18,21 @@ interface Source {
   offset: number;
   fragment: Buffer[];
   fragmentBytes: number;
-  tasks: Map<string, { sequence: bigint; value: DoubaoChatContent }>;
+  stores: Map<string, ChatStoreSnapshot>;
   touchedMs: number;
   anchor?: Buffer;
   anchorOffset?: number;
   tableChunks?: Buffer[];
   tableEntries?: Generator<{ key: Buffer; value: Buffer; sequence: bigint }>;
   tableBytes?: number;
-  tableTasks?: Map<string, { sequence: bigint; value: DoubaoChatContent }>;
+  tableStores?: Map<string, ChatStoreSnapshot>;
   readError?: unknown;
+}
+
+interface ChatStoreSnapshot {
+  key: string;
+  sequence: bigint;
+  tasks: Map<string, DoubaoChatContent>;
 }
 
 export interface DoubaoChatContent {
@@ -62,8 +68,8 @@ export class DoubaoChatReader {
       retainedBytes: [...this.files.values()].reduce((sum, source) => sum + source.fragmentBytes
         + (source.tableChunks?.reduce((bytes, chunk) => bytes + chunk.length, 0) ?? 0)
         + (source.tableBytes ?? 0)
-        + [...(source.tableTasks?.values() ?? [])].reduce((bytes, task) => bytes + Buffer.byteLength(task.value.input) + Buffer.byteLength(task.value.output) + 512, 0)
-        + [...source.tasks.values()].reduce((bytes, task) => bytes + Buffer.byteLength(task.value.input) + Buffer.byteLength(task.value.output) + 512, 0), 0) };
+        + storeBytes(source.tableStores)
+        + storeBytes(source.stores), 0) };
   }
 
   async find(sessionId: string, budget: DoubaoWorkBudget): Promise<DoubaoChatContent | undefined> {
@@ -82,7 +88,7 @@ export class DoubaoChatReader {
       } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
     }
     if (names.length > MAX_FILES) throw new Error('Doubao chat file capacity exceeded');
-    const candidates = new Map<string, { sequence: bigint; value: DoubaoChatContent }>();
+    const snapshots = new Map<string, ChatStoreSnapshot>();
     let readError: unknown;
     for (const name of this.files.keys()) if (!names.includes(name)) this.files.delete(name);
     for (const name of names) {
@@ -93,16 +99,21 @@ export class DoubaoChatReader {
       }
       const source = this.files.get(name);
       if (source?.readError) { readError = source.readError; continue; }
-      const task = source?.tasks.get(sessionId);
-      if (!task) continue;
-      const database = path.dirname(name), previous = candidates.get(database);
-      if (!previous || task.sequence > previous.sequence) candidates.set(database, task);
-      else if (task.sequence === previous.sequence && JSON.stringify(task.value) !== JSON.stringify(previous.value)) return undefined;
+      for (const snapshot of source?.stores.values() ?? []) {
+        const key = `${path.dirname(name)}:${snapshot.key}`;
+        const previous = snapshots.get(key);
+        if (!previous || snapshot.sequence > previous.sequence) snapshots.set(key, snapshot);
+        else if (snapshot.sequence === previous.sequence
+          && JSON.stringify(snapshot.tasks.get(sessionId)) !== JSON.stringify(previous.tasks.get(sessionId))) return undefined;
+      }
     }
-    const results = [...candidates.values()];
-    if (results.length > 1 && results.some(task => JSON.stringify(task.value) !== JSON.stringify(results[0].value))) return undefined;
     if (readError) throw readError;
-    return results[0]?.value;
+    const results = [...snapshots.values()].flatMap(snapshot => {
+      const task = snapshot.tasks.get(sessionId);
+      return task ? [task] : [];
+    });
+    if (results.length > 1 && results.some(task => JSON.stringify(task) !== JSON.stringify(results[0]))) return undefined;
+    return results[0];
   }
 
   private async read(name: string, budget: DoubaoWorkBudget, sessionId: string): Promise<void> {
@@ -117,7 +128,7 @@ export class DoubaoChatReader {
         if (!source.anchor.equals(anchor)) source = undefined;
       }
       if (!source || source.identity !== identity || stat.size < source.offset) {
-        source = { identity, offset: 0, fragment: [], fragmentBytes: 0, tasks: new Map(), touchedMs: Date.now() };
+        source = { identity, offset: 0, fragment: [], fragmentBytes: 0, stores: new Map(), touchedMs: Date.now() };
         this.files.set(name, source);
       }
       if (name.endsWith('.ldb')) {
@@ -135,29 +146,30 @@ export class DoubaoChatReader {
         if (source.tableChunks.length) {
           source.tableEntries = chatTableEntries(Buffer.concat(source.tableChunks));
           source.tableBytes = source.offset;
-          source.tableTasks = new Map();
+          source.tableStores = new Map();
           source.tableChunks = [];
         }
         while (source.tableEntries) {
           if (budget.exhausted) throw new DoubaoWorkDeferred('cycle_budget');
           let record;
-          try { record = source.tableEntries.next(); }
+          let snapshot;
+          try {
+            record = source.tableEntries.next();
+            if (!record.done) snapshot = decodeChatValue(record.value.key, record.value.value, record.value.sequence);
+          }
           catch (error) {
-            source.tableTasks = undefined; source.tableEntries = undefined; source.tableBytes = 0;
+            source.tableStores = undefined; source.tableEntries = undefined; source.tableBytes = 0;
             this.files.delete(name);
             throw error;
           }
           if (record.done) {
-            this.consume([...(source.tableTasks?.values() ?? [])], source, sessionId);
-            source.tableEntries = undefined; source.tableTasks = undefined; source.tableBytes = 0; break;
+            this.consume([...(source.tableStores?.values() ?? [])], source, sessionId);
+            source.tableEntries = undefined; source.tableStores = undefined; source.tableBytes = 0; break;
           }
-          for (const task of decodeChatValue(record.value.key, record.value.value, record.value.sequence)) {
-            const previous = source.tableTasks!.get(task.value.sessionId);
-            if (!previous || task.sequence > previous.sequence) source.tableTasks!.set(task.value.sessionId, task);
-            if (source.tableTasks!.size > MAX_TASKS) {
-              const evicted = [...source.tableTasks!.keys()].find(key => key !== sessionId);
-              if (evicted) source.tableTasks!.delete(evicted);
-            }
+          if (snapshot) {
+            const previous = source.tableStores!.get(snapshot.key);
+            if (!previous || snapshot.sequence > previous.sequence) source.tableStores!.set(snapshot.key, snapshot);
+            limitStoreTasks(source.tableStores!, sessionId);
           }
           budget.record(); await budget.yieldIfNeeded();
         }
@@ -205,7 +217,7 @@ export class DoubaoChatReader {
           if (type === 1 || type === 4) {
             source.offset = readStart + position + 7 + length;
             source.fragment = []; source.fragmentBytes = 0;
-            try { this.consume(decodeChatWriteBatch(Buffer.concat(fragments)), source, sessionId); }
+            try { this.consume(decodeChatSnapshots(Buffer.concat(fragments)), source, sessionId); }
             catch (error) { source.readError = error; throw error; }
             source.fragment = []; source.fragmentBytes = 0;
           } else { source.fragment = fragments; source.fragmentBytes = fragmentBytes; }
@@ -233,61 +245,91 @@ export class DoubaoChatReader {
     }
   }
 
-  private consume(entries: { sequence: bigint; value: DoubaoChatContent }[], source: Source, sessionId: string): void {
-    if (entries.length) source.readError = undefined;
-    for (const entry of entries) {
-      const current = source.tasks.get(entry.value.sessionId);
-      if (!current || entry.sequence > current.sequence) source.tasks.set(entry.value.sessionId, entry);
+  private consume(snapshots: ChatStoreSnapshot[], source: Source, sessionId: string): void {
+    if (snapshots.length) source.readError = undefined;
+    for (const snapshot of snapshots) {
+      const current = source.stores.get(snapshot.key);
+      if (!current || snapshot.sequence > current.sequence) source.stores.set(snapshot.key, snapshot);
     }
-    const evict = (candidate: Source) => {
-      const id = [...candidate.tasks.keys()].find(key => key !== sessionId);
-      if (id) candidate.tasks.delete(id);
-      return id !== undefined;
-    };
-    while (source.tasks.size > MAX_TASKS && evict(source)) {}
+    limitStoreTasks(source.stores, sessionId);
     source.touchedMs = Date.now();
     const oldest = [...this.files.values()].sort((a, b) => a.touchedMs - b.touchedMs);
     for (const candidate of oldest) {
-      while (this.stats().retainedBytes > this.maxCacheBytes && evict(candidate)) {}
+      while (this.stats().retainedBytes > this.maxCacheBytes && evictStoreTask(candidate.stores, sessionId)) {}
     }
   }
 }
 
+function storeBytes(stores: Map<string, ChatStoreSnapshot> | undefined): number {
+  let bytes = 0;
+  for (const snapshot of stores?.values() ?? []) {
+    bytes += snapshot.key.length + 64;
+    for (const task of snapshot.tasks.values()) bytes += Buffer.byteLength(task.input) + Buffer.byteLength(task.output) + 512;
+  }
+  return bytes;
+}
+
+function evictStoreTask(stores: Map<string, ChatStoreSnapshot>, sessionId: string): boolean {
+  for (const snapshot of stores.values()) {
+    const id = [...snapshot.tasks.keys()].find(key => key !== sessionId);
+    if (id) { snapshot.tasks.delete(id); return true; }
+  }
+  return false;
+}
+
+function limitStoreTasks(stores: Map<string, ChatStoreSnapshot>, sessionId: string): void {
+  if (stores.size > MAX_TASKS) throw new Error('Doubao chat task-store capacity exceeded');
+  let count = [...stores.values()].reduce((sum, snapshot) => sum + snapshot.tasks.size, 0);
+  while (count > MAX_TASKS && evictStoreTask(stores, sessionId)) count--;
+}
+
 /** Chromium stores a Blink envelope around a V8-serialized plain object. */
 export function decodeChatWriteBatch(record: Buffer): { sequence: bigint; value: DoubaoChatContent }[] {
+  return decodeChatSnapshots(record).flatMap(snapshot => [...snapshot.tasks.values()].map(value => ({ sequence: snapshot.sequence, value })));
+}
+
+function decodeChatSnapshots(record: Buffer): ChatStoreSnapshot[] {
   if (record.length < 12) throw new Error('Invalid Doubao chat write batch');
   const sequence = record.readBigUInt64LE(0), count = record.readUInt32LE(8);
   if (count > 65536) throw new Error('Doubao chat write batch capacity exceeded');
   let position = 12;
-  const output: { sequence: bigint; value: DoubaoChatContent }[] = [];
+  const output: ChatStoreSnapshot[] = [];
   for (let index = 0; index < count; index++) {
     const type = record[position++];
     const keyLength = varint(record, position); position = keyLength.end;
     const key = record.subarray(position, position + keyLength.value); position += keyLength.value;
     if (position > record.length || ![0, 1].includes(type)) throw new Error('Invalid Doubao chat write batch entry');
-    if (type === 0) continue;
+    if (type === 0) {
+      const snapshot = decodeChatValue(key, Buffer.alloc(0), sequence + BigInt(index));
+      if (snapshot) output.push(snapshot);
+      continue;
+    }
     const valueLength = varint(record, position); position = valueLength.end;
     const value = record.subarray(position, position + valueLength.value); position += valueLength.value;
     if (position > record.length) throw new Error('Truncated Doubao chat write batch');
-    output.push(...decodeChatValue(key, value, sequence + BigInt(index)));
+    const snapshot = decodeChatValue(key, value, sequence + BigInt(index));
+    if (snapshot) output.push(snapshot);
   }
   if (position !== record.length) throw new Error('Invalid Doubao chat write batch length');
   return output;
 }
 
-function decodeChatValue(key: Buffer, value: Buffer, sequence: bigint): { sequence: bigint; value: DoubaoChatContent }[] {
-  if (!isChatTaskKey(key) || !value.length) return [];
+function decodeChatValue(key: Buffer, value: Buffer, sequence: bigint): ChatStoreSnapshot | undefined {
+  if (!isChatTaskKey(key)) return undefined;
+  const snapshot: ChatStoreSnapshot = { key: key.toString('hex'), sequence, tasks: new Map() };
+  if (!value.length) return snapshot;
   const version = varint(value, 0);
-  if (!value.subarray(version.end, version.end + BLINK_ENVELOPE.length).equals(BLINK_ENVELOPE)) return [];
+  if (!value.subarray(version.end, version.end + BLINK_ENVELOPE.length).equals(BLINK_ENVELOPE)) {
+    throw new Error('Unsupported Doubao chat task-store encoding');
+  }
   const state = deserialize(value.subarray(version.end + BLINK_ENVELOPE.length - 2));
   const tasks = state?.state?.mainTaskDataMap;
-  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) return [];
-  const output: { sequence: bigint; value: DoubaoChatContent }[] = [];
+  if (!tasks || typeof tasks !== 'object' || Array.isArray(tasks)) throw new Error('Invalid Doubao chat task-store snapshot');
   for (const [sessionId, task] of Object.entries(tasks).slice(-MAX_TASKS)) {
     const projected = projectChatTask(sessionId, task);
-    if (projected) output.push({ sequence, value: projected });
+    if (projected) snapshot.tasks.set(sessionId, projected);
   }
-  return output;
+  return snapshot;
 }
 
 function isChatTaskKey(key: Buffer): boolean {

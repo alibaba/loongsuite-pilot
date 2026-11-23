@@ -3,7 +3,8 @@ import { DOUBAO_EPOCH } from './doubao-work-fixture.js';
 import { chatCrc32c, readVarint } from '../../src/inputs/doubao-work/doubao-chat-table.js';
 
 export function chatBatch(options: { sequence?: number; session?: string; finished?: boolean; output?: string;
-  input?: string; reused?: boolean; conversation?: string; localMessage?: string; queryMs?: number } = {}): Buffer {
+  input?: string; reused?: boolean; conversation?: string; localMessage?: string; queryMs?: number;
+  emptyStore?: boolean; deleteStore?: boolean } = {}): Buffer {
   const session = options.session ?? 'synthetic-chat-turn';
   const conversation = options.conversation ?? 'synthetic-conversation';
   const local = options.localMessage ?? 'synthetic-local-message';
@@ -24,17 +25,21 @@ export function chatBatch(options: { sequence?: number; session?: string; finish
   const keyText = Buffer.from('im-sdk:user:123456:default-chat-im-protocol-store', 'utf16le'); keyText.swap16();
   const key = Buffer.concat([Buffer.from([0, 2, 1, 1, 1]), encodeVarint(keyText.length / 2), keyText]);
   const value = Buffer.concat([Buffer.from([1]), Buffer.from('ff15fe000000000000000000000000', 'hex'),
-    serialize({ state: { mainTaskDataMap: { [session]: task } }, version: 0 })]);
+    serialize({ state: { mainTaskDataMap: options.emptyStore ? {} : { [session]: task } }, version: 0 })]);
   const header = Buffer.alloc(12); header.writeBigUInt64LE(BigInt(options.sequence ?? 1)); header.writeUInt32LE(1, 8);
+  if (options.deleteStore) return Buffer.concat([header, Buffer.from([0]), encodeVarint(key.length), key]);
   return Buffer.concat([header, Buffer.from([1]), encodeVarint(key.length), key, encodeVarint(value.length), value]);
 }
 
 export function chatTable(batch: Buffer, compressed = false): Buffer {
   const keyLength = readVarint(batch, 13);
   const key = batch.subarray(keyLength.end, keyLength.end + keyLength.value);
-  const valueLength = readVarint(batch, keyLength.end + keyLength.value);
-  const value = batch.subarray(valueLength.end, valueLength.end + valueLength.value);
-  const tag = Buffer.alloc(8); tag.writeBigUInt64LE((batch.readBigUInt64LE(0) << 8n) | 1n);
+  let value = Buffer.alloc(0);
+  if (batch[12] === 1) {
+    const valueLength = readVarint(batch, keyLength.end + keyLength.value);
+    value = batch.subarray(valueLength.end, valueLength.end + valueLength.value);
+  }
+  const tag = Buffer.alloc(8); tag.writeBigUInt64LE((batch.readBigUInt64LE(0) << 8n) | BigInt(batch[12]));
   const restart = Buffer.from('0000000001000000', 'hex');
   const entry = (k: Buffer, v: Buffer) => Buffer.concat([encodeVarint(0), encodeVarint(k.length), encodeVarint(v.length), k, v, restart]);
   const block = (data: Buffer, compress: boolean) => {

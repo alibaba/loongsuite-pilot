@@ -111,6 +111,8 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 普通聊天与工作模式共用默认 `doubao` 入口。客户端收发日志提供请求 UUID、会话 ID、消息 ID 和完成边界，本地 `Profile */IndexedDB/chrome_doubao-chat_0.indexeddb.leveldb` 的任务记录提供输入输出。Pilot 只读 Chromium WAL 和不可变 SSTable，校验校验和、分块和消息关联，保持数据库由客户端持有。记录迟写、半条记录和临时读取失败时保留待采请求，后续轮询继续推进。首次启用采集新请求，旧会话中的新增轮次也按独立请求身份采集。
 
+消息按同一任务库键的最新序列快照选择。客户端清空任务库、移除请求或删除任务库键后，旧 WAL 和 SSTable 中的内容失效；损坏或未支持的任务库编码继续保留待采状态。客户端已经清除且无法恢复的正文会形成采集缺口。
+
 当前覆盖文本消息的输入输出及 ENTRY → AGENT → STEP → LLM。LLM 时间范围为客户端提交至 `on_message_receiving_end`，Span 属性 `loongsuite.doubao_work.timing_basis` 说明时间来源。原生 `model_id` 保留为专属字段，提供商模型名称与 Token 尚无可靠来源。聊天记录中的图片、音频及其他非文本块需继续适配。macOS 2.34.6 是本次协议与真实验收目标，Windows 普通聊天运行态仍需验证。
 
 聊天原生读取共用上述每轮预算。最多读取 32 个 WAL / SSTable 文件，逻辑记录和表文件各最多 8 MiB，单条文本最多 512 KiB，单源保留最近 128 个任务投影。消息投影缓存最多 16 MiB，双产品同时运行时减半；正在解码的单个表另有最多 8 MiB 的临时空间。首次冷读可能跨多个轮询周期，不变 WAL 只校验小锚点，不变表不再读取正文。原始任务对象及正文缓存不写入 checkpoint。
