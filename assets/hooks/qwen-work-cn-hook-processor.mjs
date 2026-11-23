@@ -30,7 +30,9 @@ const REVIEW_COPY_PREFIX = '[SYSTEM: This is an automated background review task
 
 async function main() {
   const { agentId, logPrefix } = parseArgs();
-  const payload = await parseStdinPayload(agentId);
+  // QwenWorkCN 2.1.0 writes user transcript rows only when this event has
+  // a registered Hook. Acknowledge it without consuming the unfinished turn.
+  const payload = await parseStdinPayload(agentId, ['UserPromptSubmit']);
   if (!payload) return;
 
   let runtimeConfig;

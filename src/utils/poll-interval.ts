@@ -1,5 +1,5 @@
 /**
- * One poll interval for every agent collector.
+ * Global poll interval override for every agent collector.
  * Milliseconds. Only decimal integers from 1000 through 2147483647 are
  * accepted. Fractions, scientific notation, hex, and out-of-range values are
  * ignored so Node cannot clamp setInterval back to a 1ms timer.
@@ -8,6 +8,8 @@ export const POLL_INTERVAL_ENV = 'LOONGSUITE_PILOT_POLL_INTERVAL_MS';
 
 /** Built-in collector poll interval when no env var or listener override is set. */
 export const DEFAULT_POLL_INTERVAL_MS = 10_000;
+
+export const DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS = 30_000;
 
 /** Shortest accepted unified interval. Below this, Node's timer clamp is too easy to hit. */
 const MIN_POLL_INTERVAL_MS = 1_000;

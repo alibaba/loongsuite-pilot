@@ -42,7 +42,7 @@ export function addDoubaoAssistantRounds(
   const ownerId = ownerRecord[`${PREFIX}observation_scope`] === 'native_sandbox_execution' ? parent.spanId : doubaoRootAgentSpanId(parent.traceId);
   const localIds = new Set(records.filter(record => ['tool.call', 'tool.result'].includes(String(record['event.name'])))
     .map(record => record['gen_ai.tool.call.id']));
-  const common: Attributes = { 'gen_ai.framework': 'doubao-work' };
+  const common: Attributes = { 'gen_ai.framework': ownerRecord['gen_ai.framework'] === 'doubao' ? 'doubao' : 'doubao-work' };
   for (const key of ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.provider.name']) {
     if (typeof ownerRecord[key] === 'string') common[key] = ownerRecord[key] as string;
   }
