@@ -94,5 +94,7 @@ it('exports only model spans with both messages and keeps observable tools', () 
   const models = [span('LLM', 'a', '1', text, message({ type: 'text', content: '  ' })),
     span('LLM', 'b', '2', '[]', text), span('LLM', 'c', '3', text, message({ type: 'tool_call', name: 'Read' }))];
   const tool = span('TOOL', 'tool', '2');
-  expect(omitEmptyTraeModelSpans([...steps, ...models, tool])).toEqual([steps[1], steps[2], models[2], tool]);
+  const stream = span('STEP', 'stream', 'agent');
+  expect(omitEmptyTraeModelSpans([stream, steps[2], models[2]])).toEqual([steps[2], models[2]]);
+  expect(omitEmptyTraeModelSpans([...steps, ...models, stream, tool])).toEqual([steps[1], steps[2], models[2], tool]);
 });

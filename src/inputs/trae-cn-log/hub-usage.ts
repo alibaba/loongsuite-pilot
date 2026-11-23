@@ -139,11 +139,11 @@ export class HubUsage {
           if (row.type === 'token_usage') {
             if (!count(d.prompt_tokens) || !count(d.completion_tokens) || !count(row.seq) ||
                 d.prompt_tokens + d.completion_tokens !== d.total_tokens) { turn.contiguous = false; continue; }
+            const cached = d.cache_read_input_tokens ?? d.prompt_tokens_details?.cached_tokens;
             turn.reports.set(row.seq, { input: d.prompt_tokens, output: d.completion_tokens,
               reasoning: count(d.reasoning_tokens) && d.reasoning_tokens <= d.completion_tokens ? d.reasoning_tokens : undefined,
               cacheCreated: count(d.cache_creation_input_tokens) && d.cache_creation_input_tokens <= d.prompt_tokens ? d.cache_creation_input_tokens : undefined,
-              cached: count(d.cache_read_input_tokens) && d.cache_read_input_tokens <= d.prompt_tokens
-                ? d.cache_read_input_tokens : undefined });
+              cached: count(cached) && cached <= d.prompt_tokens ? cached : undefined });
           }
         } catch { if (cursor.turn) cursor.turn.contiguous = false; }
       }

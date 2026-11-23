@@ -204,9 +204,7 @@ function hasMessageBody(value: unknown): boolean {
 export function omitEmptyTraeModelSpans(spans: ReadableSpan[]): ReadableSpan[] {
   const empty = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM' &&
     !(hasMessageBody(s.attributes['gen_ai.input.messages']) && hasMessageBody(s.attributes['gen_ai.output.messages'])));
-  if (!empty.length) return spans;
   const removed = new Map(empty.map(s => [s.spanContext().spanId, s.parentSpanId]));
-  const modelSteps = new Set(removed.values());
   const kept = spans.filter(s => !removed.has(s.spanContext().spanId));
   for (const span of kept) {
     if (span.parentSpanId && removed.has(span.parentSpanId)) {
@@ -215,5 +213,5 @@ export function omitEmptyTraeModelSpans(spans: ReadableSpan[]): ReadableSpan[] {
   }
   const withChildren = new Set(kept.map(s => s.parentSpanId));
   return kept.filter(s => s.attributes['gen_ai.span.kind'] !== 'STEP' ||
-    !modelSteps.has(s.spanContext().spanId) || withChildren.has(s.spanContext().spanId));
+    withChildren.has(s.spanContext().spanId));
 }
