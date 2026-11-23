@@ -190,7 +190,18 @@ export class DoubaoChatReader {
         while (position + 7 <= bytes) {
           const length = buffer.readUInt16LE(position + 4), type = buffer[position + 6];
           if (length === 0 && type === 0) { position = bytes; source.offset = readStart + bytes; break; }
-          if (position + 7 + length > bytes) break;
+          if (position + 7 + length > bytes) {
+            const blockEnd = readStart + bytes;
+            // Only the final incomplete block can gain the missing bytes.
+            // Resume at the next block and require fresh request evidence.
+            if (blockEnd % BLOCK_BYTES !== 0) break;
+            source.offset = blockEnd;
+            source.fragment = [];
+            source.fragmentBytes = 0;
+            source.readError = new Error('Invalid Doubao chat WAL record length');
+            source.recoveredRequests = new Set();
+            throw source.readError;
+          }
           const payload = buffer.subarray(position + 7, position + 7 + length);
           if (chatCrc32c(buffer.subarray(position + 6, position + 7 + length)) !== unmaskChatCrc(buffer.readUInt32LE(position))) {
             source.offset = readStart + position + 7 + length;

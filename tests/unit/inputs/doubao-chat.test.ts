@@ -93,6 +93,25 @@ describe('Doubao ordinary chat collection', () => {
     await expect(new DoubaoChatReader(root).find('synthetic-chat-turn', budget())).rejects.toThrow('checksum');
   });
 
+  it('recovers a specific request after a damaged full WAL block', async () => {
+    const { root, file } = await setup();
+    const block = Buffer.alloc(32 * 1024);
+    const first = chatWal([chatBatch()]);
+    first.copy(block);
+    // A physical WAL record cannot cross a 32 KiB block. This header
+    // describes missing bytes in a block that is already complete.
+    block.writeUInt16LE(block.length, first.length + 4);
+    block[first.length + 6] = 1;
+    await writeFile(file, block);
+    await appendFile(file, chatWal([chatBatch({ sequence: 2, session: 'other-chat-turn' })]));
+
+    const reader = new DoubaoChatReader(root);
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('WAL record length');
+    await expect(reader.find('synthetic-chat-turn', budget())).rejects.toThrow('WAL record length');
+    await appendFile(file, chatWal([chatBatch({ sequence: 3, output: 'AFTER_DAMAGED_BLOCK' })]));
+    expect((await reader.find('synthetic-chat-turn', budget()))?.output).toBe('AFTER_DAMAGED_BLOCK');
+  });
+
   it('continues fragmented batches across bounded collection cycles', async () => {
     const { root, file } = await setup();
     await writeFile(file, chatWal([chatBatch({ output: 'x'.repeat(180000) })]));
