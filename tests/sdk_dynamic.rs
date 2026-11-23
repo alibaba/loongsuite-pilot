@@ -140,7 +140,9 @@ fn library_path() -> PathBuf {
         "libloongsuite_pilot.so"
     };
     let profile = exe.parent().unwrap().parent().unwrap();
-    [profile.join(name), profile.join("deps").join(name)]
+    // cargo test links the workspace cdylib in deps. A previous cargo build
+    // can leave a different SDK beside the profile binaries.
+    [profile.join("deps").join(name), profile.join(name)]
         .into_iter()
         .find(|p| p.is_file())
         .expect("build the real cdylib before SDK acceptance")
