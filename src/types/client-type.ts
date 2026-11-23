@@ -20,6 +20,7 @@ export enum ClientType {
   Wukong = 'wukong',
   WorkBuddy = 'workbuddy',
   DoubaoWork = 'doubao-work',
+  Doubao = 'doubao',
 
   // CLI tools
   GeminiCli = 'gemini-cli',

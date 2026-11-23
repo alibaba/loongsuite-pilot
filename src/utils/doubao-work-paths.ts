@@ -4,6 +4,25 @@ import { resolveHome } from './fs-utils.js';
 
 export type DoubaoClient = 'doubao-work' | 'doubao';
 
+export function isDoubaoAgentType(agentType: string): agentType is DoubaoClient {
+  return agentType === 'doubao-work' || agentType === 'doubao';
+}
+
+export function resolveDoubaoAppEnabled(
+  listeners?: Record<string, { client?: unknown; enabled?: boolean }>,
+  agents?: Record<string, { enabled?: boolean }>,
+): boolean {
+  if (listeners?.doubao?.client !== undefined && listeners.doubao.client !== 'doubao') return false;
+  const legacy = listeners?.['doubao-work'];
+  // Both true and false on the old Agent indicate a previous installer selection.
+  return listeners?.doubao?.enabled ?? agents?.doubao?.enabled
+    ?? (legacy?.client === undefined && legacy?.enabled !== false && agents?.['doubao-work']?.enabled === undefined);
+}
+
+export function doubaoAppUsesLegacySource(listeners?: Record<string, { client?: unknown; enabled?: boolean }>): boolean {
+  return listeners?.['doubao-work']?.client === 'doubao';
+}
+
 /** Shared source-only configuration for probing and the full config loader. */
 export function resolveDoubaoWorkSource(listener?: { client?: unknown; logDir?: unknown }): {
   client?: DoubaoClient; logDir?: string;
