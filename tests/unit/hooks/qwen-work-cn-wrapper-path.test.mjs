@@ -41,6 +41,7 @@ describe('QwenWorkCN wrapper dataDir propagation', () => {
       expect(wrapper).toContain('Resolve-NodeBin');
     }
     expect(powershell).not.toContain('(Get-Command node -ErrorAction SilentlyContinue).Source');
+    expect(powershell).not.toContain('| Out-Null');
     expect(commonPowershell).toContain('$env:LOONGSUITE_PILOT_DATA_DIR');
     expect(commonPowershell).toContain('$env:LOONGSUITE_PILOT_CACHE_DIR');
     expect(commonPowershell).toContain('$script:MIN_NODE_MAJOR = 18');

@@ -621,6 +621,35 @@ describe('Orchestrator', () => {
       }
     });
 
+    it.each(['darwin', 'win32'] as const)('registers independent product gates and roots on %s by default', async target => {
+      const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      Object.defineProperty(process, 'platform', { value: target, configurable: true });
+      const config = makeConfig();
+      config.listeners['doubao-work'] = { enabled: true, pollInterval: 1200 };
+      config.listeners.doubao = { enabled: true, pollInterval: 2300 };
+      const orch = new Orchestrator(config);
+      try {
+        await orch.start();
+        const work = orch.getInputManager().getInput('doubao-work') as any;
+        const app = orch.getInputManager().getInput('doubao') as any;
+        expect(work.client).toBe('doubao-work'); expect(app.client).toBe('doubao');
+        expect(app.agentType).toBe('doubao'); expect(work.agentType).toBe('doubao-work');
+        expect(work.logDir).not.toBe(app.logDir); expect(work.snapshotRoot).not.toBe(app.snapshotRoot);
+        expect(work.pollIntervalMs).toBe(1200); expect(app.pollIntervalMs).toBe(2300);
+        expect(work.workLimits.bytes + app.workLimits.bytes).toBe(8 * 1024 * 1024);
+        const workDetection = discoveryEntries.find(entry => entry.id === 'doubao-work')!;
+        const appDetection = discoveryEntries.find(entry => entry.id === 'doubao')!;
+        (orch as any).agentControlManager.resolveEnabled = (_id: string, enabled: boolean) => enabled;
+        expect(workDetection.enabled()).toBe(true); expect(appDetection.enabled()).toBe(true);
+        config.listeners['doubao-work'].enabled = false;
+        expect(workDetection.enabled()).toBe(false); expect(appDetection.enabled()).toBe(true);
+        config.listeners['doubao-work'].enabled = true; config.listeners.doubao.enabled = false;
+        expect(workDetection.enabled()).toBe(true); expect(appDetection.enabled()).toBe(false);
+        config.listeners.doubao.enabled = true; config.listeners['doubao-work'].client = 'doubao';
+        expect(appDetection.enabled()).toBe(false);
+      } finally { await orch.stop(); Object.defineProperty(process, 'platform', platform); }
+    });
+
     it('uses the configured dataDir for QwenWorkCN Hook history and watches only native sources', async () => {
       const dataDir = '/tmp/custom-pilot-data';
       const orch = new Orchestrator(makeConfig({ dataDir }));

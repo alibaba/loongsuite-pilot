@@ -27,6 +27,41 @@ describe.runIf(process.platform !== 'win32')('QwenWorkCN custom dataDir pipeline
     await fs.rm(root, { recursive: true, force: true });
   });
 
+  it('acknowledges UserPromptSubmit without advancing the transcript cursor before Stop', async () => {
+    const rows = transcriptRows();
+    rows[0] = { ...rows[0], message: { role: 'user', content: 'passive prompt' } };
+    await fs.writeFile(transcriptFile, `${JSON.stringify(rows[0])}\n`);
+    const hook = path.join(dataDir, 'hooks', 'qwenworkcn-loongsuite-pilot-hook.sh');
+    const invoke = (event: string) => spawnSync('bash', [hook], {
+      input: JSON.stringify({
+        hook_event_name: event,
+        transcript_path: transcriptFile,
+        session_id: 'session-custom',
+        cwd: '/workspace/custom',
+      }),
+      encoding: 'utf8',
+      env: { ...process.env, HOME: fakeHome, NODE_ENV: 'production' },
+    });
+    const prompt = invoke('UserPromptSubmit');
+    expect(prompt.status, prompt.stderr).toBe(0);
+    expect(prompt.stdout).toBe('{}\n');
+    await expect(fs.stat(path.join(dataDir, 'state'))).rejects.toThrow();
+    const historyDir = path.join(dataDir, 'logs', 'qwen-work-cn', 'history');
+    await expect(fs.stat(historyDir)).rejects.toThrow();
+
+    await fs.appendFile(transcriptFile, `${JSON.stringify(rows[1])}\n`);
+    const stop = invoke('Stop');
+    expect(stop.status, stop.stderr).toBe(0);
+    const [historyFile] = await fs.readdir(historyDir);
+    const readHistory = async () => (await fs.readFile(path.join(historyDir, historyFile), 'utf8'))
+      .trim().split('\n').map(line => JSON.parse(line));
+    const events = await readHistory();
+    expect(events.map(event => event['event.name'])).toEqual(['other', 'llm.request', 'llm.response']);
+    expect(JSON.stringify(events)).toContain('passive prompt');
+    invoke('Stop');
+    expect(await readHistory()).toEqual(events);
+  });
+
   it('reads custom-root Hook history and enriches it from native segments', async () => {
     const staleDataDir = path.join(root, 'stale-pilot-data');
     const env: NodeJS.ProcessEnv = {

@@ -569,21 +569,19 @@ export class HookManager {
     ];
   }
 
-  /** Build the dedicated QwenWorkCN Stop hook definition. */
+  /** Register prompt transcript writing alongside QwenWorkCN Stop collection. */
   static buildQwenWorkCNHooks(loongsuitePilotDir?: string): HookDefinition[] {
     const baseDir = loongsuitePilotDir ?? resolveHome('~/.loongsuite-pilot');
     const command = wrapHookCommand(`${baseDir}/hooks/qwenworkcn-loongsuite-pilot-hook${hookExt}`);
-    return [
-      {
-        agentId: 'qwen-work-cn',
-        settingsPath: resolveHome('~/.qwenworkcn/settings.json'),
-        hookJsonPath: ['hooks', 'Stop'],
-        hookCommand: command,
-        matcher: '*',
-        useNestedFormat: true,
-        shell: isWin ? 'powershell' : undefined,
-      },
-    ];
+    return ['Stop', 'UserPromptSubmit'].map(event => ({
+      agentId: 'qwen-work-cn',
+      settingsPath: resolveHome('~/.qwenworkcn/settings.json'),
+      hookJsonPath: ['hooks', event],
+      hookCommand: command,
+      matcher: '*',
+      useNestedFormat: true,
+      shell: isWin ? 'powershell' : undefined,
+    }));
   }
 
   /**
