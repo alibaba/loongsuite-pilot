@@ -112,7 +112,7 @@ describe('QoderWork-family runtime wrapper forwarding', () => {
     await fs.writeFile(executable, 'fixture');
     await fs.writeFile(path.join(electronDir, 'package.json'), '{"name":"electron"}');
     await fs.writeFile(path.join(electronDir, 'path.txt'), 'Electron.app/Contents/MacOS/Electron');
-    if (pnpm) await fs.symlink(electronDir, path.join(project, 'node_modules', 'electron'));
+    if (pnpm) await fs.symlink(electronDir, path.join(project, 'node_modules', 'electron'), 'junction');
     await fs.writeFile(path.join(project, 'package.json'), JSON.stringify({
       dependencies: { '@qoder-ai/qoder-agent-sdk': 'npm:@ali/qodercn-agent-sdk-next@1' },
     }));
@@ -146,7 +146,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     const worker = new Worker(`
       Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(executable)} });
       process.resourcesPath = ${JSON.stringify(resources)};
-      import(${JSON.stringify(wrapper)});
+      import(${JSON.stringify(pathToFileURL(wrapper).href)});
     `, {
       eval: true, stdin: true, stdout: true, stderr: true,
       env: { ...process.env, npm_package_json: manifest, QODER_WORKER_RUNTIME_ASSET_ROOT: path.dirname(wrapper) },
@@ -202,6 +202,14 @@ createInterface({ input: process.stdin }).on('line', line => {
     expect(existsSync(path.join(dataDir, 'logs', 'qwenworkcn-intercept.jsonl'))).toBe(false);
   });
 
+  it.each([false, true])('uses the project beside nested Electron dependencies (pnpm=%s)', async pnpm => {
+    await createDevProject('workspace');
+    const dev = await createDevProject(path.join('workspace', 'node_modules', 'embedded-host'), { pnpm });
+    const result = await initializeWorker({ executable: dev.executable });
+    expect(result.runtime).toBe(pathToFileURL(dev.runtime).href);
+    expect(result.runtimeRoot).toBe(path.dirname(dev.runtime));
+  });
+
   it('prefers the verified workspace SDK over a different hoisted SDK', async () => {
     const rootDev = await createDevProject('monorepo');
     const workspace = await createDevProject('monorepo/packages/app');
@@ -241,6 +249,30 @@ createInterface({ input: process.stdin }).on('line', line => {
     await expect(initializeWorker({ executable: dev.executable })).rejects.toThrow('native dependency unavailable');
     expect(await fs.readFile(path.join(dataDir, 'logs', 'qoderwork-wrapper-error.log'), 'utf8'))
       .toContain('host runtime import failed');
+  });
+
+  it('reports a runtime import failure when the parent has not drained Worker stdout', async () => {
+    const dev = await createDevProject('paused-stdout');
+    await fs.writeFile(dev.runtime, `
+process.stdout.write('x'.repeat(256 * 1024));
+throw new Error('runtime initialization failed with queued output');
+`);
+    const worker = new Worker(`
+      Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(dev.executable)} });
+      import(${JSON.stringify(pathToFileURL(wrapper).href)});
+    `, { eval: true, stdout: true, env: { ...process.env, npm_package_json: '' } });
+    let timer;
+    try {
+      const failure = await new Promise((resolve, reject) => {
+        worker.once('error', resolve);
+        worker.once('exit', code => reject(new Error(`Worker exited without the import error: ${code}`)));
+        timer = setTimeout(() => reject(new Error('Worker did not report the import error')), 2000);
+      });
+      expect(failure.message).toContain('runtime initialization failed with queued output');
+    } finally {
+      clearTimeout(timer);
+      await worker.terminate();
+    }
   });
 
   it('does not use a conversation workspace runtime when the host runtime is missing', async () => {

@@ -23,6 +23,7 @@ const SDK_WORKER_REL = path.join(
 );
 const RUNTIME_NAMES = ['qoder-worker-runtime.obf.mjs', 'qoder-worker-runtime.mjs'];
 const SDK_NAME = '@qoder-ai/qoder-agent-sdk';
+const STDOUT_CLOSE_TIMEOUT_MS = 500;
 
 function candidateResourceRoots() {
   const roots = [];
@@ -54,8 +55,13 @@ function findDevelopmentRuntime() {
   let executable;
   try { executable = fs.realpathSync(process.execPath); } catch { return null; }
   const normalized = executable.replace(/\\/g, '/');
-  if (!normalized.includes('/node_modules/electron/dist/')) return null;
-  const project = executable.slice(0, normalized.indexOf('/node_modules/'));
+  const electronLayout = normalized.lastIndexOf('/node_modules/electron/dist/');
+  if (electronLayout < 0) return null;
+  // Use Electron's own enclosing node_modules. pnpm inserts a virtual store
+  // under that project's node_modules before the final package directory.
+  const layoutRoot = normalized.slice(0, electronLayout);
+  const pnpmStore = /\/node_modules\/\.pnpm\/[^/]+$/.exec(layoutRoot);
+  const project = executable.slice(0, pnpmStore?.index ?? electronLayout);
   const manifests = [process.env.npm_package_json, path.join(project, 'package.json')];
   for (const manifest of new Set(manifests)) {
     if (!manifest || !path.isAbsolute(manifest)) continue;
@@ -86,8 +92,15 @@ function findDevelopmentRuntime() {
 async function failWorker(error) {
   if (!isMainThread && !process.stdout.writableEnded) {
     // Some SDK versions destroy stdout on Worker error without ending the
-    // downstream line reader. Close stdout first so initialize can reject.
-    await new Promise(resolve => process.stdout.end(resolve));
+    // downstream line reader. Give stdout time to close before reporting the
+    // error, without waiting indefinitely for the parent to read queued data.
+    await new Promise(resolve => {
+      const timeout = setTimeout(resolve, STDOUT_CLOSE_TIMEOUT_MS);
+      process.stdout.end(() => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
   }
   throw error;
 }
