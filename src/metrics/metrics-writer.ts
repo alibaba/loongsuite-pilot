@@ -386,6 +386,7 @@ export class MetricsWriter {
       this.alarmManager.record(
         'USER_ID_FORMAT_ALARM', '1',
         `userId "${userId}" contains braces, expected plain number like "123456"`,
+        { userId },
       );
     }
   }

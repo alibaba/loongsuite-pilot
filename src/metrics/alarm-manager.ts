@@ -28,6 +28,8 @@ export type AlarmType =
 export interface AlarmContext {
   input_name?: string;
   endpoint_name?: string;
+  /** The identity of an existing metrics snapshot that produced this alarm. */
+  userId?: string;
 }
 
 export interface AlarmEntry {
@@ -48,6 +50,7 @@ interface AlarmItem {
   level: AlarmLevel;
   message: string;
   count: number;
+  userId: string;
   context?: AlarmContext;
 }
 
@@ -64,13 +67,14 @@ export class AlarmManager {
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
-    const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
+    const userId = context?.userId ?? this.userIdProvider();
+    const key = JSON.stringify([type, context?.input_name ?? '', context?.endpoint_name ?? '', userId]);
     const existing = this.alarms.get(key);
     if (existing) {
       existing.count += count;
       existing.message = message;
     } else {
-      this.alarms.set(key, { alarmType: type, level, message, count, context });
+      this.alarms.set(key, { alarmType: type, level, message, count, userId, context });
     }
   }
 
@@ -78,7 +82,6 @@ export class AlarmManager {
     if (this.alarms.size === 0) return [];
 
     const now = Math.floor(Date.now() / 1000);
-    const userId = this.userIdProvider();
     const entries: AlarmEntry[] = [];
 
     for (const item of this.alarms.values()) {
@@ -88,7 +91,7 @@ export class AlarmManager {
         alarm_level: item.level,
         alarm_message: item.message,
         alarm_count: String(item.count),
-        user_id: userId,
+        user_id: item.userId,
         ip: this.ip,
         ver: this.version,
         __time__: now,

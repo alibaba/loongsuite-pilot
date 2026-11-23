@@ -38,6 +38,8 @@ it('refreshes the configured identity across collection, metrics and alarms whil
     expect(startup.instance_id).toContain('_startup-snapshot_');
     await manager.flushPreparedEntries([buildTestEntry()]);
     expect(flusher.batchCalls.at(-1)?.[0]['user.id']).toBe('original');
+    alarms.record('HOOK_INSTALL_ALARM', '2', 'initial failure', { input_name: 'cursor' }, 2);
+    alarms.record('HOOK_INSTALL_ALARM', '2', 'still failing', { input_name: 'cursor' });
 
     await writeFile(configPath, '{"userId":"corrected"}');
     now = USER_ID_REFRESH_INTERVAL_MS;
@@ -51,8 +53,11 @@ it('refreshes the configured identity across collection, metrics and alarms whil
       agent: 'cursor', hookEvent: 'stop', calls: 1, totalDurationMs: 2, maxDurationMs: 2,
     }]);
     expect(l2?.hooks).toMatchObject([{ user_id: 'corrected', instance_id: startup.instance_id }]);
-    alarms.record('HOOK_INSTALL_ALARM', '2', 'test');
-    expect(alarms.serialize()).toMatchObject([{ user_id: 'corrected' }]);
+    alarms.record('HOOK_INSTALL_ALARM', '2', 'failure after refresh', { input_name: 'cursor' });
+    expect(alarms.serialize()).toMatchObject([
+      { user_id: 'original', alarm_count: '3', alarm_message: 'still failing' },
+      { user_id: 'corrected', alarm_count: '1', alarm_message: 'failure after refresh' },
+    ]);
 
     await manager.flushPreparedEntries([
       buildTestEntry(),
