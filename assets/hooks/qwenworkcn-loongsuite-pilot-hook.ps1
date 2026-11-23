@@ -10,5 +10,5 @@ if (-not (Test-Path $Common)) { exit 0 }
 . $Common
 $NodeBin = Resolve-NodeBin
 if (-not $NodeBin) { exit 0 }
-try { & $NodeBin $Processor --agent-id qwen-work-cn --log-prefix qwen-work-cn 2>$null | Out-Null } catch {}
+try { & $NodeBin $Processor --agent-id qwen-work-cn --log-prefix qwen-work-cn 2>$null } catch {}
 exit 0

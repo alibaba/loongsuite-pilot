@@ -49,31 +49,33 @@ Pilot 主要帮助回答这些问题：
 
 ## 支持的 Agent
 
-| Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 |
-|-------|----------|------------|----------|------------|----------------|
-| Claude Code | Hook | Yes | Yes | Yes | Yes |
-| Codex | Hook | Yes | Yes | Yes | Yes |
-| Cursor | Hook | Yes | Yes | Yes | Yes |
-| Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes |
-| DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes |
-| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes |
-| Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes |
-| Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes |
-| MiMo Code | 插件注入 | Yes | Yes | Yes | Yes |
-| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes |
-| OpenCode | 插件注入 | Yes | Yes | Yes | Yes |
-| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes |
-| Qoder | Hook | Yes | Yes | Yes | Yes |
-| Qoder CN | Hook | Yes | Yes | Yes | Yes |
-| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes |
-| Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes |
-| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
-| Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes |
-| Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes |
-| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes |
-| [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | 客户端轮次、本地工具与原生 sandbox 执行 | 仅元数据 | No | No |
+| Agent | 集成方式 | Trace 上报 | 日志上报 | Token 用量 | 对话 / 工具调用 | 多模态 |
+|-------|----------|------------|----------|------------|----------------|--------|
+| Antigravity App / 新 IDE | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Antigravity CLI (`agy`) | 本地只读 SQLite + transcript | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Claude Code | Hook | Yes | Yes | Yes | Yes | No |
+| Codex | Hook | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Cursor | Hook | Yes | Yes | Yes | Yes | No |
+| Cursor CLI | 复用 Cursor Hook | Yes | Yes | Yes | Yes | No |
+| DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | Yes | Yes | Yes | Yes | No |
+| Grok Build | Hook + 本地 session 日志 | Yes | Yes | Yes | Yes | No |
+| Hermes Agent | 原生目录插件 | Yes | Yes | Yes | Yes | No |
+| Kiro CLI | Hook / session 轮询 | Yes | Yes | No | Yes | No |
+| MiMo Code | 插件注入 | Yes | Yes | Yes | Yes | No |
+| OpenClaw | 插件注入 | Yes | Yes | Yes | Yes | No |
+| OpenCode | 插件注入 | Yes | Yes | Yes | Yes | No |
+| Pi Coding Agent | Extension 注入 | Yes | Yes | Yes | Yes | No |
+| Qoder | Hook | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Qoder CN | Hook | Yes | Yes | Yes | Yes | No |
+| Qoder for JetBrains | 自动检测 | Yes | Yes | Yes | Yes | No |
+| Qoder CLI | Hook / session polling | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Qoder Work | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | No |
+| Qoder Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | No |
+| Qwen Code CLI | Hook | Yes | Yes | Yes | Yes | No |
+| Qwen Work CN | Hook / 本地数据轮询 | Yes | Yes | Yes | Yes | Yes (Opt-in) |
+| Wukong | CLI API 轮询 | Yes | Yes | Yes | Yes | No |
+| WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | Yes | Yes | Yes | Yes | No |
+| [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | 客户端轮次、本地工具与原生 sandbox 执行 | 仅元数据 | No | No | No |
 
 OpenClaw 集成支持 2026.3.8 及以上版本，自动识别版本；5.12 之前的模型调用时间通过旧版 Hook 推定，详见[兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)。
 
