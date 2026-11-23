@@ -4,7 +4,7 @@ import * as path from 'node:path';
 import type { AgentDefinition, ListenerConfig } from '../types/index.js';
 import { isReservedPiSdkAgentId, isValidPiSdkAgentId } from '../pi-sdk/pi-sdk-agent-identity.js';
 import { resolveHome } from '../utils/fs-utils.js';
-import { resolveDoubaoWorkPaths } from '../utils/doubao-work-paths.js';
+import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, resolveDoubaoWorkPaths } from '../utils/doubao-work-paths.js';
 import { createLogger } from '../utils/logger.js';
 import { resolvePiCodingAgentDir, resolveGrokHome, resolveDshHome } from './env-agent-dirs.js';
 
@@ -33,7 +33,8 @@ export interface AgentDefLoaderOptions {
   localDir: string;
   pilotDir: string;
   dataDir: string;
-  doubaoWork?: Pick<ListenerConfig, 'client' | 'logDir'>;
+  doubaoWork?: Partial<ListenerConfig>;
+  doubao?: Partial<ListenerConfig>;
 }
 
 export class AgentDefLoader {
@@ -42,6 +43,7 @@ export class AgentDefLoader {
   private readonly pilotDir: string;
   private readonly dataDir: string;
   private readonly doubaoWork: AgentDefLoaderOptions['doubaoWork'];
+  private readonly doubao: AgentDefLoaderOptions['doubao'];
 
   constructor(opts: AgentDefLoaderOptions) {
     this.builtinDir = opts.builtinDir;
@@ -49,6 +51,7 @@ export class AgentDefLoader {
     this.pilotDir = opts.pilotDir;
     this.dataDir = opts.dataDir;
     this.doubaoWork = opts.doubaoWork ? { ...opts.doubaoWork } : undefined;
+    this.doubao = opts.doubao ? { ...opts.doubao } : undefined;
   }
 
   async load(): Promise<AgentDefinition[]> {
@@ -63,7 +66,9 @@ export class AgentDefLoader {
       merged.set(def.id, def);
     }
 
-    const result = [...merged.values()];
+    const sources = { 'doubao-work': this.doubaoWork ?? {}, ...(this.doubao ? { doubao: this.doubao } : {}) };
+    const result = [...merged.values()].filter(def => def.id !== 'doubao'
+      || (resolveDoubaoAppEnabled(sources) && !doubaoAppUsesLegacySource(sources)));
     logger.info('agent definitions loaded', {
       builtin: builtin.length,
       local: local.length,
@@ -202,6 +207,9 @@ export class AgentDefLoader {
       .replace(/\$DOUBAO_LOG_DIR/g, () => this.doubaoWork?.logDir
         ? path.resolve(resolveHome(this.doubaoWork.logDir))
         : resolveDoubaoWorkPaths(this.doubaoWork?.client).logDir ?? '$DOUBAO_LOG_DIR')
+      .replace(/\$DOUBAO_APP_LOG_DIR/g, () => this.doubao?.logDir
+        ? path.resolve(resolveHome(this.doubao.logDir))
+        : resolveDoubaoWorkPaths('doubao').logDir ?? '$DOUBAO_APP_LOG_DIR')
       .replace(/\$DOUBAO_WORK_DATA/g, () => resolveDoubaoWorkPaths().userDataRoot ?? '$DOUBAO_WORK_DATA')
       .replace(/\$DOUBAO_APP_DATA/g, () => resolveDoubaoWorkPaths('doubao').userDataRoot ?? '$DOUBAO_APP_DATA')
       .replace(/\$HERMES_CLI/g, hermesCli)

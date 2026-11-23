@@ -38,6 +38,7 @@ export interface DeploymentManagerOptions {
   pilotDir: string;
   builtinAgentsDir?: string;
   doubaoWork?: AgentDefLoaderOptions['doubaoWork'];
+  doubao?: AgentDefLoaderOptions['doubao'];
   /** Set on records this manager writes. Omitted leaves any existing value. */
   installedBy?: 'hook-install' | 'daemon' | 'build';
   /**
@@ -94,6 +95,7 @@ export class DeploymentManager {
       pilotDir: opts.pilotDir,
       dataDir: opts.dataDir,
       doubaoWork: opts.doubaoWork,
+      doubao: opts.doubao,
     };
     this.loader = new AgentDefLoader(loaderOpts);
   }

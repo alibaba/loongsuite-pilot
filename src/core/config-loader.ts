@@ -47,7 +47,7 @@ import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
-import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
+import { resolveDoubaoAppEnabled, resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -841,6 +841,7 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
     'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
@@ -855,7 +856,7 @@ function buildListenersConfig(
       const merged: ListenerConfig = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
-        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
+        ...(key === 'doubao-work' || key === 'doubao' ? resolveDoubaoWorkSource(val) : {}),
       };
       // Preserve log-watch trajectory discovery overrides (P1-1) so an operator
       // can point trae-agent at a custom dir or pin one exact file. Fall back to
@@ -890,6 +891,12 @@ function buildListenersConfig(
         logger.warn('Invalid Doubao client; disabling this listener', {
           valueType: typeof val.client,
           allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
+      if (key === 'doubao' && val.client !== undefined && val.client !== 'doubao') {
+        logger.warn('Invalid Doubao App client; disabling this listener', {
+          valueType: typeof val.client, allowedValues: ['doubao'],
         });
         result[key].enabled = false;
       }
