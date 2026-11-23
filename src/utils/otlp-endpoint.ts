@@ -9,10 +9,10 @@ type OtlpEndpointRoute = Pick<OtlpEndpoint, 'endpoint' | 'traceEndpoint'>;
  * legacy endpoint remains a base URL and receives the /v1/traces suffix.
  */
 export function resolveOtlpTraceUrl(route: OtlpEndpointRoute): string | undefined {
-  const exact = nonEmpty(route.traceEndpoint);
+  const exact = nonEmpty(route.traceEndpoint, 'traceEndpoint');
   if (exact) return validateHttpUrl(exact, 'traceEndpoint');
 
-  const legacy = nonEmpty(route.endpoint);
+  const legacy = nonEmpty(route.endpoint, 'endpoint');
   if (!legacy) return undefined;
 
   const withoutTrailingSlash = legacy.replace(/\/+$/, '');
@@ -22,9 +22,10 @@ export function resolveOtlpTraceUrl(route: OtlpEndpointRoute): string | undefine
   return validateHttpUrl(resolved, 'endpoint');
 }
 
-function nonEmpty(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
+function nonEmpty(value: unknown, field: 'endpoint' | 'traceEndpoint'): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== 'string') throw new Error(`[otlp-trace] ${field} must be a string`);
+  return value.trim() || undefined;
 }
 
 function validateHttpUrl(value: string, field: 'endpoint' | 'traceEndpoint'): string {

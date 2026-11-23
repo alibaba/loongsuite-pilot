@@ -2058,6 +2058,49 @@ describe('ConfigLoader', () => {
         .toThrow('[otlp-trace] traceEndpoint must be an absolute HTTP(S) URL');
     });
 
+    it.each([
+      'ftp://example.test/traces?token=private-route-value',
+      { route: 'private-route-value' },
+    ])('keeps managed export when the user traceEndpoint is invalid', async traceEndpoint => {
+      mockReadJsonFile.mockResolvedValueOnce({ collectTrace: true, otlpTrace: { traceEndpoint } });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [{ name: 'managed', traceEndpoint: 'http://collector.internal:4318/trace/' }],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result?.endpoints.map(endpoint => endpoint.name)).toEqual(['managed']);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Skipping invalid OTLP trace backend', {
+        backend: 'user-otlp', reason: expect.stringContaining('traceEndpoint'),
+      });
+      expect(JSON.stringify(mockLoggerWarn.mock.calls)).not.toContain('private-route-value');
+    });
+
+    it('keeps valid user and managed routes around malformed entries in a managed array', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        collectTrace: true,
+        otlpTrace: { endpoint: 'http://user-collector:4318' },
+      });
+      mockReadJsonFile.mockResolvedValueOnce({
+        otlp: [
+          null,
+          { name: 'invalid', traceEndpoint: 'not a URL', endpoint: 'http://unused:4318' },
+          { name: 'invalid-legacy', endpoint: 123 },
+          { name: 'managed', traceEndpoint: 'http://collector.internal:4318/trace/' },
+        ],
+      });
+
+      const result = buildOtlpTraceConfig(await loadConfig());
+
+      expect(result?.endpoints.map(endpoint => endpoint.name)).toEqual(['user-otlp', 'managed']);
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Skipping invalid OTLP trace backend', {
+        backend: 'invalid', reason: expect.stringContaining('traceEndpoint'),
+      });
+      expect(mockLoggerWarn).toHaveBeenCalledWith('Skipping invalid OTLP trace backend', {
+        backend: 'invalid-legacy', reason: expect.stringContaining('endpoint'),
+      });
+    });
+
     it('buildOtlpTraceConfig allows custom resource attribute keys', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         collectTrace: true,

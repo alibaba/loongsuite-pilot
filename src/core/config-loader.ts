@@ -1033,19 +1033,20 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   // endpoint while preserving the legacy environment-variable precedence.
   const envTraceEndpoint = nonEmpty(env('LOONGSUITE_PILOT_OTLP_TRACES_ENDPOINT'));
   const envLegacyEndpoint = env('LOONGSUITE_PILOT_OTLP_ENDPOINT');
-  const fileTraceEndpoint = nonEmpty(config.otlpTrace?.traceEndpoint);
+  const fileTraceEndpoint = config.otlpTrace?.traceEndpoint;
   let userTraceEndpoint: string | undefined;
   let userLegacyEndpoint: string | undefined;
   if (envTraceEndpoint !== undefined) {
     userTraceEndpoint = envTraceEndpoint;
   } else if (envLegacyEndpoint !== undefined) {
     userLegacyEndpoint = envLegacyEndpoint;
-  } else if (fileTraceEndpoint !== undefined) {
-    userTraceEndpoint = fileTraceEndpoint;
   } else {
-    userLegacyEndpoint = config.otlpTrace?.endpoint;
+    userTraceEndpoint = typeof fileTraceEndpoint === 'string'
+      ? nonEmpty(fileTraceEndpoint)
+      : fileTraceEndpoint ?? undefined;
+    if (userTraceEndpoint === undefined) userLegacyEndpoint = config.otlpTrace?.endpoint;
   }
-  if (userTraceEndpoint || userLegacyEndpoint) {
+  if (userTraceEndpoint !== undefined || userLegacyEndpoint) {
     let headers: Record<string, string> | undefined;
     const envHeaders = env('LOONGSUITE_PILOT_OTLP_HEADERS');
     if (envHeaders) {
@@ -1073,12 +1074,11 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   }
 
   // 3. Inner managed generic OTLP backends.
-  // Guard with Array.isArray: managed data_config.json is control-plane pushed,
-  // so a non-array (object/string) serialization must not throw here — mirrors
-  // buildSlsConfig's guard and keeps a bad push from bricking all flushers.
+  // Managed data_config.json can contain malformed arrays or entries. Keep
+  // valid backends available when the control plane sends a bad route.
   const innerOtlp = Array.isArray(config.innerTrace?.otlp) ? config.innerTrace!.otlp : [];
   innerOtlp.forEach((ep, i) => {
-    if (!ep.endpoint && !ep.traceEndpoint) return;
+    if (ep?.endpoint == null && ep?.traceEndpoint == null) return;
     endpoints.push({
       name: ep.name ?? `inner-otlp-${i}`,
       endpoint: ep.endpoint,
@@ -1092,7 +1092,7 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
   // 4. Inner managed CMS/ARMS shorthand backends.
   const innerCms = Array.isArray(config.innerTrace?.cms) ? config.innerTrace!.cms : [];
   innerCms.forEach((ep, i) => {
-    if (!ep.endpoint) return;
+    if (!ep?.endpoint) return;
     endpoints.push(
       cmsEntryToOtlpEndpoint(ep.name ?? `inner-cms-${i}`, ep, armsResourceAttributes, innerServiceName),
     );
@@ -1165,7 +1165,6 @@ function cmsEntryToOtlpEndpoint(
   return { name, endpoint: cms.endpoint, headers, serviceName };
 }
 
-/** Stable serialization of headers (sorted keys) for dedup keying. */
 /**
  * Dedup by resolved trace URL + full headers + serviceName. Because the CMS
  * shorthand encodes license-key, project, and workspace as headers, those
@@ -1174,8 +1173,19 @@ function cmsEntryToOtlpEndpoint(
 function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
   const seen = new Set<string>();
   const result: OtlpEndpoint[] = [];
+  let firstInvalidRoute: unknown;
   for (const ep of endpoints) {
-    const traceRoute = resolveOtlpTraceUrl(ep);
+    let traceRoute: string | undefined;
+    try {
+      traceRoute = resolveOtlpTraceUrl(ep);
+    } catch (error) {
+      firstInvalidRoute ??= error;
+      logger.warn('Skipping invalid OTLP trace backend', {
+        backend: ep.name,
+        reason: error instanceof Error ? error.message : 'Invalid trace route',
+      });
+      continue;
+    }
     if (!traceRoute) continue;
     const requestUrl = new URL(traceRoute);
     // The exporter merges headers from the environment and its defaults before
@@ -1193,6 +1203,7 @@ function dedupOtlpEndpoints(endpoints: OtlpEndpoint[]): OtlpEndpoint[] {
     seen.add(key);
     result.push(ep);
   }
+  if (result.length === 0 && firstInvalidRoute !== undefined) throw firstInvalidRoute;
   return result;
 }
 
