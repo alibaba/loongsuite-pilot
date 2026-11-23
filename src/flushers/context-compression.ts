@@ -11,6 +11,7 @@ const COMPRESSION_ATTRIBUTES = new Set([
   'gen_ai.context.tokens_before', 'gen_ai.context.tokens_after', 'gen_ai.context.compression_ratio',
   'gen_ai.context.window_size', 'gen_ai.context.messages_before', 'gen_ai.context.messages_after',
   'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.agent.name', 'user.id',
+  'agent.codex.compaction.input_tokens', 'agent.codex.compaction.output_tokens',
 ]);
 
 export function isCompression(record: EventLogRecord): boolean {

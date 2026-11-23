@@ -471,6 +471,66 @@ async function appendOversizedTerminal(transcript: string, terminal = 'task_comp
 }
 
 describe('CodexTranscriptInput', () => {
+  it('collects same-turn native compaction once across partial writes and restart, then continues with reset context', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-inline-compaction-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, 8).join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-1')).toHaveLength(1);
+    const compaction = (id: string, start: string, end: string) => [
+      record(end, 'compacted', { window_id: id, message: '',
+        replacement_history: [{ type: 'compaction', encrypted_content: 'private-encrypted-summary' }],
+        latest_token_usage_record: { usage: { input_tokens: 27000, output_tokens: 400 } } }),
+      record(end, 'event_msg', { type: 'token_count', info: {
+        total_token_usage: { total_tokens: 110 }, model_context_window: 950000,
+        last_token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 18000 },
+      } }),
+      record(end, 'event_msg', { type: 'item_completed', turn_id: 'turn-1',
+        item: { type: 'ContextCompaction', id },
+        started_at_ms: Date.parse(start), completed_at_ms: Date.parse(end) }),
+    ];
+    const compact1 = compaction('compact-1', '2026-06-24T06:00:06.100Z', '2026-06-24T06:00:06.900Z');
+    await fs.appendFile(transcript, compact1.slice(0, 2).join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress')).toHaveLength(0);
+    await fs.appendFile(transcript, compact1[2] + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    await processTranscriptOnce(first.input, transcript);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress')).toHaveLength(1);
+    await first.stateStore.save();
+    await first.input.stop();
+    const restarted = await createDormantInput(root);
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(restarted.entries).toHaveLength(0);
+    await fs.appendFile(transcript, [
+      ...lines.slice(8, 12),
+      ...compaction('compact-2', '2026-06-24T06:00:09.100Z', '2026-06-24T06:00:09.900Z'),
+      ...lines.slice(12),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(restarted.input, transcript);
+    await restarted.input.stop();
+    const entries = [...first.entries, ...restarted.entries];
+    expect(new Set(entries.map(entry => entry.trace_id)).size).toBe(1);
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+    const compressed = entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress');
+    expect(compressed).toHaveLength(2);
+    expect(compressed[0]).toMatchObject({ 'gen_ai.context.compress.duration': 0.8,
+      'gen_ai.context.tokens_after': 18000, 'agent.codex.compaction.input_tokens': 27000,
+      'agent.codex.compaction.output_tokens': 400 });
+    expect(compressed[0]['gen_ai.context.tokens_before']).toBeUndefined();
+    const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    expect(entryTimestampMs(requests[1])).toBe(Date.parse('2026-06-24T06:00:06.900Z'));
+    expect(entryTimestampMs(requests[2])).toBe(Date.parse('2026-06-24T06:00:09.900Z'));
+    expect(requests.slice(1).every(entry => entry['gen_ai.conversation.compacted'] === true)).toBe(true);
+    expect(requests.slice(1).every(entry => entry['gen_ai.input.messages'] === undefined)).toBe(true);
+    expect(JSON.stringify(entries)).not.toContain('private-encrypted-summary');
+    expect(responsesForTurn(entries, 'turn-1').map(entry => entry['gen_ai.usage.input_tokens'])).toEqual([100, 120, 130]);
+  });
+
   it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-real-wakeup-'));
     tempDirs.push(root);

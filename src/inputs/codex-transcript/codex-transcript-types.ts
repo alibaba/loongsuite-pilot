@@ -6,6 +6,8 @@ export type CodexTerminalStatus = 'completed' | 'interrupted';
 export interface CodexTranscriptInputContext {
   /** Chain hash for the complete request context represented by this state. */
   hash: string;
+  /** Native rewrite is known, while its encrypted content cannot be reconstructed. */
+  compacted?: boolean;
   /** Incremental messages required by the next LLM request. */
   delta?: JsonValue[];
   /** Full context is retained only while it remains below the configured limit. */
@@ -205,6 +207,19 @@ export interface CodexTranscriptStep {
   tools: CodexTranscriptTool[];
   tokenUsage?: CodexTranscriptUsage;
   finalText?: string;
+  /** Replace the append-only context before this wave. */
+  contextResetId?: string;
+}
+
+export interface CodexTranscriptCompression {
+  id: string;
+  startedAtMs?: number;
+  completedAtMs: number;
+  contextTokensAfter?: number;
+  windowSize?: number;
+  /** Provider usage for the summarization request, distinct from context size. */
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export interface CodexTranscriptSourceRecord {
@@ -254,6 +269,7 @@ export interface CodexExtractedTranscriptTurn {
   baseInstructions?: string;
   toolDefinitions?: JsonValue;
   steps: CodexTranscriptStep[];
+  compressions?: CodexTranscriptCompression[];
   /** Token samples that could not be tied to a completed response wave. */
   unmatchedTokenUsages: CodexTranscriptUsage[];
 }

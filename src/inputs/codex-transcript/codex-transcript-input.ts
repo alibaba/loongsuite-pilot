@@ -1945,7 +1945,8 @@ export class CodexTranscriptInput extends BaseInput {
 
     for (const entry of entries) {
       const eventName = entry['event.name'];
-      if (eventName === 'gen_ai.agent.invoke' || eventName === 'gen_ai.agent.result') {
+      if (eventName === 'gen_ai.agent.invoke' || eventName === 'gen_ai.agent.result'
+        || eventName === 'gen_ai.context.compress') {
         if (auditEvents.has(entry['event.id'])) continue;
         auditEvents.add(entry['event.id']);
         out.push(entry);
@@ -3815,6 +3816,7 @@ function persistedInputContext(
   const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');
   return {
     hash: context.hash,
+    ...(context.compacted === true ? { compacted: true } : {}),
     ...(context.fullMessages ? { fullMessages: context.fullMessages } : {}),
     ...(deltaBytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || !sourceRange
       ? { delta }
@@ -3828,6 +3830,7 @@ function parseInputContext(value: unknown): CodexTranscriptInputContext | undefi
   const range = asRecord(context.deltaRange);
   return {
     hash: context.hash,
+    ...(context.compacted === true ? { compacted: true } : {}),
     ...(Array.isArray(context.delta) ? { delta: context.delta as JsonValue[] } : {}),
     ...(Array.isArray(context.fullMessages) ? { fullMessages: context.fullMessages as JsonValue[] } : {}),
     ...(range && typeof range.startOffset === 'number' && typeof range.endOffset === 'number'

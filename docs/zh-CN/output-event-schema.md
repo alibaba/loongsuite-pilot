@@ -60,11 +60,17 @@ OTel INTERNAL Span，名称为 `gen_ai.context.compress`，POC 分类为
 | 来源 | 本 POC 采集入口 | 可用数据 |
 | --- | --- | --- |
 | Qoder / QoderCN | transcript `compact_boundary` | 完成时间及原生 pre/post token、duration，缺失时省略 |
+| Codex | rollout `compacted` / `ContextCompaction` completion | 原生开始/结束毫秒、同轮身份、安装后上下文估算、摘要请求 input/output 用量 |
 | Pi Coding Agent | `session_before_compact` / `session_compact` | Hook 区间、同范围文本 chars/4 估算、原生 before 单独保留；新版 failure Hook 及 AbortSignal 记录失败/取消 |
 | OpenClaw | before/after compaction Hook | Hook 区间、原生估算 token 与消息数、session 轮转、skipped |
 | DSH | `compaction/start` / `compaction/end` | 原生区间、压缩 ID、成功/错误、`turn:null` 独立事务 |
 
 Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation text，排除 system、工具定义和图片计价。
+Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于执行 AGENT 下，后续 LLM 从压缩结束后开始。
+原生 `compacted` 重置输入上下文，后续请求带 `gen_ai.conversation.compacted=true`。加密摘要无法还原时
+省略完整输入消息，并继续记录新产生的工具增量。安装后上下文计数标为 `native_estimate` / `active_context`。
+摘要请求用量单独记录为 `agent.codex.compaction.input_tokens` / `output_tokens`，与上下文计数分别展示。
+源端没有同范围 before 计数时省略 before 和压缩比例。只有完成时间的旧版记录保留为事件。
 Qoder / QoderCN 当前使用已有 transcript 唤醒与轮询，CLI `runtime-config.contextWindow`
 解析和 PreCompact/PostCompact 部署接入仍待补充。请求窗口从匹配的 SQLite 行提供。
 OpenClaw 缺少失败结束 Hook 时保留开始证据。未配对开始最多延缓 idle 收口一小时，并遵循现有缓冲上限。

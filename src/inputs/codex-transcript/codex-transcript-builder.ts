@@ -76,13 +76,19 @@ export function buildCodexTranscriptSegment(
   }
 
   for (const [index, step] of turn.steps.entries()) {
+    if (step.contextResetId) {
+      inputContext = {
+        hash: hashId([turn.sessionId, turn.transcriptTurnId, 'compacted-context', step.contextResetId], 32),
+        compacted: true,
+      };
+    }
     const stepNumber = startStepNumber + index;
     const stepId = `${turnId}:s${stepNumber}`;
     const stepSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'step', String(stepNumber)], 16);
     const llmSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'llm', String(stepNumber)], 16);
     const responseId = step.responseId ?? `${turnId}:r${stepNumber}`;
     const inputMessages = inputContext.delta ?? [];
-    const outputInputMessages = inputContext.fullMessages ?? inputMessages;
+    const outputInputMessages = inputContext.fullMessages ?? (inputContext.compacted ? [] : inputMessages);
 
     records.push(buildEntry({
       ...base,
@@ -95,6 +101,7 @@ export function buildCodexTranscriptSegment(
       'gen_ai.request.model': model,
       'gen_ai.response.id': responseId,
       'gen_ai.input.messages_hash': inputContext.hash,
+      ...(inputContext.compacted ? { 'gen_ai.conversation.compacted': true } : {}),
       ...(inputMessages.length > 0 ? { 'gen_ai.input.messages_delta': inputMessages } : {}),
       ...(outputInputMessages.length > 0 ? { 'gen_ai.input.messages': outputInputMessages } : {}),
       ...sharedLlmFields(turn),
@@ -127,6 +134,29 @@ export function buildCodexTranscriptSegment(
     if (index + 1 === contextStepCount) nextInputContext = inputContext;
   }
 
+  for (const compression of turn.compressions ?? []) {
+    records.push(buildEntry({
+      ...base,
+      timestamp: compression.completedAtMs,
+      'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'compression', compression.id], 32),
+      'event.name': 'gen_ai.context.compress',
+      'gen_ai.context.compress.id': compression.id,
+      'gen_ai.context.compress.status': 'success',
+      ...(compression.startedAtMs !== undefined ? {
+        'gen_ai.context.compress.start_time_unix_nano': timestampToUnixNanos(compression.startedAtMs),
+        'gen_ai.context.compress.duration': (compression.completedAtMs - compression.startedAtMs) / 1000,
+      } : {}),
+      ...(compression.contextTokensAfter !== undefined ? {
+        'gen_ai.context.tokens_after': compression.contextTokensAfter,
+        'gen_ai.context.counting.method': 'native_estimate',
+        'gen_ai.context.counting.scope': 'active_context',
+      } : {}),
+      ...(compression.windowSize !== undefined ? { 'gen_ai.context.window_size': compression.windowSize } : {}),
+      ...(compression.inputTokens !== undefined ? { 'agent.codex.compaction.input_tokens': compression.inputTokens } : {}),
+      ...(compression.outputTokens !== undefined ? { 'agent.codex.compaction.output_tokens': compression.outputTokens } : {}),
+    }));
+  }
+
   return { entries: records, nextInputContext };
 }
 
@@ -146,7 +176,8 @@ function advanceInputContext(
   step: CodexTranscriptStep,
 ): CodexTranscriptInputContext {
   const delta = nextInputMessagesForStep(step);
-  return contextFromMessages(context.hash, context.fullMessages, delta);
+  return { ...contextFromMessages(context.hash, context.fullMessages, delta),
+    ...(context.compacted ? { compacted: true } : {}) };
 }
 
 function contextFromMessages(

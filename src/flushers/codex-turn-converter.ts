@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { ROOT_CONTEXT, trace, TraceFlags } from '@opentelemetry/api';
 import { convertEventLogToTrace, type EventLogRecord, type ExtendedTelemetryHandler } from '@loongsuite/otel-util-genai';
 import type { ReservedSpanIdGenerator } from './span-id-reservation.js';
+import { isCompression } from './context-compression.js';
 
 type Options = NonNullable<Parameters<typeof convertEventLogToTrace>[1]>;
 const WORK_KEYS = [
@@ -65,7 +66,7 @@ export function prepareCodexTurn(
   }
   for (const record of records) {
     const name = record['event.name'];
-    if (name === 'other') continue;
+    if (name === 'other' || isCompression(record)) continue;
     index(byStep, record['gen_ai.step.id'] || undefined, record);
     if (name === 'llm.request' || name === 'llm.response') index(byResponse, record['gen_ai.response.id'], record);
     if (name === 'tool.call' || name === 'tool.result') index(byCall, record['gen_ai.tool.call.id'], record);

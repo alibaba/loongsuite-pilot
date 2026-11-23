@@ -6,6 +6,8 @@ import { hasActiveCompression } from '../../../src/flushers/context-compression.
 import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
 import { newState, transformDshRecord } from '../../../src/inputs/dsh/dsh-event-transform.js';
 import { ClientType, type AgentActivityEntry } from '../../../src/types/index.js';
+import { extractCodexPartialTurn } from '../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
+import { buildCodexTranscriptSegment } from '../../../src/inputs/codex-transcript/codex-transcript-builder.js';
 
 const base = { 'gen_ai.agent.type': 'pi-coding-agent', 'gen_ai.session.id': 'session',
   'gen_ai.turn.id': 'compress-1', 'gen_ai.context.compress.id': 'attempt',
@@ -26,6 +28,40 @@ async function flush(records: AgentActivityEntry[], captureMessageContent = true
 }
 
 describe('context compression through the real flusher and SDK', () => {
+  it('places native Codex compaction between ordinary steps in one trace without shifting step identities', async () => {
+    const source = (offset: number, type: string, payload: Record<string, unknown>) => ({
+      timestamp: new Date(start + offset).toISOString(), type, payload,
+    });
+    const records = [
+      source(0, 'event_msg', { type: 'task_started', turn_id: 'turn' }),
+      source(1, 'event_msg', { type: 'user_message', message: 'read and continue' }),
+      source(100, 'response_item', { type: 'function_call', call_id: 'call', name: 'exec_command', arguments: '{}' }),
+      source(200, 'response_item', { type: 'function_call_output', call_id: 'call', output: 'large result' }),
+      source(201, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }),
+      source(3000, 'compacted', { window_id: 'window', replacement_history: [{ type: 'compaction', encrypted_content: 'private' }] }),
+      source(3001, 'event_msg', { type: 'item_completed', turn_id: 'turn', item: { type: 'ContextCompaction', id: 'compact' },
+        started_at_ms: start + 300, completed_at_ms: start + 3001 }),
+      source(4000, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }),
+      source(4001, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 50, output_tokens: 5 } } }),
+      source(4100, 'event_msg', { type: 'task_complete', turn_id: 'turn', last_agent_message: 'done' }),
+    ];
+    const turn = extractCodexPartialTurn(records, null, 'session', 'turn')!;
+    const built = buildCodexTranscriptSegment(turn);
+    expect(built.nextInputContext.compacted).toBe(true);
+    const spans = await flush(built.entries);
+    const agent = spans.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT')!;
+    const compression = spans.find(s => s.name === 'gen_ai.context.compress')!;
+    const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(steps.map(s => s.attributes['gen_ai.step.id'])).toEqual(['session:turn:s1', 'session:turn:s2']);
+    expect(compression.parentSpanId).toBe(agent.spanContext().spanId);
+    expect(new Set(spans.map(s => s.spanContext().traceId)).size).toBe(1);
+    expect(compression.duration).toEqual([2, 701000000]);
+    const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms[1].startTime).toEqual([Math.floor((start + 3001) / 1000), ((start + 3001) % 1000) * 1000000]);
+    expect(llms[1].attributes['gen_ai.conversation.compacted']).toBe(true);
+    expect(llms.map(s => s.attributes['gen_ai.usage.input_tokens'])).toEqual([100, 50]);
+  });
+
   it('exports one timed INTERNAL child and preserves source counts without charging LLM tokens', async () => {
     const records = [event('gen_ai.context.compress.start', 0),
       event('gen_ai.context.compress', 1234, { 'gen_ai.context.compress.status': 'success',

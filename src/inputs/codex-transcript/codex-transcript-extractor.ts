@@ -15,6 +15,7 @@ import type {
   CodexTranscriptStep,
   CodexTranscriptTool,
   CodexTranscriptUsage,
+  CodexTranscriptCompression,
 } from './codex-transcript-types.js';
 import { timestampMs } from './codex-transcript-utils.js';
 
@@ -194,6 +195,11 @@ function extractCodexTurn(
   let lastUsage: CodexTranscriptUsage | undefined;
   let lastActivityAtMs = opts.nextStepStartedAtMs ?? 0;
   let lastCumulativeTokenTotal = opts.lastCumulativeTokenTotal;
+  const compressions: CodexTranscriptCompression[] = [];
+  let contextResetId: string | undefined;
+  let compactedPayload: Record<string, unknown> | null = null;
+  let contextTokensAfter: number | undefined;
+  let contextWindowSize: number | undefined;
 
   const beginStep = (timestamp: number, source: CodexTranscriptSourceRecord): StepEnvelope => {
     if (!currentStep) {
@@ -207,6 +213,7 @@ function extractCodexTurn(
           completedAtMs: timestamp,
           reasoning: [],
           tools: [],
+          ...(contextResetId ? { contextResetId } : {}),
         },
         sourceRange: {
           startOffset: source.startOffset,
@@ -215,6 +222,7 @@ function extractCodexTurn(
         llmClosed: false,
         followedByAnotherWave: false,
       };
+      contextResetId = undefined;
     }
     return currentStep;
   };
@@ -279,6 +287,17 @@ function extractCodexTurn(
 
     if (currentTurnId !== expectedTurnId) continue;
 
+    if (record.type === 'compacted') {
+      // This durable rewrite may contain an encrypted compaction item. Preserve
+      // its identity without appending the old tools to the replacement context.
+      flushCurrentStep();
+      compactedPayload = payload;
+      contextResetId = stringValue(payload.window_id) ?? `compacted:${source.startOffset}`;
+      contextTokensAfter = undefined;
+      markActivity(timestamp);
+      continue;
+    }
+
     if (record.type === 'token_usage_record') {
       const turnId = stringValue(payload.turn_id);
       const responseId = stringValue(payload.response_id);
@@ -291,6 +310,26 @@ function extractCodexTurn(
     }
 
     if (record.type === 'event_msg') {
+      const item = asRecord(payload.item);
+      if (payload.type === 'item_completed' && item?.type === 'ContextCompaction'
+        && stringValue(payload.turn_id) === expectedTurnId) {
+        const id = stringValue(item.id);
+        if (id) {
+          const usage = asRecord(asRecord(compactedPayload?.latest_token_usage_record)?.usage);
+          const completedAtMs = numberValue(payload.completed_at_ms) ?? timestamp;
+          const started = numberValue(payload.started_at_ms);
+          compressions.push({ id, completedAtMs,
+            ...(started !== undefined && started >= 0 && started < completedAtMs ? { startedAtMs: started } : {}),
+            ...(contextTokensAfter !== undefined ? { contextTokensAfter } : {}),
+            ...(contextWindowSize !== undefined ? { windowSize: contextWindowSize } : {}),
+            ...(numberValue(usage?.input_tokens) !== undefined ? { inputTokens: numberValue(usage?.input_tokens) } : {}),
+            ...(numberValue(usage?.output_tokens) !== undefined ? { outputTokens: numberValue(usage?.output_tokens) } : {}),
+          });
+          markActivity(completedAtMs);
+        }
+        compactedPayload = null;
+        continue;
+      }
       if (payload.type === 'user_message') {
         appendPrompt(stringValue(payload.message));
         sawSubmittedUserMessage = true;
@@ -345,6 +384,14 @@ function extractCodexTurn(
       if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
         if (!usage) continue;
+        const info = asRecord(payload.info);
+        if (compactedPayload && usage.inputTokens === 0 && usage.outputTokens === 0) {
+          // recompute_token_usage publishes a context estimate after installation,
+          // with the billing cumulative total unchanged. It is not an LLM wave.
+          contextTokensAfter = usage.totalTokens;
+          contextWindowSize = numberValue(info?.model_context_window);
+          continue;
+        }
         const cumulativeTokenTotal = extractCumulativeTokenTotal(payload.info);
         const repeatedSnapshot = cumulativeTokenTotal !== undefined
           && lastCumulativeTokenTotal !== undefined
@@ -524,7 +571,7 @@ function extractCodexTurn(
   const finalActiveStep = activeStep();
   if (finalActiveStep && stepToolsComplete(finalActiveStep.step)) flushCurrentStep();
   if (!status && !opts.requireTerminal) {
-    if (stepEnvelopes.length === 0 && !prompt) return null;
+    if (stepEnvelopes.length === 0 && !prompt && compressions.length === 0) return null;
     terminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
     status = 'completed';
   } else if (status === 'completed') {
@@ -574,6 +621,7 @@ function extractCodexTurn(
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),
     ...(meta?.toolDefinitions !== undefined ? { toolDefinitions: meta.toolDefinitions } : {}),
     steps,
+    ...(compressions.length > 0 ? { compressions } : {}),
     unmatchedTokenUsages,
   };
   const committedEnvelopes = sawTerminal
