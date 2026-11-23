@@ -145,11 +145,22 @@ export class NativeUsageIndex {
   }
 
   ownsTool(trace: string, session: string, reply: string, calls: Set<string>): boolean {
-    for (const stream of this.streams.values()) {
-      const r = stream.receipts.get(trace);
-      if (r?.session === session && r.expected.has(reply) && [...calls].some(id => r.calls.has(id))) return true;
-    }
-    return false;
+    const callIds = [...calls];
+    const receipts = [...this.streams.values()].flatMap(stream => [...stream.receipts])
+      .filter(([, receipt]) => receipt.session === session && callIds.some(id => receipt.calls.has(id)));
+    if (receipts.length !== 1) return false;
+    const [[owningTrace, receipt]] = receipts;
+    if (owningTrace !== trace || !receipt.done || !receipt.expected.has(reply)) return false;
+    if (receipt.expected.size === 1) return true;
+    if (receipt.ambiguousStreams) return false;
+
+    // Multiple replies can share a native trace. Correlate the dispatch and
+    // the reply's usage on the same verified stream before enriching a turn.
+    const owners = receipt.streams.filter(stream =>
+      callIds.some(id => receipt.calls.has(id) && stream.tools.has(id)));
+    if (owners.length !== 1 || !owners[0].closed) return false;
+    const replies = new Set([...owners[0].reports.values()].map(report => report.reply));
+    return replies.size === 1 && replies.has(reply);
   }
 
   expectedSeqs(trace: string, session: string, reply: string) {

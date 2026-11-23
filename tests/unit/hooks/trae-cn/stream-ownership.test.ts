@@ -6,11 +6,12 @@ import cbor from 'cbor';
 import { expect, it } from 'vitest';
 import { NativeUsageIndex } from '../../../../src/inputs/trae-cn-log/native-usage-index.js';
 
-it.each(['valid', 'overlap', 'wrong count', 'two histories'])('reconciles a native tool batch: %s', async mode => {
+it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('reconciles a native tool batch: %s', async mode => {
   const root = await mkdtemp(join(tmpdir(), 'trae-stream-'));
   const index = new NativeUsageIndex();
   Object.assign(index, { root });
   const session = '1'.repeat(24), turn = '2'.repeat(24), history = '3'.repeat(24), reply = '4'.repeat(24);
+  const unrelatedReply = '6'.repeat(24);
   const chunks: Buffer[] = [];
   function add(message: string, fields: Record<string, string | number | boolean>) {
     const data = { trace_id: 'a'.repeat(32), message, ...fields };
@@ -32,6 +33,15 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories'])('reconciles a nati
   }
   add('routing CommitReady', { has_async_child: false, has_foreground: false, parent_result_count: 2 });
   add('commit_results', { conversation_id: session, result_count: mode === 'wrong count' ? 1 : 2 });
+  if (mode === 'two replies') {
+    add('cloud stream response headers', {
+      url: 'https://example.org/api/agent/v3/commit_toolcall_result', resp_logid: 'request2',
+    });
+    add('[Hub] task event contract', {
+      event_type: 'token_usage', conversation_id: session, task_id: unrelatedReply, event_seq: 9,
+    });
+    add('resolving explicit Cloud task completion as terminal', {});
+  }
   add('chat: runner completed', { turn_id: turn });
   const header = Buffer.alloc(178);
   header.write('AalG'); header.write('AALG',152);header.writeUInt32LE(6,168);
@@ -42,7 +52,13 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories'])('reconciles a nati
     await index.refresh();
     const rounds = index.responses(session, new Set(['one']));
     expect(rounds?.[0].id).toBe(history);
-    if (mode === 'valid') expect(rounds?.[0]).toMatchObject({ request: 'request1', reply, seq: 5, toolIds: ['one','two'] });
+    if (mode === 'two replies') {
+      const trace = 'a'.repeat(32);
+      const calls = new Set(['one']);
+      expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
+      expect(index.ownsTool(trace, session, unrelatedReply, calls)).toBe(false);
+    }
+    if (mode === 'valid' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', reply, seq: 5, toolIds: ['one','two'] });
     else if (mode === 'two histories') {
       expect(rounds).toHaveLength(2);
       for (const round of rounds!) {
