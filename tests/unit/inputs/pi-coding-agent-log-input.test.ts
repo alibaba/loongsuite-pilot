@@ -182,9 +182,12 @@ describe('PiCodingAgentLogInput', () => {
       `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
     );
 
+    // Keep the one-poll filtering and restart assertions independent of CPU time.
+    const historyReplay = { cpuNow: () => 0 };
     const input = new PiCodingAgentLogInput({
       stateStore: stateStore as never,
       logDir: tmpDir,
+      historyReplay,
       agentEnabled: agentType => agentType !== 'disabled-code',
       // Agent filtering is independent of how the production work budget splits a poll.
       historyReplay: { cpuNow: () => 0 },
@@ -201,6 +204,7 @@ describe('PiCodingAgentLogInput', () => {
     const restarted = new PiCodingAgentLogInput({
       stateStore: stateStore as never,
       logDir: tmpDir,
+      historyReplay,
       agentEnabled: () => true,
     });
     const replayed: AgentActivityEntry[] = [];

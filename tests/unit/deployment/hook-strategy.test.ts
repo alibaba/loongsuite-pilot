@@ -54,6 +54,7 @@ vi.mock('../../../src/deployment/codex-trust-writer.js', () => ({
 
 import { detectAgent } from '../../../src/deployment/detect-utils.js';
 import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import {
   fileExists,
   readJsonFile,
@@ -1255,6 +1256,26 @@ describe('HookStrategy', () => {
         insert: 'head',
         useNestedFormat: true,
       });
+    });
+
+    it('installs the shipped QwenWorkCN prompt registration with interception disabled', async () => {
+      mockHookManager.isHookInstalled.mockResolvedValue(false);
+      mockHookManager.installHook.mockResolvedValue(true);
+      const shipped = JSON.parse(readFileSync('agents.d/qwen-work-cn.json', 'utf8'));
+      const def = makeDef(shipped);
+      def.hook!.settingsPath = '/home/.qwenworkcn/settings.json';
+      def.hook!.hookCommand = '/opt/pilot/hooks/qwenworkcn-loongsuite-pilot-hook.sh';
+
+      const result = await strategy.deploy(def);
+      expect(result.success).toBe(true);
+      expect(mockHookManager.installHook.mock.calls.map(([hook]) => ({
+        event: hook.hookJsonPath[1], command: hook.hookCommand,
+      }))).toEqual([
+        { event: 'Stop', command: def.hook!.hookCommand },
+        { event: 'UserPromptSubmit', command: def.hook!.hookCommand },
+      ]);
+      mockHookManager.isHookInstalled.mockImplementation(async hook => hook.hookJsonPath[1] !== 'UserPromptSubmit');
+      await expect(strategy.needsDeploy(def)).resolves.toBe(true);
     });
 
     it('needs deploy when the interceptor hook is missing or not at head', async () => {
