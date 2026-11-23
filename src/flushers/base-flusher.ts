@@ -27,6 +27,8 @@ export abstract class BaseFlusher {
 
   getTraceRuntimeSnapshot(): TraceRuntimeSnapshot[] { return []; }
 
+  hasDurableTraceJournal(_agentType: string): boolean { return false; }
+
   /** Protect raw producer files while a recoverable Hermes turn still needs them. */
   hasPendingHermesSource(_sourceToken: string): boolean { return false; }
 

@@ -730,7 +730,7 @@ export async function readStdin() {
   return decodePayload(Buffer.concat(chunks));
 }
 
-export async function parseStdinPayload(agentId) {
+export async function parseStdinPayload(agentId, ignoredEvents = []) {
   const raw = await readStdin();
   process.stdout.write('{}\n');
 
@@ -746,6 +746,7 @@ export async function parseStdinPayload(agentId) {
     return null;
   }
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null;
+  if (ignoredEvents.includes(payload.hook_event_name)) return null;
 
   logDebug(agentId, `event: ${payload.hook_event_name || 'unknown'}, session: ${payload.session_id || ''}`);
   logDebug(agentId, `payload keys: ${Object.keys(payload).join(', ')}`);
