@@ -55,11 +55,19 @@ it('retains shared input, observed usage and tool ownership once per response st
   const records = [{ 'event.name': 'llm.response', span_id: '3', 'loongsuite.trae_cn.model_responses': rounds }] as unknown as AgentActivityEntry[];
   const spans = expandTraeHistory(records, [agent, step, llm, tool]);
   const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
-  expect(steps).toHaveLength(1);
+  expect(steps).toHaveLength(3);
   expect(steps[0].attributes['gen_ai.input.messages']).toBe('shared prompt');
   expect(steps[0].attributes['agent.trae-cn.hub.total_tokens_observed']).toBe(30);
   const models = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
   expect(models.map(m => m.attributes['gen_ai.response.id'])).toEqual(rounds.map(r => r.id));
-  expect([...models, tool].every(s => s.parentSpanId === steps[0].spanContext().spanId)).toBe(true);
+  expect(tool.parentSpanId).toBe(steps[0].spanContext().spanId);
+  for (const [i, model] of models.entries()) {
+    const round = steps[i + 1];
+    expect(round.parentSpanId).toBe(steps[0].spanContext().spanId);
+    expect(round.attributes['gen_ai.step.id']).toBe(rounds[i].id);
+    expect(model.attributes['gen_ai.step.id']).toBe(rounds[i].id);
+    expect(model.parentSpanId).toBe(round.spanContext().spanId);
+    expect(model.attributes['gen_ai.input.messages']).toBeUndefined();
+  }
   expect(models.every(s => s.attributes['gen_ai.usage.total_tokens'] === undefined)).toBe(true);
 });

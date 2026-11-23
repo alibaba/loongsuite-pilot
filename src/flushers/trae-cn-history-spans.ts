@@ -51,11 +51,13 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     const ns = BigInt(r.at);
     const instant: [number, number] = [Number(ns / 1000000000n), Number(ns % 1000000000n)];
     let parent = agent.spanContext().spanId;
-    const templates: ReadableSpan[] = [step, llm];
-    for (const template of templates) {
-      const isModel = template === llm;
-      const shared = r.shared === true && typeof r.request === 'string' ? r.request : undefined;
-      const existing = shared && !isModel ? sharedSteps.get(shared) : undefined;
+    const shared = r.shared === true && typeof r.request === 'string' ? r.request : undefined;
+    const layers = shared ? ['stream', 'round', 'model'] : ['round', 'model'];
+    for (const layer of layers) {
+      const isModel = layer === 'model';
+      const isStream = layer === 'stream';
+      const template = isModel ? llm : step;
+      const existing = shared && isStream ? sharedSteps.get(shared) : undefined;
       if (existing) {
         const startTime = earlier(instant, existing.startTime) ? instant : existing.startTime;
         const endTime = earlier(existing.endTime, instant) ? instant : existing.endTime;
@@ -63,18 +65,18 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         parent = existing.spanContext().spanId;
         continue;
       }
-      const id = createHash('sha256').update([trace, shared && !isModel ? 'stream/' + shared : r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
+      const id = createHash('sha256').update([trace, isStream ? 'stream/' + shared : r.id, isModel ? 'llm' : 'step'].join('/')).digest('hex').slice(0, 16);
       const attributes: ReadableSpan['attributes'] = {};
       for (const key of ['gen_ai.span.kind', 'gen_ai.operation.name', 'gen_ai.agent.name', 'gen_ai.agent.id',
         'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.user.id', 'gen_ai.request.model', 'workspace.path']) {
         if (template.attributes[key] !== undefined) attributes[key] = template.attributes[key];
       }
-      attributes['gen_ai.step.id'] = shared || r.id;
+      attributes['gen_ai.step.id'] = isStream ? shared! : r.id;
       attributes['loongsuite.trae_cn.observation'] = 'response_recorded';
       if (typeof r.request === 'string') attributes['loongsuite.trae_cn.stream_request_id'] = r.request;
       if (isModel) attributes['gen_ai.response.id'] = r.id;
       // Shared streams prove the batch of messages, but not which response owns each one.
-      if (shared ? !isModel : isModel) {
+      if (isStream || (!shared && isModel)) {
         const prompt = llm.attributes['gen_ai.input.messages'];
         if (r.initial === true && typeof prompt === 'string') attributes['gen_ai.input.messages'] = prompt;
         if (typeof r.continuation === 'string') {
@@ -100,7 +102,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
           if (typeof r.cached === 'number') attributes['gen_ai.usage.cache_read.input_tokens'] = r.cached;
         }
       }
-      if (!isModel && !shared) {
+      if (layer === 'round') {
         attributes['gen_ai.react.round'] = seen.size;
       }
       const observation: ReadableSpan = { ...template, name: template.name, kind: template.kind, resource: template.resource,
@@ -108,12 +110,12 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         droppedLinksCount: 0, droppedAttributesCount: 0, links: [], events: [], status: { code: 0 },
         spanContext: () => ({ ...template.spanContext(), spanId: id }), parentSpanId: parent,
         startTime: instant, endTime: instant, duration: [0, 0], attributes };
-      if (shared && !isModel) {
+      if (shared && isStream) {
         Object.assign(observation, { name: 'response stream (multiple model responses)' });
         sharedSteps.set(shared, observation);
       }
       observed.push(observation);
-      if (!isModel && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
+      if ((isStream || (!shared && layer === 'round')) && Array.isArray(r.toolIds)) for (const call of r.toolIds) {
         if (typeof call === 'string') parents.set(call, { span: observation, history: shared || r.id });
       }
       parent = id;
