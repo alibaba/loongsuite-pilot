@@ -49,6 +49,9 @@ it('retains shared input, observed usage and tool ownership once per response st
   const llm = span('LLM', '3', '2'), tool = span('TOOL', '4', '2');
   Object.assign(tool, { startTime: [3, 0] });
   llm.attributes['gen_ai.input.messages'] = 'shared prompt';
+  Object.assign(llm.attributes, { 'agent.trae-cn.hub.complete': false, 'agent.trae-cn.hub.total_tokens_observed': 30,
+    'agent.trae-cn.hub.input_tokens_observed': 25, 'agent.trae-cn.hub.output_tokens_observed': 5,
+    'agent.trae-cn.hub.cached_tokens_observed': 20 });
   tool.attributes['gen_ai.tool.call.id'] = 'call_one';
   const rounds = ['a', 'b'].map((c, i) => ({ id: c.repeat(24), at: String((i + 2) * 1e9),
     shared: true, initial: true, requestStartMs: 1100, firstTokenMs: 1500, request: 'stream', toolIds: ['call_one'], streamReceived: 2,
@@ -57,6 +60,8 @@ it('retains shared input, observed usage and tool ownership once per response st
   const spans = expandTraeHistory(records, [agent, step, llm, tool]);
   const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
   expect(steps).toHaveLength(3);
+  expect(agent.attributes['gen_ai.usage.total_tokens']).toBe(30);
+  expect(agent.attributes['gen_ai.usage.cache_read.input_tokens']).toBe(20);
   expect(steps[0].startTime).toEqual([1, 100000000]);
   expect(steps[0].attributes['loongsuite.trae_cn.request_to_first_token_ns']).toBe(400000000);
   expect(agent.attributes['gen_ai.response.time_to_first_token']).toBe(500000000);

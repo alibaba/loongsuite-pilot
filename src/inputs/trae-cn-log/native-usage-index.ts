@@ -144,6 +144,14 @@ export class NativeUsageIndex {
     });
   }
 
+  ownsTool(trace: string, session: string, reply: string, calls: Set<string>): boolean {
+    for (const stream of this.streams.values()) {
+      const r = stream.receipts.get(trace);
+      if (r?.session === session && r.expected.has(reply) && [...calls].some(id => r.calls.has(id))) return true;
+    }
+    return false;
+  }
+
   expectedSeqs(trace: string, session: string, reply: string) {
     const receipts = [...this.streams.values()].map(stream => stream.receipts.get(trace))
       .filter(r => r?.done && r.session === session && r.expected.has(reply));

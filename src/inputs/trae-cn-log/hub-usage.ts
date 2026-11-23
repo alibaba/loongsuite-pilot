@@ -150,7 +150,7 @@ export class HubUsage {
     }
   }
 
-  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses' | 'expectedSeqs'>) {
+  enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses' | 'expectedSeqs'> & Partial<Pick<NativeUsageIndex, 'ownsTool'>>) {
     if (entry['event.name'] !== 'llm.response') return;
     const ids = new Set<string>();
     const messages = entry['gen_ai.output.messages'];
@@ -162,7 +162,7 @@ export class HubUsage {
     const rounds = native?.responses(entry['gen_ai.session.id'], ids);
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
     const matches = [...this.turns.values()].filter(t => t.session === entry['gen_ai.session.id'] &&
-      [...ids].some(id => t.tools.has(id)));
+      ([...ids].some(id => t.tools.has(id)) || native?.ownsTool?.(t.trace, t.session, t.reply, ids)));
     if (matches.length !== 1) return;
     const turn = matches[0];
     if (this.captureContent && Array.isArray(messages)) {
@@ -198,7 +198,6 @@ export class HubUsage {
       else cached += r.cached;
     }
     const prefix = 'agent.trae-cn.hub.';
-    entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'trace_id'] = turn.trace;
     entry[prefix + 'usage_event_seqs'] = [...turn.reports.keys()].join(',');
     const expected = native?.expectedSeqs(turn.trace, turn.session, turn.reply);
@@ -209,6 +208,8 @@ export class HubUsage {
     }
     const complete = expected ? native!.complete(turn.trace, turn.session, turn.reply, turn.reports) : (turn.contiguous && turn.done) || native?.complete(turn.trace, turn.session, turn.reply, turn.reports) === true;
     entry[prefix + 'complete'] = complete;
+    if (!turn.reports.size) return;
+    entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'input_tokens_observed'] = input;
     entry[prefix + 'output_tokens_observed'] = output;
     if (allCached) {

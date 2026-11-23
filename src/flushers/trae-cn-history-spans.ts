@@ -166,6 +166,18 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   for (const [key, value] of Object.entries(llm.attributes)) {
     if (key.startsWith('gen_ai.usage.') || key.startsWith('agent.trae-cn.hub.')) agent.attributes[key] = value;
   }
+  // Count the numeric receipts once at agent scope, including receipts for
+  // model spans omitted for missing content. Coverage stays on the same span.
+  if (agent.attributes['agent.trae-cn.hub.complete'] === false &&
+      agent.attributes['gen_ai.usage.input_tokens'] === undefined &&
+      agent.attributes['gen_ai.usage.output_tokens'] === undefined &&
+      agent.attributes['gen_ai.usage.total_tokens'] === undefined) {
+    for (const [observed, metric] of [['input_tokens_observed', 'input_tokens'], ['output_tokens_observed', 'output_tokens'],
+      ['total_tokens_observed', 'total_tokens'], ['cached_tokens_observed', 'cache_read.input_tokens']]) {
+      const value = agent.attributes['agent.trae-cn.hub.' + observed];
+      if (typeof value === 'number') agent.attributes['gen_ai.usage.' + metric] = value;
+    }
+  }
   return [...spans.filter(s => (s !== step || unassigned) && s !== llm), ...observed];
 }
 
