@@ -28,7 +28,7 @@ describe('HookManager', () => {
   });
 
   it('builds QwenWorkCN hooks with an independent entrypoint', () => {
-    const [def] = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot');
+    const [def, promptDef] = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot');
 
     expect(def.agentId).toBe('qwen-work-cn');
     expect(def.settingsPath).toContain('.qwenworkcn/settings.json');
@@ -36,6 +36,31 @@ describe('HookManager', () => {
     expect(def.hookCommand).toContain('qwenworkcn-loongsuite-pilot-hook');
     expect(def.hookCommand).not.toContain('qoderwork');
     expect(def.useNestedFormat).toBe(true);
+    expect(promptDef).toEqual({ ...def, hookJsonPath: ['hooks', 'UserPromptSubmit'] });
+  });
+
+  it('repairs QwenWorkCN prompt registration idempotently and preserves third-party hooks on uninstall', async () => {
+    const settingsPath = path.join(tmpDir, 'settings.json');
+    const thirdParty = { matcher: '*', hooks: [{ type: 'command', command: '/other/prompt-hook' }] };
+    const defs = HookManager.buildQwenWorkCNHooks('/opt/loongsuite-pilot')
+      .map(def => ({ ...def, settingsPath }));
+    const manager = new HookManager(path.join(tmpDir, 'hooks'), path.join(tmpDir, 'logs'));
+    await fs.writeFile(settingsPath, JSON.stringify({ hooks: { UserPromptSubmit: [thirdParty] } }));
+    for (const def of defs) {
+      await manager.installHook(def);
+      await manager.installHook(def);
+      expect(await manager.isHookInstalled(def)).toBe(true);
+    }
+    const installed = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(installed.hooks.Stop).toHaveLength(1);
+    expect(installed.hooks.UserPromptSubmit).toHaveLength(2);
+    await manager.uninstallHook(defs[1]);
+    expect(await manager.isHookInstalled(defs[1])).toBe(false);
+    await manager.installHook(defs[1]);
+    for (const def of defs) await manager.uninstallHook(def);
+    const restored = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(restored.hooks.UserPromptSubmit).toEqual([thirdParty]);
+    expect(restored.hooks.Stop ?? []).toEqual([]);
   });
 
   it('replaces the legacy Qoder Work hook command during install', async () => {
