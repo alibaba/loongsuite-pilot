@@ -43,7 +43,7 @@
 
 ## 内容、边界与可靠性
 
-只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史、不读取 Cookie、登录缓存或消息数据库，不采集快照中的业务文件正文（首次解析快照 JSON 仍需在预算内读取文件）。
+工作模式只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史，不采集快照中的业务文件正文（首次解析快照 JSON 仍需在预算内读取文件）。普通聊天读取下述任务消息记录，所有模式均跳过 Cookie 和登录缓存。
 
 本次需求必须在源请求窗口中唯一；复用时结合原生 user 分隔记录及精确工具 ID 选择本次输出。LLM 输入可以保留同一会话此前的可见历史作为上下文，但不会把历史 assistant 输出再次生成为本次 LLM。原始内容字段最多 64 KiB；每轮输入最多 64 KiB，超出时移除最早完整消息。每个所属请求 / 本地执行最多 64 个 assistant 轮次，展开内容合计最多 512 KiB，超限记录省略数量。相邻重复的无工具最终答复只保留一个可见轮次。
 
@@ -105,7 +105,15 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 独立入口使用 `doubao` 和 `doubao-work` 区分 `gen_ai.agent.type`、`gen_ai.framework`、缺省 Agent ID 和按 Agent 生成的服务名后缀。通过旧入口采集 App 时，这些字段仍使用 `doubao-work`，并继续应用该 Agent 的内容采集策略。两种入口都用 `loongsuite.doubao_work.client` 标记实际来源，原生主、子 Agent ID 保留源值。
 
-2026-10-30 已用真实 macOS、Windows App 验证工作模式工具、菜单 Skill、并行与后台子 Agent 及复用。普通聊天模式和完整提供商遥测仍不在支持范围内；普通聊天不保证产生工作模式 trajectory，不能据请求边界补造 LLM 或输入输出。多条真实需求即使文本或时间戳相同仍视为歧义。
+2026-10-30 已用真实 macOS、Windows App 验证工作模式工具、菜单 Skill、并行与后台子 Agent 及复用。多条真实需求即使文本或时间戳相同仍视为歧义。
+
+### 豆包 App 普通聊天
+
+普通聊天与工作模式共用默认 `doubao` 入口。客户端收发日志提供请求 UUID、会话 ID、消息 ID 和完成边界，本地 `Profile */IndexedDB/chrome_doubao-chat_0.indexeddb.leveldb` 的任务记录提供输入输出。Pilot 只读 Chromium WAL 和不可变 SSTable，校验校验和、分块和消息关联，保持数据库由客户端持有。记录迟写、半条记录和临时读取失败时保留待采请求，后续轮询继续推进。首次启用采集新请求，旧会话中的新增轮次也按独立请求身份采集。
+
+当前覆盖文本消息的输入输出及 ENTRY → AGENT → STEP → LLM。LLM 时间范围为客户端提交至 `on_message_receiving_end`，Span 属性 `loongsuite.doubao_work.timing_basis` 说明时间来源。原生 `model_id` 保留为专属字段，提供商模型名称与 Token 尚无可靠来源。聊天记录中的图片、音频及其他非文本块需继续适配。macOS 2.34.6 是本次协议与真实验收目标，Windows 普通聊天运行态仍需验证。
+
+聊天原生读取共用上述每轮预算。最多读取 32 个 WAL / SSTable 文件，逻辑记录和表文件各最多 8 MiB，单条文本最多 512 KiB，单源保留最近 128 个任务投影。消息投影缓存最多 16 MiB，双产品同时运行时减半；正在解码的单个表另有最多 8 MiB 的临时空间。首次冷读可能跨多个轮询周期，不变 WAL 只校验小锚点，不变表不再读取正文。原始任务对象及正文缓存不写入 checkpoint。
 
 Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 的选中不证明实际加载；独立工作伙伴页面、云端完整 Agent 生命周期仍无覆盖。
 

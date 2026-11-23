@@ -13,6 +13,7 @@ import { checkpointDraft } from './doubao-work-state.js';
 import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
 import { DoubaoWorkNativeReader } from './doubao-work-reader.js';
 import { resolveDoubaoWorkPaths, type DoubaoClient } from '../../utils/doubao-work-paths.js';
+import { DoubaoChatReader } from './doubao-chat-reader.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -80,6 +81,7 @@ export class DoubaoWorkInput extends BaseInput {
   private executionScanCursor: string | undefined;
   private readonly executionDigests = new WeakMap<NativeExecution, string>();
   private readonly nativeReader: DoubaoWorkNativeReader;
+  private readonly chatReader: DoubaoChatReader | undefined;
   private readonly workLimits: DoubaoWorkInputOptions['workBudget'];
   private readonly resourceShare: number;
   private budget!: DoubaoWorkBudget;
@@ -117,6 +119,8 @@ export class DoubaoWorkInput extends BaseInput {
       snapshotRoot: this.snapshotRoot, sessionNamespace: defaults.sessionNamespace,
       maxCacheBytes: 64 * 1024 * 1024 / this.resourceShare, maxFiles: 512 / this.resourceShare,
       diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
+    this.chatReader = this.client === 'doubao' && this.userDataRoot
+      ? new DoubaoChatReader(this.userDataRoot, 16 * 1024 * 1024 / this.resourceShare) : undefined;
   }
 
   static defaultLogDir(client?: DoubaoClient): string | undefined {
@@ -165,6 +169,7 @@ export class DoubaoWorkInput extends BaseInput {
     if (this.wakeup) clearTimeout(this.wakeup);
     this.wakeup = undefined;
     this.nativeReader.clear(); this.cycleGraphs.clear();
+    this.chatReader?.clear();
     this.reconstructionJobs.clear();
     this.logSweep = undefined; this.finalizeLogWindow = undefined;
   }
@@ -501,6 +506,10 @@ export class DoubaoWorkInput extends BaseInput {
     }
     if (event.selectedSkills !== undefined) pending.selectedSkills = event.selectedSkills;
     if (event.selectedPartners !== undefined) pending.selectedPartners = event.selectedPartners;
+    if (event.modeType !== undefined) pending.modeType = event.modeType;
+    if (event.sendMessageId !== undefined) pending.sendMessageId = event.sendMessageId;
+    if (event.receiveMessageId !== undefined) pending.receiveMessageId = event.receiveMessageId;
+    if (event.name === 'on_message_receiving_end') pending.receiveEndNano = event.timeNano;
   }
 
   private async complete(state: Checkpoint, key: string, pending: PendingTurn, entries: AgentActivityEntry[]): Promise<void> {
@@ -510,7 +519,34 @@ export class DoubaoWorkInput extends BaseInput {
       let complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
       if (complete.length === 0) return;
       const conversationId = pending.terminal.conversationId ?? pending.conversationId;
-      if (conversationId) {
+      if (this.chatReader && pending.modeType && pending.modeType !== 'work_task') {
+        try {
+          const content = await this.chatReader.find(pending.turnId, this.budget);
+          if (!content || (!content.finished && pending.terminal.clientOutcome !== 'cancelled'
+            && pending.terminal.clientOutcome !== 'error')) return;
+          if (content.conversationId !== conversationId || content.localMessageId !== pending.localMessageId
+            || content.sendMessageId !== pending.sendMessageId || content.receiveMessageId !== pending.receiveMessageId
+            || content.queryMs < pending.queryMs
+            || BigInt(content.queryMs) * 1_000_000n > BigInt(pending.terminal.timeNano)) return;
+          complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: content.input }] }];
+          complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: content.output }] }];
+          for (const event of complete) {
+            event['loongsuite.doubao_work.mode'] = 'chat';
+            if (content.modelId) event['loongsuite.doubao_work.native_model_id'] = content.modelId;
+          }
+          const responseEnd = pending.receiveEndNano
+            ?? (pending.terminal.clientOutcome === 'cancelled' || pending.terminal.clientOutcome === 'error' ? pending.terminal.timeNano : undefined);
+          if (responseEnd && BigInt(responseEnd) > BigInt(complete[0].time_unix_nano)
+            && BigInt(responseEnd) <= BigInt(pending.terminal.timeNano)) {
+            complete[0]['agent.doubao_work.chat_response_end'] = responseEnd;
+            complete[0]['agent.doubao_work.chat_response_id'] = content.receiveMessageId;
+          }
+        } catch (error) {
+          if (this.defer(error)) return;
+          this.logger.warn('Doubao chat native content unavailable; preserving pending request');
+          return;
+        }
+      } else if (conversationId) {
         try {
           const graph = await this.readConversationGraph(conversationId, true, `request:${key}`);
           if (graph) {

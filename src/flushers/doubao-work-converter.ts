@@ -40,6 +40,9 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
         return (invocation: Parameters<ExtendedTelemetryHandler['stopInvokeAgent']>[0], endTime?: number) => {
           if (key === 'stopInvokeAgent' && invocation.span) {
             if (options.observationTracer) {
+              if (start[`${PREFIX}mode`] === 'chat') {
+                toolSpanCount += addChatResponse(invocation.span, start, end, options.observationTracer);
+              }
               const rounds = addDoubaoAssistantRounds(invocation.span, records, options.observationTracer,
                 start.time_unix_nano as string, end.time_unix_nano as string, start);
               toolSpanCount += rounds.spanCount + addLocalToolSpans(invocation.span, records,
@@ -58,7 +61,48 @@ export function convertDoubaoWorkTurn(records: EventLogRecord[], options: Option
   });
   const result = convertEventLogToTrace(boundaries, { ...options, ...(wrapped ? { handler: wrapped } : {}) });
   return { ...result, spanCount: result.spanCount + toolSpanCount, warnings: [...result.warnings,
-    'Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable'] };
+    start[`${PREFIX}mode`] === 'chat'
+      ? 'Doubao chat spans observe client submit/receive boundaries; provider model and token usage remain unavailable'
+      : 'Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable'] };
+}
+
+function addChatResponse(owner: Span, start: EventLogRecord, end: EventLogRecord, tracer: Tracer): number {
+  const responseEnd = start['agent.doubao_work.chat_response_end'];
+  if (!validTime(responseEnd) || !validTime(start.time_unix_nano) || !validTime(end.time_unix_nano)
+    || BigInt(responseEnd) <= BigInt(start.time_unix_nano) || BigInt(responseEnd) > BigInt(end.time_unix_nano)) return 0;
+  const parent = owner.spanContext();
+  const stepId = doubaoDigest(`${parent.traceId}:chat-step`).slice(0, 16);
+  const common: Attributes = {
+    'gen_ai.framework': 'doubao', 'gen_ai.step.id': stepId,
+    'loongsuite.doubao_work.mode': 'chat',
+    'loongsuite.doubao_work.timing_basis': 'client_submit_to_receive_end',
+  };
+  for (const key of ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.session.id', 'gen_ai.turn.id', 'gen_ai.provider.name', `${PREFIX}native_model_id`]) {
+    if (typeof start[key] === 'string') common[key] = start[key] as string;
+  }
+  if (typeof start['user.id'] === 'string') common['gen_ai.user.id'] = start['user.id'];
+  const step = tracer.startSpan('react step', { startTime: nanoTime(start.time_unix_nano), attributes: {
+    ...common, 'gen_ai.span.kind': 'STEP', 'gen_ai.operation.name': 'step', 'gen_ai.react.round': 1,
+  } }, trace.setSpanContext(ROOT_CONTEXT, parent));
+  const stepContext = step.spanContext();
+  Object.defineProperty(step, 'spanContext', { value: () => ({ ...stepContext, spanId: stepId }), configurable: true });
+  const llm = tracer.startSpan('chat', { kind: SpanKind.CLIENT, startTime: nanoTime(start.time_unix_nano), attributes: {
+    ...common, 'gen_ai.span.kind': 'LLM', 'gen_ai.operation.name': 'chat',
+    ...(Array.isArray(start['gen_ai.input.messages_delta']) ? { 'gen_ai.input.messages': JSON.stringify(start['gen_ai.input.messages_delta']) } : {}),
+    ...(Array.isArray(end['gen_ai.output.messages']) ? { 'gen_ai.output.messages': JSON.stringify(end['gen_ai.output.messages']) } : {}),
+    ...(typeof start['agent.doubao_work.chat_response_id'] === 'string' ? { 'gen_ai.response.id': start['agent.doubao_work.chat_response_id'] as string } : {}),
+  } }, trace.setSpanContext(ROOT_CONTEXT, step.spanContext()));
+  const llmContext = llm.spanContext();
+  const llmId = doubaoDigest(`${parent.traceId}:chat-llm`).slice(0, 16);
+  Object.defineProperty(llm, 'spanContext', { value: () => ({ ...llmContext, spanId: llmId }), configurable: true });
+  const outcome = end[`${PREFIX}client_outcome`];
+  if (outcome === 'cancelled' || outcome === 'error') {
+    llm.setStatus({ code: SpanStatusCode.ERROR }); step.setStatus({ code: SpanStatusCode.ERROR });
+    llm.setAttribute('error.type', outcome === 'cancelled' ? 'doubao.client_request_cancelled' : 'doubao.client_request_failed');
+  }
+  llm.end(nanoTime(responseEnd));
+  step.end(nanoTime(responseEnd));
+  return 2;
 }
 
 function validTime(value: unknown): value is string {
