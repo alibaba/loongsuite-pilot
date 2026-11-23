@@ -123,43 +123,46 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
     const files = await this.discoverSessionFiles();
     const allEntries: AgentActivityEntry[] = [];
     for (const filePath of files) {
-      const entries = await this.processFileBatch(filePath);
-      allEntries.push(...entries);
+      try {
+        const entries = await this.processFileBatch(filePath);
+        allEntries.push(...entries);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+          this.logger.warn('failed to read Kiro session', { file: filePath, error: String(error) });
+        }
+      }
     }
     return allEntries;
   }
 
   private async processFileBatch(filePath: string): Promise<AgentActivityEntry[]> {
     const stateKey = this.stateKey(filePath);
-    let stat;
+    const handle = await fs.open(filePath, constants.O_RDONLY | constants.O_NONBLOCK);
     try {
-      stat = await fs.stat(filePath);
-    } catch {
-      return [];
-    }
-    if (!stat.isFile()) return [];
+      // Use metadata from the same file that will be read if the path rotated.
+      const stat = await handle.stat();
+      if (!stat.isFile()) return [];
 
-    const prevState = this.stateStore.get(stateKey);
-    const prevInode = prevState.extra?.inode;
-    const prevOffset = prevState.lastOffset ?? 0;
-    let offset = prevInode !== undefined && prevInode !== stat.ino ? 0 : prevOffset;
-    if (offset > 0 && stat.size < offset) {
-      this.logger.info('file truncated or rotated, resetting offset', {
-        file: filePath,
-        recorded: offset,
-        actual: stat.size,
-      });
-      offset = 0;
-    }
-    // A newly discovered file can contain no complete rows yet. Track it
-    // before returning so startup keeps its cursor when it grows offline.
-    if (prevInode !== stat.ino || offset !== prevOffset) {
-      this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino } });
-    }
-    if (stat.size <= offset) return [];
+      const prevState = this.stateStore.get(stateKey);
+      const prevInode = prevState.extra?.inode;
+      const prevOffset = prevState.lastOffset ?? 0;
+      let offset = prevInode !== undefined && prevInode !== stat.ino ? 0 : prevOffset;
+      if (offset > 0 && stat.size < offset) {
+        this.logger.info('file truncated or rotated, resetting offset', {
+          file: filePath,
+          recorded: offset,
+          actual: stat.size,
+        });
+        offset = 0;
+      }
+      // A newly discovered file can contain no complete rows yet. Track it
+      // before returning so startup keeps its cursor when it grows offline.
+      if (prevInode !== stat.ino || offset !== prevOffset) {
+        this.stateStore.update(stateKey, { lastOffset: offset, extra: { inode: stat.ino } });
+      }
+      if (stat.size <= offset) return [];
 
-    const handle = await fs.open(filePath, 'r');
-    try {
       const buf = Buffer.alloc(stat.size - offset);
       const { bytesRead } = await handle.read(buf, 0, buf.length, offset);
       const completeBytes = buf.subarray(0, bytesRead).lastIndexOf(0x0a) + 1;

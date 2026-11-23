@@ -12,6 +12,11 @@ import { InputManager } from '../../../src/core/input-manager.js';
 import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return { ...actual, open: vi.fn(actual.open) };
+});
+
 // Fixture derived from real ~/.kiro/sessions/01ebf2a66fa98655/sess_57fd9524-c06e-4026-8424-9f5ea0173c08/messages.jsonl
 // captured during AGE-933 CDP smoke (comment 7b671636 attachment cp1-report.md).
 // Two turns, 13 records, 7 distinct payload types: user / turn_start / turn_end /
@@ -380,6 +385,49 @@ describe('KiroDesktopSessionInput', () => {
     const entries = await input.collectOnce();
     expect(entries.length).toBeGreaterThanOrEqual(1);
     expect(entries[0]?.['agent.kiro_event_type']).toBe('user');
+  });
+
+  it('returns entries from other sessions if a discovered file disappears before open', async () => {
+    const before = await writeSessionFile('hash-a', 'sess_first', REAL_FIXTURE_LINES);
+    const removed = await writeSessionFile('hash-b', 'sess_removed', REAL_FIXTURE_LINES);
+    const after = await writeSessionFile('hash-c', 'sess_last', REAL_FIXTURE_LINES);
+    const { open: openFile } = await vi.importActual<typeof fs>('node:fs/promises');
+    const open = vi.mocked(fs.open).mockImplementation(async (file, ...args) => {
+      if (file === removed) await fs.unlink(removed);
+      return openFile(file, ...args);
+    });
+
+    try {
+      const entries = await makeInput().collectOnce();
+      expect([...new Set(entries.map(entry => entry['gen_ai.session.id']))]).toEqual(['sess_first', 'sess_last']);
+      expect(stateStore.getOffset(`kiro-desktop-session:${before}`)).toBe((await fs.stat(before)).size);
+      expect(stateStore.getOffset(`kiro-desktop-session:${after}`)).toBe((await fs.stat(after)).size);
+    } finally {
+      open.mockReset().mockImplementation(openFile);
+    }
+  });
+
+  it('uses the replacement inode and size when a session rotates before open', async () => {
+    const file = await writeSessionFile('hash-a', 'sess_rotated', REAL_FIXTURE_LINES);
+    const input = makeInput();
+    await input.baselineOnce();
+    await fs.appendFile(file, `${REAL_FIXTURE_LINES[0]}\n`);
+
+    const { open: openFile } = await vi.importActual<typeof fs>('node:fs/promises');
+    const open = vi.mocked(fs.open).mockImplementationOnce(async (name, ...args) => {
+      await fs.rename(file, `${file}.old`);
+      await fs.writeFile(file, `${REAL_FIXTURE_LINES.slice(6).join('\n')}\n`);
+      return openFile(name, ...args);
+    });
+
+    try {
+      const entries = await input.collectOnce();
+      expect(entries.filter(entry => entry['event.name'] === 'llm.response')).toHaveLength(1);
+      expect(stateStore.getOffset(`kiro-desktop-session:${file}`)).toBe((await fs.stat(file)).size);
+      expect(await input.collectOnce()).toEqual([]);
+    } finally {
+      open.mockReset().mockImplementation(openFile);
+    }
   });
 
   it('emits llm.request / llm.response from REAL_FIXTURE (turn 2 has assistant Say; turn 1 gets synthetic final Say)', async () => {
