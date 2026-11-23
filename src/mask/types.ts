@@ -1,4 +1,10 @@
-import type { MaskType } from '../types/index.js';
+import type {
+  MaskReplacementMode,
+  MaskType,
+  PiiMaskType,
+} from '../types/index.js';
+
+export type { PiiMaskType } from '../types/index.js';
 
 export type MaskRuleKind = 'regex' | 'block' | 'urlWithPassword';
 
@@ -35,6 +41,12 @@ export interface MaskRange {
   type: MaskType;
 }
 
+export interface MaskPlan {
+  rules: readonly CompiledMaskRule[];
+  piiTypes: ReadonlySet<PiiMaskType>;
+  replacementMode: MaskReplacementMode;
+}
+
 export interface StringMaskOptions {
   largeStringThresholdBytes?: number;
   keywordContextWindow?: number;
@@ -54,4 +66,7 @@ export const DEFAULT_STRING_MASK_OPTIONS: ResolvedStringMaskOptions = {
 };
 
 export const MASKED_TOKEN_PATTERN =
-  /^\[(?:ACCESSKEY|APIKEY|PRIVATEKEY|DATABASEURL)_MASKED\]$/;
+  /^\[(?:ACCESSKEY(?:_SECRET)?|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHONE|EMAIL|IP_ADDRESS|CREDIT_CARD)_MASKED\]$/;
+
+export const MASKED_PREVIEW_TOKEN_PATTERN =
+  /\[(?:ACCESSKEY(?:_SECRET)?|APIKEY|PRIVATEKEY|DATABASEURL|IDCARD|PHONE|EMAIL|IP_ADDRESS|CREDIT_CARD)_MASKED\]\{(?=[^{}\r\n]{0,511}\*)[^{}\r\n]{1,512}\}/g;

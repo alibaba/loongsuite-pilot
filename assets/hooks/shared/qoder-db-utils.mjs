@@ -1,13 +1,25 @@
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 
-// node:sqlite is available in Node 22+. Load once at module init.
-// On Node 18 (repo minimum), this fails gracefully and isQoderIdeaSession
-// returns null — callers fall back to 'qoder' (Desktop IDE) as safe default.
-let DatabaseSync = null;
-try {
-  ({ DatabaseSync } = await import('node:sqlite'));
-} catch { /* Node < 22: DB detection unavailable, fallback to qoder */ }
+const require = createRequire(import.meta.url);
+
+// node:sqlite is available in Node 22+. Load it only when Qoder session
+// detection is actually requested: this module is also imported by the shared
+// event normalizer used by other agents, and eager loading would emit Node's
+// SQLite ExperimentalWarning in unrelated hooks such as Claude Code.
+// On Node 18 (repo minimum), loading fails gracefully and callers fall back to
+// 'qoder' (Desktop IDE) as the safe default.
+let DatabaseSync;
+function loadDatabaseSync() {
+  if (DatabaseSync !== undefined) return DatabaseSync;
+  try {
+    ({ DatabaseSync } = require('node:sqlite'));
+  } catch {
+    DatabaseSync = null;
+  }
+  return DatabaseSync;
+}
 
 // Per-session cache to avoid repeated DB open/close within the same process.
 const _cache = new Map();
@@ -21,12 +33,13 @@ const _cache = new Map();
  * Results are cached per sessionId for the lifetime of the process.
  */
 export function isQoderIdeaSession(sessionId) {
-  if (!DatabaseSync) return null;
+  const Database = loadDatabaseSync();
+  if (!Database) return null;
   if (_cache.has(sessionId)) return _cache.get(sessionId);
 
   const dbPath = homedir() + '/.qoder/shared_client/cache/db/local.db';
   if (!fs.existsSync(dbPath)) return null;
-  const db = new DatabaseSync(dbPath, { readonly: true });
+  const db = new Database(dbPath, { readonly: true });
   try {
     const row = db.prepare('SELECT 1 FROM chat_session WHERE session_id = ? LIMIT 1').get(sessionId);
     const result = row !== undefined;

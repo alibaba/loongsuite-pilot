@@ -22,10 +22,77 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
+import { appendRawJsonl } from "../shared/raw-jsonl-writer.mjs";
+import { readPilotConfig } from "../shared/pilot-config.mjs";
+import {
+  agentBaseFieldPatch,
+  collectResourceAttributesFromEnv,
+} from "../shared/resource-context.mjs";
 
 const AGENT_TYPE = "opencode";
 const MAX_SESSIONS = 100;
 const MAX_CONTENT_SIZE = 64 * 1024;
+
+const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_TYPE });
+const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
+const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
+  ? { resourceAttributes: RESOURCE_ATTRIBUTES }
+  : {};
+
+// ---------------------------------------------------------------------------
+// Caller-supplied span attributes
+// ---------------------------------------------------------------------------
+// The host process (e.g. multica daemon) sets LOONGSUITE_PILOT_SPAN_ATTRIBUTES
+// as `key=value,key=value` per agent invocation. Parsed once at init and stamped
+// onto every record as top-level fields so the trace flusher can pass matching
+// keys through to span attributes. Inlined (no import) — plugins ship standalone.
+// Mirrors parseSpanAttributesFromEnv in assets/hooks/shared/resource-context.mjs.
+const SPAN_ATTR_RESERVED_PREFIXES = [
+  "gen_ai.",
+  "git.",
+  "workspace.",
+  "event.",
+  "trace_",
+  "user.",
+  "cost_",
+  "agent.",
+  "time_unix_nano",
+  "observed_time_unix_nano",
+];
+const SPAN_ATTR_MAX_VALUE_LENGTH = 512;
+const SPAN_ATTR_SENSITIVE_RE =
+  /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE)([_.-]|$)|^(API_KEY|API_HEADER)$/i;
+const INVOCATION_IDENTITY_FIELD_MAP = {
+  "gen_ai.session.id": "agent.pilot.invocation.session.id",
+  "gen_ai.user.id": "agent.pilot.invocation.user.id",
+};
+
+function parseSpanAttributesFromEnv(env = process.env) {
+  const out = {};
+  const raw = env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
+  if (typeof raw !== "string" || raw.length === 0) return out;
+  for (const pair of raw.split(",")) {
+    const idx = pair.indexOf("=");
+    if (idx <= 0) continue;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    if (!key || !value) continue;
+    const invocationIdentityField = INVOCATION_IDENTITY_FIELD_MAP[key];
+    if (invocationIdentityField) {
+      if (value.length <= SPAN_ATTR_MAX_VALUE_LENGTH) {
+        out[invocationIdentityField] = value;
+      }
+      continue;
+    }
+    if (SPAN_ATTR_RESERVED_PREFIXES.some((p) => key === p || key.startsWith(p))) continue;
+    if (SPAN_ATTR_SENSITIVE_RE.test(key)) continue;
+    if (value.length > SPAN_ATTR_MAX_VALUE_LENGTH) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env);
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -127,13 +194,7 @@ function truncateContent(val) {
 // ---------------------------------------------------------------------------
 
 function loadPilotConfig() {
-  try {
-    const cfgPath = path.join(resolveDataDir(), "config.json");
-    const raw = fs.readFileSync(cfgPath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
+  return readPilotConfig();
 }
 
 function resolveUserId(cfg) {
@@ -151,6 +212,31 @@ function resolveUserId(cfg) {
 
 let _logDirReady = false;
 
+// Working directory of the OpenCode instance, captured once at server init.
+// One OpenCode server instance maps to one project directory, so this is stable
+// for the process lifetime. Emitted as agent.opencode.cwd so the pilot pipeline
+// can enrich git.repo / workspace.current_root downstream.
+let agentCwd;
+let captureContent = true;
+
+const CONTENT_FIELDS = new Set([
+  'gen_ai.input.messages', 'gen_ai.input.messages_delta',
+  'gen_ai.output.messages', 'gen_ai.output.messages_delta',
+  'gen_ai.system_instructions', 'gen_ai.tool.definitions',
+  'gen_ai.tool.call.arguments', 'gen_ai.tool.call.result', 'error.message',
+]);
+
+function contentEnabled(config) {
+  const value = config.agents?.opencode?.captureMessageContent;
+  return value !== false && !(typeof value === 'string' && value.trim().toLowerCase() === 'false');
+}
+
+function contentSafeRecord(record) {
+  return captureContent ? record : Object.fromEntries(
+    Object.entries(record).filter(([key]) => !CONTENT_FIELDS.has(key)),
+  );
+}
+
 function writeRecord(record) {
   try {
     if (!_logDirReady) {
@@ -158,7 +244,7 @@ function writeRecord(record) {
       _logDirReady = true;
     }
     const filePath = path.join(logDir(), `opencode-${todayStamp()}.jsonl`);
-    fs.appendFileSync(filePath, safeStringify(record) + "\n");
+    appendRawJsonl(filePath, safeStringify(contentSafeRecord(record)) + "\n");
   } catch (err) {
     writeError("writeRecord", err);
   }
@@ -228,7 +314,7 @@ function clearSession(sessionID) {
 // Record builder helpers
 // ---------------------------------------------------------------------------
 
-function buildCommonFields(sessionID, session, userId) {
+function buildCommonFields(sessionID, session, userId, cwd = agentCwd) {
   const turn = session.currentTurn;
   return {
     time_unix_nano: nowNanos(),
@@ -240,6 +326,10 @@ function buildCommonFields(sessionID, session, userId) {
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
     "gen_ai.agent.id": session.agentMeta?.name || undefined,
+    ...(cwd ? { [`agent.${AGENT_TYPE}.cwd`]: cwd } : {}),
+    ...SPAN_ATTRIBUTES,
+    ...RESOURCE_BASE_FIELD_PATCH,
+    ...RESOURCE_ATTRIBUTE_FIELDS,
   };
 }
 
@@ -365,6 +455,30 @@ function buildOutputMessages(pendingParts, finishReason) {
 // Event handlers
 // ---------------------------------------------------------------------------
 
+// 方案1(env):首个 turn 读 process.env.TRACEPARENT,写 session 级关联记录到
+// acp-correlate/<sessionId>.jsonl,每 session 只写一次(O_CREAT|O_EXCL 锁)。fail-open。
+const UPSTREAM_TP_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-[0-9a-f]{2}$/i;
+function recordUpstreamEnvOnce(sessionID) {
+  try {
+    const tp = (process.env.TRACEPARENT || "").trim();
+    const m = UPSTREAM_TP_RE.exec(tp);
+    if (!m || m[1].toLowerCase() === "0".repeat(32) || m[2].toLowerCase() === "0".repeat(16)) return;
+    const dir = path.join(resolveDataDir(), "acp-correlate");
+    fs.mkdirSync(dir, { recursive: true });
+    const base = path.basename(String(sessionID)).replace(/[^a-zA-Z0-9_-]/g, "_") || "unknown";
+    try {
+      fs.closeSync(fs.openSync(path.join(dir, `${base}.env.lock`), "wx"));
+    } catch (e) {
+      if (e && e.code === "EEXIST") return; // 已写过, 正常返回
+      throw e;
+    }
+    const rec = { type: "session", sessionId: sessionID, traceparent: tp, ts: new Date().toISOString() };
+    fs.appendFileSync(path.join(dir, `${base}.jsonl`), JSON.stringify(rec) + "\n", "utf-8");
+  } catch {
+    // fail-open: 绝不影响 opencode
+  }
+}
+
 function handleChatMessage(inp, out, userId) {
   const sessionID = inp.sessionID;
   if (!sessionID) return;
@@ -372,8 +486,13 @@ function handleChatMessage(inp, out, userId) {
   const session = getSession(sessionID);
 
   session.turnSeq += 1;
-  const turnId = `${sessionID}:t${session.turnSeq}`;
+  if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
   const traceId = generateTraceId();
+  // `opencode run -s` resumes a session in a fresh process, resetting turnSeq.
+  // Include this invocation's random ID so the trace flusher cannot mistake
+  // a resumed turn for an already-exported one. This suffix stays unchanged
+  // even when upstream linking later replaces the record's trace_id.
+  const turnId = `${sessionID}:t${session.turnSeq}:${traceId}`;
 
   session.currentTurn = {
     turnId,
@@ -471,6 +590,7 @@ function handleMessagePartUpdated(props, userId) {
     session.pendingParts = [];
     turn.stepSeq += 1;
     turn.currentStepId = `${turn.turnId}:s${turn.stepSeq}`;
+    turn.currentMessageId = part.messageID;
     session.stepStartTimeMs = props.time || Date.now();
 
     const model = session.modelInfo;
@@ -480,6 +600,7 @@ function handleMessagePartUpdated(props, userId) {
       "gen_ai.step.id": turn.currentStepId,
       "gen_ai.provider.name": inferProviderName(model?.providerID),
       "gen_ai.request.model": model?.modelID,
+      "opencode.message.id": part.messageID,
     };
     record.time_unix_nano = msToNanos(session.stepStartTimeMs) || nowNanos();
 
@@ -488,7 +609,13 @@ function handleMessagePartUpdated(props, userId) {
         session.systemPrompt,
         turn.userPromptText
       );
-      if (inputMsgs) record["gen_ai.input.messages"] = inputMsgs;
+      if (inputMsgs) {
+        record["gen_ai.input.messages"] = inputMsgs;
+        record["gen_ai.input.messages_delta"] = inputMsgs.map((message) => ({
+          ...message,
+          parts: message.parts.map((part) => ({ ...part })),
+        }));
+      }
       if (session.systemInstructionsParts && session.systemInstructionsParts.length > 0) {
         record["gen_ai.system_instructions"] = session.systemInstructionsParts;
       } else if (session.systemPrompt) {
@@ -570,6 +697,7 @@ function handleMessagePartUpdated(props, userId) {
         "gen_ai.tool.call.arguments": argsStr
           ? truncateContent(argsStr)
           : undefined,
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.start) {
         toolCallRecord.time_unix_nano = msToNanos(state.time.start);
@@ -605,6 +733,7 @@ function handleMessagePartUpdated(props, userId) {
             : safeStringify(resultPayload)
         ),
         "tool.result.status": state?.status === "error" ? "error" : "success",
+        "opencode.message.id": part.messageID,
       };
       if (state.time?.end) {
         toolResultRecord.time_unix_nano = msToNanos(state.time.end);
@@ -649,10 +778,22 @@ function handleMessageUpdated(props, userId) {
     finishReasons[0]
   );
 
+  // opencode's tokens.input has cache already subtracted out (a cost-bucketing
+  // convention: input/cache.read/cache.write are non-overlapping). Add cache
+  // back so gen_ai.usage.input_tokens is the TOTAL prompt tokens, matching the
+  // claude-code / qwen collectors where cache_read is a subset of input. This
+  // keeps cache_read <= input_tokens. cost_usd is left untouched (opencode
+  // already computed it correctly from the non-overlapping buckets).
+  const cacheRead = tokens.cache?.read || 0;
+  const cacheWrite = tokens.cache?.write || 0;
+  const outputTokens = tokens.output || 0;
+  const inputTotal = (tokens.input || 0) + cacheRead + cacheWrite;
+
   const record = {
     ...buildCommonFields(sessionID, session, userId),
     "event.name": "llm.response",
     "gen_ai.step.id": turn.currentStepId,
+    "opencode.message.id": info.id,
     "gen_ai.provider.name": inferProviderName(
       info.providerID || model?.providerID
     ),
@@ -660,10 +801,11 @@ function handleMessageUpdated(props, userId) {
     "gen_ai.response.model": info.modelID || model?.modelID,
     "gen_ai.response.id": info.id,
     "gen_ai.response.finish_reasons": finishReasons,
-    "gen_ai.usage.input_tokens": tokens.input || 0,
-    "gen_ai.usage.output_tokens": tokens.output || 0,
-    "gen_ai.usage.cache_read.input_tokens": tokens.cache?.read || 0,
-    "gen_ai.usage.cache_creation.input_tokens": tokens.cache?.write || 0,
+    "gen_ai.usage.input_tokens": inputTotal,
+    "gen_ai.usage.output_tokens": outputTokens,
+    "gen_ai.usage.cache_read.input_tokens": cacheRead,
+    "gen_ai.usage.cache_creation.input_tokens": cacheWrite,
+    "gen_ai.usage.total_tokens": inputTotal + outputTokens,
   };
   if (tokens.reasoning) {
     record["gen_ai.usage.reasoning_tokens"] = tokens.reasoning;
@@ -741,6 +883,7 @@ function handleToolExecuteBefore(inp, out, userId) {
     "gen_ai.tool.call.arguments": argsStr
       ? truncateContent(argsStr)
       : undefined,
+    "opencode.message.id": turn.currentMessageId,
   });
 }
 
@@ -757,6 +900,18 @@ function handleToolExecuteAfter(inp, out, userId) {
   if (!callID || session.emittedToolCalls.has(`result:${callID}`)) return;
 
   const resultPayload = out?.output ?? out?.result ?? "";
+
+  // MCP tools: opencode does not pass the result through this after-hook
+  // (out.output / out.result are empty), yet it DOES populate part.state.output,
+  // which the message.part.updated path reads. If there is no content and no
+  // error here, bail out WITHOUT marking result:<callID> consumed, so the part
+  // path can own the result. Otherwise we would emit an empty tool.result and
+  // block the path that actually carries the MCP output.
+  const hasResultContent = typeof resultPayload === "string"
+    ? resultPayload.length > 0
+    : resultPayload != null;
+  if (!hasResultContent && !out?.error) return;
+
   const matchingPart = session.pendingParts.find(
     (pp) => pp.kind === "tool_call" && pp.callID === callID
   );
@@ -783,6 +938,7 @@ function handleToolExecuteAfter(inp, out, userId) {
         : safeStringify(resultPayload)
     ),
     "tool.result.status": out?.error ? "error" : "success",
+    "opencode.message.id": turn.currentMessageId,
   };
   if (matchingPart?.startTimeMs) {
     const endMs = Date.now();
@@ -814,10 +970,31 @@ function safe(fn) {
 export default {
   id: "loongsuite-pilot-opencode",
 
+  // Lazy-load V2 so V1 keeps its existing hooks and does not resolve V2 APIs.
+  setup: async (ctx) => {
+    const { setupV2 } = await import("./v2.mjs");
+    const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
+    const userId = resolveUserId(cfg);
+    return setupV2(ctx, {
+      writeRecord, writeError, inferProviderName, recordUpstreamEnvOnce,
+      common: (sessionID, session) => buildCommonFields(sessionID, session, userId, ctx.location.directory),
+    });
+  },
+
   server: async (input, _options) => {
     ensureDir(logDir());
 
+    // OpenCode passes the instance context here; `directory` is the working
+    // directory. Fall back to process.cwd() (the plugin runs inside the
+    // OpenCode process, whose cwd is the same directory).
+    agentCwd =
+      (typeof input?.directory === "string" && input.directory) ||
+      process.cwd() ||
+      undefined;
+
     const cfg = loadPilotConfig();
+    captureContent = contentEnabled(cfg);
     const userId = resolveUserId(cfg);
 
     return {

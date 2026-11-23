@@ -127,15 +127,16 @@ export function inferAssistantFinishReason(assistantRecord) {
  * LLM call (or turn start) and this LLM call — i.e. one of:
  *
  *   - the original user prompt (for the first step of a turn)
- *   - tool_result records produced since the last assistant call
+ *   - the previous assistant message and tool_result records produced from it
  *   - mid-turn user messages
  *
  * Each input is a qwen-code transcript record. We extract its message.parts
  * and convert to ARMS format, mapping role appropriately:
  *   - type=user → role: 'user'
+ *   - type=assistant → role: 'assistant' (including tool_call parts)
  *   - type=tool_result → role: 'tool' (with tool_call_response parts)
  *
- * @param {Array} sourceRecords  qwen-code transcript records (user or tool_result)
+ * @param {Array} sourceRecords  qwen-code transcript records (user, assistant, or tool_result)
  * @param {Map<string,string>} [toolCallIdByResponseUuid]
  *   Optional map: tool_result record uuid → original tool call id. Used because
  *   qwen's functionResponse doesn't carry the call id; we recover it from the
@@ -147,6 +148,13 @@ export function buildInputMessagesDelta(sourceRecords, toolCallIdByResponseUuid 
   for (const rec of sourceRecords) {
     if (!rec || typeof rec !== 'object') continue;
     const msg = rec.message || {};
+    if (rec.type === 'assistant') {
+      const parts = convertQwenParts(msg.parts);
+      if (parts.length > 0) {
+        messages.push({ role: 'assistant', parts });
+      }
+      continue;
+    }
     if (rec.type === 'tool_result') {
       const callId = toolCallIdByResponseUuid.get(rec.uuid) || rec?.toolCallResult?.callId || null;
       const parts = convertQwenParts(msg.parts, callId);

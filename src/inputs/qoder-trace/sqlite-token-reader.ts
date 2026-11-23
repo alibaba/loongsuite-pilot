@@ -1,8 +1,9 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import sqlite3 from 'sqlite3';
+import { mimeFromMediaPath } from '../../multimodal/resolve.js';
 import { resolveHome } from '../../utils/fs-utils.js';
+import { queryReadonly, queryReadonlyPaged } from '../../utils/node-sqlite.js';
 import { createLogger } from '../../utils/logger.js';
 
 const logger = createLogger('SqliteTokenReader');
@@ -22,6 +23,115 @@ export interface SqliteTokenResult {
   rows: SqliteTokenData[];
   /** The DB path that contained the session data, for caller-side variant detection. */
   matchedDbPath: string | null;
+}
+
+export interface AttachedImageLookup {
+  paths: string[];
+  /** Earliest user chat_message.gmt_create (unix ms). */
+  startMs?: number;
+}
+
+/**
+ * Batch-read attached image paths, plus file identifiers, from chat_record.extra.
+ * Keys are request_id. Also returns the user-message start clock when present.
+ * DB paths are resolved the same way as token enrichment (not caller-supplied).
+ * Fail-open: query errors are logged and skipped.
+ * Only request_ids that appear in a row are recorded (`paths: []` if extra has no media).
+ */
+export async function readAttachedImagePathsForRequestIds(
+  requestIds: string[],
+): Promise<Map<string, AttachedImageLookup>> {
+  const result = new Map<string, AttachedImageLookup>();
+  const unique = [...new Set(requestIds.map(id => id.trim()).filter(Boolean))];
+  if (unique.length === 0) return result;
+
+  const dbPaths = resolveAllQoderDbPaths();
+  if (dbPaths.length === 0) return result;
+
+  const placeholders = unique.map(() => '?').join(', ');
+  const sql = `
+    SELECT
+      cr.request_id AS request_id,
+      cr.extra AS extra,
+      (
+        SELECT MIN(cm.gmt_create)
+        FROM chat_message cm
+        WHERE cm.request_id = cr.request_id
+          AND cm.role = 'user'
+      ) AS user_gmt_create
+    FROM chat_record cr
+    WHERE cr.request_id IN (${placeholders})
+  `;
+
+  for (const dbPath of dbPaths) {
+    let rows: Array<{
+      request_id: string;
+      extra: string | null;
+      user_gmt_create?: number | string | null;
+    }>;
+    try {
+      rows = await queryReadonly(dbPath, sql, unique);
+    } catch (err) {
+      logger.debug('sqlite attachedImagePaths query failed', { dbPath, error: String(err) });
+      continue;
+    }
+    for (const row of rows) {
+      const requestId = row.request_id?.trim();
+      if (!requestId || result.has(requestId)) continue;
+      const lookup: AttachedImageLookup = { paths: parseAttachedImagePaths(row.extra) };
+      const startMs = parseGmtCreateMs(row.user_gmt_create);
+      if (startMs !== undefined) lookup.startMs = startMs;
+      result.set(requestId, lookup);
+    }
+    if (result.size >= unique.length) break;
+  }
+  return result;
+}
+
+function parseGmtCreateMs(raw: number | string | null | undefined): number | undefined {
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+export function parseAttachedImagePaths(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const extra = JSON.parse(raw) as Record<string, unknown>;
+    const paths: string[] = [];
+
+    if (Array.isArray(extra.attachedImagePaths)) {
+      for (const item of extra.attachedImagePaths) {
+        if (typeof item === 'string' && item.trim()) paths.push(item.trim());
+      }
+    }
+    const hasAttachedImages = paths.length > 0;
+
+    const context = Array.isArray(extra.context) ? extra.context : [];
+    for (const item of context) {
+      if (!item || typeof item !== 'object') continue;
+      const record = item as Record<string, unknown>;
+      if (record.name === 'file') {
+        const selected = record.selectedItem;
+        if (selected && typeof selected === 'object') {
+          const identifier = (selected as Record<string, unknown>).identifier;
+          if (typeof identifier === 'string') {
+            const trimmed = identifier.trim();
+            if (trimmed && mimeFromMediaPath(trimmed)) paths.push(trimmed);
+          }
+        }
+      }
+      if (hasAttachedImages) continue;
+      const fileType = typeof record.fileType === 'string' ? record.fileType : '';
+      if (record.name !== 'image' && fileType !== 'image') continue;
+      const imgUrl = typeof record.imgUrl === 'string' ? record.imgUrl.trim() : '';
+      const filePath = typeof record.filePath === 'string' ? record.filePath.trim() : '';
+      const candidate = imgUrl || filePath;
+      if (candidate) paths.push(candidate);
+    }
+    return [...new Set(paths)];
+  } catch {
+    return [];
+  }
 }
 
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
@@ -44,7 +154,8 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       AND cm.token_info IS NOT NULL
       AND cm.token_info != ''
       AND json_valid(cm.token_info)
-    ORDER BY cm.gmt_create ASC
+      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
+    ORDER BY cm.gmt_create ASC, cm.id ASC
   `;
 
   for (const dbPath of dbPaths) {
@@ -58,7 +169,9 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
       record_extra?: string | null;
     }>;
     try {
-      rows = await queryReadonly(dbPath, sql, [sessionId]);
+      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
+        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
+      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
     } catch (err) {
       logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
       continue;
@@ -96,28 +209,36 @@ export function isIdeaDbPath(dbPath: string | null): boolean {
   return normalized.includes('.qoder/shared_client');
 }
 
-function resolveAllQoderDbPaths(): string[] {
-  // Qoder Desktop (Electron app) keeps SQLite under platform app-support.
-  // Qoder for JetBrains shares state through ~/.qoder/shared_client/.
-  // Both may coexist on the same machine with different sessions, so we return ALL accessible paths.
-  const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
-  const candidates = process.platform === 'darwin'
-    ? [
-        resolveHome('~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db'),
-        resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-      ]
-    : process.platform === 'win32'
-      ? [
-          path.join(appdata, 'Qoder', 'SharedClientCache', 'cache', 'db', 'local.db'),
-          path.join(os.homedir(), '.qoder', 'shared_client', 'cache', 'db', 'local.db'),
-        ]
-      : [
-          resolveHome('~/.config/Qoder/SharedClientCache/cache/db/local.db'),
-          resolveHome('~/.qoder/shared_client/cache/db/local.db'),
-        ];
+/** Relative path from a Qoder profile root to local.db. */
+const QODER_DB_TAIL = path.join('SharedClientCache', 'cache', 'db', 'local.db');
+
+/** Desktop Qoder data root (macOS Application Support / Windows AppData / Linux XDG). */
+export function resolveQoderAppRoot(): string {
+  if (process.platform === 'darwin') {
+    return resolveHome('~/Library/Application Support/Qoder');
+  }
+  if (process.platform === 'win32') {
+    const appdata = process.env.APPDATA ?? path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appdata, 'Qoder');
+  }
+  return resolveHome('~/.config/Qoder');
+}
+
+/** Desktop app-support DB, hashed-profile DBs, and JetBrains ~/.qoder/shared_client. */
+export function resolveAllQoderDbPaths(): string[] {
+  const qoderRoot = resolveQoderAppRoot();
+
+  const candidates = [
+    path.join(qoderRoot, QODER_DB_TAIL),
+    ...listHashedProfileDbPaths(qoderRoot),
+    resolveHome('~/.qoder/shared_client/cache/db/local.db'),
+  ];
 
   const available: string[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
     try {
       fs.accessSync(candidate);
       available.push(candidate);
@@ -128,7 +249,23 @@ function resolveAllQoderDbPaths(): string[] {
   return available;
 }
 
-function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
+/** Linux remote / multi-profile Qoder nests local.db under <qoderRoot>/<hash>/. */
+function listHashedProfileDbPaths(qoderRoot: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(qoderRoot);
+  } catch {
+    return [];
+  }
+  const found: string[] = [];
+  for (const name of names) {
+    if (name === 'SharedClientCache') continue;
+    found.push(path.join(qoderRoot, name, QODER_DB_TAIL));
+  }
+  return found;
+}
+
+export function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number } | null {
   try {
     const obj = JSON.parse(raw);
     const pt = typeof obj.prompt_tokens === 'number' ? obj.prompt_tokens : 0;
@@ -141,7 +278,7 @@ function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: 
   }
 }
 
-function parseModelKey(raw: string | null | undefined): string | undefined {
+export function parseModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);
@@ -153,7 +290,7 @@ function parseModelKey(raw: string | null | undefined): string | undefined {
   }
 }
 
-function parseRecordModelKey(raw: string | null | undefined): string | undefined {
+export function parseRecordModelKey(raw: string | null | undefined): string | undefined {
   if (!raw) return undefined;
   try {
     const obj = JSON.parse(raw);
@@ -164,17 +301,3 @@ function parseRecordModelKey(raw: string | null | undefined): string | undefined
   }
 }
 
-function queryReadonly<T>(dbPath: string, sql: string, params: unknown[]): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const db = new sqlite3.Database(dbPath, sqlite3.OPEN_READONLY, (openErr) => {
-      if (openErr) { reject(openErr); return; }
-      db.all(sql, params, (queryErr: Error | null, rows: T[]) => {
-        db.close((closeErr) => {
-          if (closeErr) logger.debug('sqlite close warning', { error: String(closeErr) });
-          if (queryErr) { reject(queryErr); return; }
-          resolve(rows);
-        });
-      });
-    });
-  });
-}

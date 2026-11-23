@@ -3,10 +3,12 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   define: {
     '__INTERNAL_BUILD__': 'false',
+    '__PROPRIETARY_BUILD__': 'false',
   },
   test: {
     globals: true,
     environment: 'node',
+    globalSetup: ['tests/helpers/isolated-home-global-setup.ts'],
     include: ['tests/**/*.test.ts', 'tests/**/*.test.mjs'],
     coverage: {
       provider: 'v8',
@@ -30,5 +32,11 @@ export default defineConfig({
       reporter: ['text', 'lcov'],
     },
     testTimeout: 15_000,
+    server: {
+      deps: {
+        // node: builtins（如 node:sqlite）应直接透传，不进 vite transform
+        external: [/^node:/],
+      },
+    },
   },
 });

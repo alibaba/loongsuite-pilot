@@ -86,6 +86,31 @@ describe('BaseSessionInput', () => {
       await input.stop();
     });
 
+    it('reports malformed and filtered lines as raw records before normalization', async () => {
+      const file = path.join(tmpDir, 'raw-stats.jsonl');
+      const payload = `not-json\n${JSON.stringify({ file_path: '/filtered.ts' })}\n`;
+      await fs.writeFile(file, payload);
+      input.discoverFn = async () => [file];
+      input.processLineFn = async () => null;
+
+      const runtimeDeltas: Array<Record<string, number>> = [];
+      input.on('input-runtime-delta', stats => runtimeDeltas.push(stats));
+
+      await input.start();
+      await input.stop();
+
+      expect(runtimeDeltas).toHaveLength(1);
+      expect(runtimeDeltas[0]).toMatchObject({
+        rawReadCalls: 1,
+        rawReadBytes: Buffer.byteLength(payload),
+        rawInRecords: 2,
+        rawInBytes: Buffer.byteLength(payload),
+        rawInMaxBatchBytes: Buffer.byteLength(payload),
+        parseSuccessRecords: 1,
+        parseFailedRecords: 1,
+      });
+    });
+
     it('should pass filePath to processSessionLine', async () => {
       const file = path.join(tmpDir, 'my-session.jsonl');
       await fs.writeFile(file, JSON.stringify({ x: 1 }) + '\n');
@@ -199,4 +224,72 @@ describe('BaseSessionInput', () => {
       await input.stop();
     });
   });
+
+  // EACCES reproduction needs real permission checks: skipped when the test
+  // process is root (root reads anything) or the platform has no getuid.
+  describe.runIf(typeof process.getuid === 'function' && process.getuid() !== 0)(
+    'ownership diagnostics',
+    () => {
+      it('unreadable event file: warns once with owner/daemon uids and keeps collecting sibling files', async () => {
+        const blocked = path.join(tmpDir, 'blocked.jsonl');
+        const readable = path.join(tmpDir, 'readable.jsonl');
+        await fs.writeFile(blocked, JSON.stringify({ file_path: '/blocked.ts' }) + '\n');
+        await fs.writeFile(readable, JSON.stringify({ file_path: '/ok.ts' }) + '\n');
+        await fs.chmod(blocked, 0o000);
+
+        input.discoverFn = async () => [blocked, readable];
+        const warnSpy = vi.spyOn((input as any).logger, 'warn');
+        const realUid = process.getuid();
+        // Force the daemon side of the comparison to a different uid so the
+        // mismatch branch fires deterministically regardless of the test user.
+        const getuidSpy = vi.spyOn(process, 'getuid').mockReturnValue(realUid + 1);
+
+        const allEntries: AgentActivityEntry[] = [];
+        input.on('entries', (e: AgentActivityEntry[]) => allEntries.push(...e));
+
+        try {
+          await input.start();
+          // Containment: the unreadable file must not abort the cycle.
+          expect(allEntries.map(e => e.filePath)).toEqual(['/ok.ts']);
+
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+          const message = String(warnSpy.mock.calls[0][0]);
+          expect(message).toContain('ownership-mismatch');
+          expect(message).toContain(`owned by uid ${realUid}`);
+          expect(message).toContain(`daemon runs as uid ${realUid + 1}`);
+
+          // Second cycle against the same broken file: no duplicate warning.
+          await input.stop();
+          await input.start();
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          getuidSpy.mockRestore();
+          warnSpy.mockRestore();
+          await fs.chmod(blocked, 0o644).catch(() => {});
+        }
+        await input.stop();
+      });
+
+      it('unreadable despite matching uid: points at directory permissions or security modules', async () => {
+        const blocked = path.join(tmpDir, 'blocked.jsonl');
+        await fs.writeFile(blocked, JSON.stringify({ file_path: '/x.ts' }) + '\n');
+        await fs.chmod(blocked, 0o000);
+
+        input.discoverFn = async () => [blocked];
+        const warnSpy = vi.spyOn((input as any).logger, 'warn');
+
+        try {
+          await input.start();
+          expect(warnSpy).toHaveBeenCalledTimes(1);
+          const message = String(warnSpy.mock.calls[0][0]);
+          expect(message).toContain('ownership-mismatch');
+          expect(message).toContain('despite matching uid');
+        } finally {
+          warnSpy.mockRestore();
+          await fs.chmod(blocked, 0o644).catch(() => {});
+        }
+        await input.stop();
+      });
+    },
+  );
 });

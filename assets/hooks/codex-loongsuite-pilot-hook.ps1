@@ -1,145 +1,211 @@
-# Codex hook entrypoint (Windows) — delegates to codex-hook-processor.mjs.
+# Codex transcript discovery hook entrypoint for Windows.
 #
-# Usage (registered in ~/.codex/hooks.json by pilot HookStrategy):
-#   powershell -File $PILOT_DATA/hooks/codex-loongsuite-pilot-hook.ps1 <subcommand>
+# Registered command:
+#   powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+#     -File "<pilot-data>\hooks\codex-loongsuite-pilot-hook.ps1" <subcommand>
 #
-# Fail-open: any error outputs "{}" and exits 0.
+# The hook is fail-open: it always acknowledges Codex with one JSON object and
+# exits zero. Telemetry is recovered only by CodexTranscriptInput.
 
-$ErrorActionPreference = "Continue"
+param(
+    [Parameter(Position = 0)]
+    [string]$Subcommand = "unknown"
+)
+
+$ErrorActionPreference = "Stop"
 $EMPTY_RESULT = '{}'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Processor = Join-Path $ScriptDir "codex-hook-processor.mjs"
-$Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
+$PilotDataDir = Split-Path -Parent $ScriptDir
+if (-not $env:LOONGSUITE_PILOT_DATA_DIR) {
+    $env:LOONGSUITE_PILOT_DATA_DIR = $PilotDataDir
+}
 
 function Log-Error {
     param([string]$Stage, [string]$Message)
     try {
-        $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) { $env:LOONGSUITE_PILOT_DATA_DIR }
-                   else { Join-Path $env:USERPROFILE ".loongsuite-pilot" }
-        $day = (Get-Date -Format "yyyy-MM-dd")
+        $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+            $env:LOONGSUITE_PILOT_DATA_DIR
+        } else {
+            Join-Path $env:USERPROFILE ".loongsuite-pilot"
+        }
+        $day = Get-Date -Format "yyyy-MM-dd"
         $dir = Join-Path $dataDir "logs\codex\errors"
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+        }
         $file = Join-Path $dir "codex-error-$day.jsonl"
-        $time = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
-        $escapedMsg = $Message -replace '\\', '\\\\' -replace '"', '\"'
-        $line = "{`"time`":`"$time`",`"gen_ai.agent.type`":`"codex`",`"stage`":`"$Stage`",`"error.type`":`"ps1_$Stage`",`"error.message`":`"$escapedMsg`"}"
-        Add-Content -Path $file -Value $line
+        # Plain @{}, never [ordered]@{}: on a WDAC machine this hook runs in
+        # ConstrainedLanguage mode, where the accelerator-converts-an-@{}-literal shape
+        # can throw (see the CLM header in deploy/installer.ps1 -- [pscustomobject] does
+        # exactly that on 5.1 despite being documented as allowed). The catch below would
+        # swallow it, so the symptom is an error log that is never written on precisely
+        # the machines where it is needed. Key order is cosmetic in a JSONL log line.
+        $record = @{
+            time = (Get-Date).ToUniversalTime().ToString("o")
+            "gen_ai.agent.type" = "codex"
+            stage = $Stage
+            "error.type" = "ps1_$Stage"
+            "error.message" = $Message
+        }
+        # Explicit UTF8: Add-Content defaults to the ANSI codepage, which garbles
+        # non-ASCII paths and messages in the record.
+        Add-Content -LiteralPath $file -Value ($record | ConvertTo-Json -Compress) -Encoding UTF8
     } catch {}
 }
 
-if (-not [Console]::IsInputRedirected) {
+function Write-EmptyResult {
     Write-Output $EMPTY_RESULT
-    exit 0
 }
 
-if (-not (Test-Path $Processor)) {
-    Write-Error "[codex-hook] processor not found: $Processor"
-    Log-Error "missing_processor" "hook processor not found: $Processor"
-    Write-Output $EMPTY_RESULT
-    exit 0
+function Convert-NodePath {
+    param([string]$PathValue)
+    if (-not $PathValue) { return $PathValue }
+
+    $candidate = $PathValue.Trim().Trim('"')
+    if ($candidate -match '^/([A-Za-z])/(.*)$') {
+        $candidate = "$($Matches[1]):\$($Matches[2] -replace '/', '\')"
+    }
+    # -match, not [System.IO.Path]::HasExtension(): a static method call on a
+    # non-core type throws under ConstrainedLanguage mode (WDAC), and the catch at
+    # the bottom of this file would swallow it into a silent empty result. The regex
+    # is HasExtension's contract: a dot after the last separator that is not the
+    # final character. Trailing dot ("node.") and a dotted parent directory
+    # ("v18.20.4/node") both correctly yield no match.
+    if (-not ($candidate -match '\.[^\\/.]+$') -and (Test-Path -LiteralPath "$candidate.exe")) {
+        $candidate = "$candidate.exe"
+    }
+    return $candidate
 }
 
 $MIN_NODE_MAJOR = 18
 
-function Test-NodeSuitable {
+# Managed runtimes live at <pilot-dir>\runtime\node-v<x>.<y>.<z>\node.exe (win zip layout)
+# or ...\node-v<x>.<y>.<z>\bin\node.exe, extracted by the installer only after it verified
+# SHASUMS256 and probed the binary itself, so the directory name is authoritative. Reading
+# the major from the path skips a `node --version` launch that would otherwise run on the
+# user's interactive path for every single event. Returns $null for anything that is not a
+# managed runtime, which still gets probed. Split-Path/-match keep this CLM-safe.
+function Get-ManagedNodeMajor {
     param([string]$bin)
-    if (-not (Test-Path $bin)) { return $false }
+    if (-not $bin) { return $null }
+    $dir = Split-Path $bin -Parent
+    if (-not $dir) { return $null }
+    if ((Split-Path $dir -Leaf) -eq 'bin') {
+        $dir = Split-Path $dir -Parent
+        if (-not $dir) { return $null }
+    }
+    $parent = Split-Path $dir -Parent
+    if (-not $parent -or (Split-Path $parent -Leaf) -ne 'runtime') { return $null }
+    if ((Split-Path $dir -Leaf) -match '^node-v([0-9]+)') { return [int]$Matches[1] }
+    return $null
+}
+
+function Test-NodeSuitable {
+    param([string]$Bin)
+    $resolved = Convert-NodePath $Bin
+    if (-not $resolved -or -not (Test-Path -LiteralPath $resolved)) { return $false }
+    $managedMajor = Get-ManagedNodeMajor $resolved
+    if ($null -ne $managedMajor) { return $managedMajor -ge $MIN_NODE_MAJOR }
     try {
-        $ver = & $bin --version 2>$null
-        if (-not $ver) { return $false }
-        $major = [int]($ver -replace '^v','').Split('.')[0]
+        $version = & $resolved --version 2>$null
+        if (-not $version) { return $false }
+        $major = [int](($version -replace '^v', '').Split('.')[0])
         return $major -ge $MIN_NODE_MAJOR
-    } catch { return $false }
+    } catch {
+        return $false
+    }
 }
 
 function Resolve-NodeBin {
-    $pinFile = Join-Path $env:USERPROFILE ".loongsuite-pilot\node-bin"
-    if (Test-Path $pinFile) {
-        $pinned = (Get-Content $pinFile -ErrorAction SilentlyContinue).Trim()
-        if ($pinned -and (Test-NodeSuitable $pinned)) { return $pinned }
+    $dataDir = if ($env:LOONGSUITE_PILOT_DATA_DIR) {
+        $env:LOONGSUITE_PILOT_DATA_DIR
+    } else {
+        Join-Path $env:USERPROFILE ".loongsuite-pilot"
     }
+    $pinFile = Join-Path $dataDir "node-bin"
+    if (Test-Path -LiteralPath $pinFile) {
+        # -Encoding UTF8 + BOM strip: the pin file can hold a non-ASCII path and 5.1
+        # defaults Get-Content to ANSI, which turns it into "??".
+        $pinContent = Get-Content -LiteralPath $pinFile -Raw -Encoding UTF8 -ErrorAction SilentlyContinue
+        $pinned = Convert-NodePath (([string]$pinContent).Trim([char]0xFEFF))
+        if (Test-NodeSuitable $pinned) { return $pinned }
+    }
+
     $candidates = @()
-    $nvmHome = $env:NVM_HOME
-    if ($nvmHome -and (Test-Path $nvmHome)) {
-        $nvmDirs = Get-ChildItem $nvmHome -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $nvmDirs) { $candidates += Join-Path $d.FullName "node.exe" }
+    if ($env:NVM_HOME -and (Test-Path -LiteralPath $env:NVM_HOME)) {
+        $nvmDirs = Get-ChildItem -LiteralPath $env:NVM_HOME -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $nvmDirs) {
+            $candidates += Join-Path $dir.FullName "node.exe"
+        }
     }
+
     $fnmDir = Join-Path $env:USERPROFILE ".fnm\node-versions"
-    if (Test-Path $fnmDir) {
-        $fnmDirs = Get-ChildItem $fnmDir -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending
-        foreach ($d in $fnmDirs) { $candidates += Join-Path $d.FullName "installation\node.exe" }
+    if (Test-Path -LiteralPath $fnmDir) {
+        $fnmDirs = Get-ChildItem -LiteralPath $fnmDir -Directory -ErrorAction SilentlyContinue |
+            Sort-Object Name -Descending
+        foreach ($dir in $fnmDirs) {
+            $candidates += Join-Path $dir.FullName "installation\node.exe"
+        }
     }
+
     $candidates += Join-Path $env:USERPROFILE ".volta\bin\node.exe"
     $candidates += "C:\Program Files\nodejs\node.exe"
     $candidates += "C:\Program Files (x86)\nodejs\node.exe"
     $pathNode = Get-Command node -ErrorAction SilentlyContinue
     if ($pathNode) { $candidates += $pathNode.Source }
-    foreach ($c in $candidates) {
-        if (Test-NodeSuitable $c) { return $c }
+
+    foreach ($candidate in $candidates) {
+        $resolved = Convert-NodePath $candidate
+        if (Test-NodeSuitable $resolved) { return $resolved }
     }
     return $null
 }
 
-$nodeBin = Resolve-NodeBin
-if (-not $nodeBin) {
-    Write-Error "[codex-hook] node >= $MIN_NODE_MAJOR not found"
-    Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
-    Write-Output $EMPTY_RESULT
+if (-not [Console]::IsInputRedirected) {
+    Write-EmptyResult
+    exit 0
+}
+
+if (-not (Test-Path -LiteralPath $Processor)) {
+    Log-Error "missing_processor" "hook processor not found: $Processor"
+    Write-EmptyResult
     exit 0
 }
 
 try {
-    # Read stdin as raw bytes to avoid PowerShell encoding issues (GB2312/ASCII mangles UTF-8)
-    $stdinStream = [Console]::OpenStandardInput()
-    $ms = New-Object System.IO.MemoryStream
-    $stdinStream.CopyTo($ms)
-    $rawBytes = $ms.ToArray()
-    $ms.Dispose()
-
-    # Strip UTF-8 BOM (EF BB BF) before any encoding fixup
-    if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB -and $rawBytes[2] -eq 0xBF) {
-        $rawBytes = $rawBytes[3..($rawBytes.Length - 1)]
+    $nodeBin = Resolve-NodeBin
+    if (-not $nodeBin) {
+        Log-Error "missing_node" "node >= $MIN_NODE_MAJOR not found"
+        Write-EmptyResult
+        exit 0
     }
 
-    # Fix Cursor's UTF-8→GBK double-encoding on Chinese Windows.
-    if ($rawBytes.Length -gt 2) {
-        try {
-            $utf8    = [System.Text.Encoding]::UTF8
-            $gbk     = [System.Text.Encoding]::GetEncoding(936)
-            $garbled = $utf8.GetString($rawBytes)
-            $recovered = $gbk.GetBytes($garbled)
-
-            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
-            [void]$strictUtf8.GetString($recovered)
-
-            $rawBytes = $recovered
-        } catch {}
+    # CLM/WDAC-safe passthrough: node inherits this process's stdin (fd0) and
+    # reads Codex's UTF-8 JSON directly; PowerShell never touches the bytes. The
+    # old code used [Console]::OpenStandardInput / MemoryStream / ProcessStartInfo,
+    # whose .NET calls throw under Constrained Language Mode (WDAC/Device Guard)
+    # and silently drop telemetry. BOM stripping and the Chinese UTF-8->GBK fixup
+    # now live in node (shared/decode-payload.mjs).
+    # NOTE: keep this file ASCII-only. Windows PowerShell 5.1 parses a BOM-less
+    # script using the system ANSI code page (GBK/936 on Chinese Windows); any
+    # non-ASCII byte here can corrupt parsing and abort the whole script.
+    $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw "processor exited with code $LASTEXITCODE"
     }
+    $result = ($result | Out-String).Trim()
 
-    if ($rawBytes.Length -eq 0) {
-        $result = & $nodeBin $Processor $Subcommand 2>$null
+    if ($result) {
+        Write-Output $result
     } else {
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = $nodeBin
-        $psi.Arguments = "`"$Processor`" $Subcommand"
-        $psi.UseShellExecute = $false
-        $psi.RedirectStandardInput = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError = $false
-        $psi.CreateNoWindow = $true
-
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $proc.StandardInput.BaseStream.Write($rawBytes, 0, $rawBytes.Length)
-        $proc.StandardInput.Close()
-        $result = $proc.StandardOutput.ReadToEnd()
-        $proc.WaitForExit()
+        Write-EmptyResult
     }
-    if ($result) { Write-Output $result } else { Write-Output $EMPTY_RESULT }
 } catch {
-    Write-Error "[codex-hook] processor failed (subcommand=$Subcommand)"
-    Log-Error "processor_failed" "hook processor exited non-zero (subcommand=$Subcommand)"
-    Write-Output $EMPTY_RESULT
+    Log-Error "processor_failed" $_.Exception.Message
+    Write-EmptyResult
 }
 
 exit 0

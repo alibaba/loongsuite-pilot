@@ -12,8 +12,42 @@ const OTLP_DEBUG_DIR = path.join(homedir(), '.loongsuite-pilot', 'logs', 'otlp-d
 const VALID_SPAN_KINDS = ['ENTRY', 'AGENT', 'STEP', 'LLM', 'TOOL', 'CHAIN', 'RETRIEVER', 'RERANKER', 'EMBEDDING', 'TASK'];
 const KNOWN_SUBAGENT_TOOLS = new Set(['Agent']);
 // TODO: remove 'tool_calls' once all producers are migrated to singular 'tool_call'
-const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'interrupted', 'cancelled']);
+// Kept in sync with the Finish Reasons table in docs/output-event-schema.md.
+// `cancelled` is documented there and is terminal in otlp-trace-flusher's
+// TERMINAL_FINISH_REASONS; the Codex aborted-turn and WorkBuddy builders emit it
+// directly, so its absence here was rejecting valid output.
+// Exported so producers can assert against this set instead of hand-copying it.
+export const VALID_FINISH_REASONS = new Set(['stop', 'length', 'content_filter', 'tool_call', 'tool_calls', 'error', 'end_turn', 'max_tokens', 'cancelled', 'interrupted']);
 const VALID_PART_TYPES = new Set(['text', 'tool_call', 'tool_call_response', 'reasoning']);
+
+export function isRuntimeSkillLoadSpan(tool) {
+  return tool?.attributes?.['gen_ai.tool.type'] === 'extension' &&
+    Boolean(
+      tool.attributes?.['gen_ai.skill.id'] ||
+      tool.attributes?.['gen_ai.skill.name'],
+    );
+}
+
+export function unmatchedToolsForLlmOutput(tools, expectedToolCalls) {
+  return tools.filter((tool) => {
+    if (isRuntimeSkillLoadSpan(tool)) return false;
+    const toolCallId = tool.attributes?.['gen_ai.tool.call.id'];
+    const toolName = tool.attributes?.['gen_ai.tool.name'];
+    return !expectedToolCalls.some((toolCall) =>
+      (toolCallId && toolCall.id && toolCall.id === toolCallId) ||
+      (toolName && toolCall.name && toolCall.name === toolName));
+  });
+}
+
+export function hasModelToolSpanForOutput(tools, expectedToolCall) {
+  return tools.some((tool) => {
+    if (isRuntimeSkillLoadSpan(tool)) return false;
+    return (expectedToolCall.id &&
+        tool.attributes?.['gen_ai.tool.call.id'] === expectedToolCall.id) ||
+      (expectedToolCall.name &&
+        tool.attributes?.['gen_ai.tool.name'] === expectedToolCall.name);
+  });
+}
 
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
@@ -109,7 +143,7 @@ function loadRules(rulesPath) {
 
 // ─── Trace Tree Builder ─────────────────────────────────────────────────────
 
-function buildTraces(spans, traceIdFilter) {
+export function buildTraces(spans, traceIdFilter) {
   const grouped = new Map();
   for (const span of spans) {
     if (traceIdFilter && span.traceId !== traceIdFilter) continue;
@@ -153,7 +187,36 @@ function skipped(id, reason) { return { id, status: 'skipped', detail: reason ||
 
 // ─── 5a. Structure Validation ───────────────────────────────────────────────
 
-function validateStructure(trace) {
+// Independently exported delegated turns can be the only local fragment of a
+// trace. Require explicit delegation metadata before accepting a missing parent.
+function hasExternalDelegationParent(span, spanMap) {
+  return span._kind === 'AGENT' &&
+    /^[0-9a-f]{16}$/.test(span.parentSpanId || '') &&
+    !/^0+$/.test(span.parentSpanId) &&
+    !spanMap.has(span.parentSpanId) &&
+    Boolean(span.attributes?.['gen_ai.agent.parent.invocation.id'] ||
+      span.attributes?.['gen_ai.subagent.parent_tool_call.id']);
+}
+
+// Stop at delegated AGENT boundaries: their identity, usage and STEP sequence
+// belong to their own execution even when they share a trace with the caller.
+function agentExecutionSpans(trace, agent) {
+  const result = [];
+  const visited = new Set();
+  const queue = [agent];
+  while (queue.length > 0) {
+    const span = queue.shift();
+    if (visited.has(span.spanId)) continue;
+    visited.add(span.spanId);
+    result.push(span);
+    for (const child of trace.childrenMap.get(span.spanId) || []) {
+      if (child._kind !== 'AGENT') queue.push(child);
+    }
+  }
+  return result;
+}
+
+export function validateStructure(trace) {
   const checks = [];
   const { spans, spanMap, childrenMap } = trace;
 
@@ -161,14 +224,17 @@ function validateStructure(trace) {
   const parentKind = (s) => s.parentSpanId && spanMap.has(s.parentSpanId) ? spanMap.get(s.parentSpanId)._kind : null;
 
   const entries = byKind('ENTRY');
-  checks.push(entries.length === 1
-    ? pass('structure.single_entry')
-    : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1`));
-
   const agents = byKind('AGENT');
-  checks.push(agents.length === 1
+  const externalAgents = agents.filter(a => hasExternalDelegationParent(a, spanMap));
+  checks.push(entries.length === 1 || (entries.length === 0 && externalAgents.length > 0)
+    ? pass('structure.single_entry')
+    : error('structure.single_entry', `found ${entries.length} ENTRY spans, expected 1 (or an explicitly delegated external fragment)`));
+
+  const entryAgents = entries.flatMap(e => (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT'));
+  checks.push(agents.length > 0 && entries.every(e =>
+    (childrenMap.get(e.spanId) || []).filter(c => c._kind === 'AGENT').length === 1)
     ? pass('structure.single_agent')
-    : error('structure.single_agent', `found ${agents.length} AGENT spans, expected 1`));
+    : error('structure.single_agent', `found ${agents.length} AGENT spans and ${entryAgents.length} directly under ENTRY; expected one root AGENT per ENTRY and optional delegated AGENTs`));
 
   if (entries.length === 1) {
     const e = entries[0];
@@ -179,9 +245,14 @@ function validateStructure(trace) {
   }
 
   for (const a of agents) {
-    checks.push(parentKind(a) === 'ENTRY'
+    const external = hasExternalDelegationParent(a, spanMap);
+    checks.push(parentKind(a) === 'ENTRY' || parentKind(a) === 'TOOL' || external
       ? pass('structure.agent_under_entry')
-      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY`, a.spanId, a.name));
+      : error('structure.agent_under_entry', `AGENT parent is ${parentKind(a) || 'none'}, expected ENTRY, delegation TOOL, or explicit external delegation context`, a.spanId, a.name));
+    if (external) {
+      checks.push(warn('structure.external_parent_context',
+        `delegation parent ${a.parentSpanId} is outside this local trace fragment`, a.spanId, a.name));
+    }
   }
 
   const steps = byKind('STEP');
@@ -249,9 +320,9 @@ function validateStructure(trace) {
     checks.push(pass('structure.llm_before_tools'));
   }
 
-  if (entries.length === 1) {
+  if (entries.length === 1 || externalAgents.length > 0) {
     const visited = new Set();
-    const queue = [entries[0].spanId];
+    const queue = [...entries, ...externalAgents].map(s => s.spanId);
     while (queue.length > 0) {
       const id = queue.shift();
       if (visited.has(id)) continue;
@@ -352,7 +423,7 @@ function shortKey(key) {
 
 // ─── 5c. Time Validation ────────────────────────────────────────────────────
 
-function validateTime(trace, rules) {
+export function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
 
@@ -367,14 +438,14 @@ function validateTime(trace, rules) {
   }
   if (allNonZero) checks.push(pass('time.non_zero_duration'));
 
-  const steps = spans.filter(s => s._kind === 'STEP');
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan && steps.length > 1) {
-    const sorted = [...steps].sort((a, b) => {
+  const stepGroups = spans.filter(s => s._kind === 'AGENT').map(agent =>
+    (childrenMap.get(agent.spanId) || []).filter(s => s._kind === 'STEP'));
+  let overlap = false;
+  for (const agentSteps of stepGroups) {
+    const sorted = [...agentSteps].sort((a, b) => {
       const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
       return d < 0n ? -1 : d > 0n ? 1 : 0;
     });
-    let overlap = false;
     for (let i = 0; i < sorted.length - 1; i++) {
       const curEnd = BigInt(sorted[i].endTimeUnixNano);
       const nextStart = BigInt(sorted[i + 1].startTimeUnixNano);
@@ -385,10 +456,8 @@ function validateTime(trace, rules) {
         overlap = true;
       }
     }
-    if (!overlap) checks.push(pass('time.no_step_overlap'));
-  } else if (steps.length <= 1) {
-    checks.push(pass('time.no_step_overlap'));
   }
+  if (!overlap) checks.push(pass('time.no_step_overlap'));
 
   let allContained = true;
   for (const s of spans) {
@@ -399,7 +468,8 @@ function validateTime(trace, rules) {
     for (const c of children) {
       const cStart = BigInt(c.startTimeUnixNano);
       const cEnd = BigInt(c.endTimeUnixNano);
-      if (cStart < pStart || cEnd > pEnd) {
+      const delegatedAgent = s._kind === 'TOOL' && c._kind === 'AGENT';
+      if (cStart < pStart || (!delegatedAgent && cEnd > pEnd)) {
         checks.push(error('time.parent_contains_children',
           `child ${c.name} [${cStart}-${cEnd}] outside parent ${s.name} [${pStart}-${pEnd}]`,
           c.spanId, c.name));
@@ -420,8 +490,8 @@ function validateTime(trace, rules) {
   }
   if (allReasonable) checks.push(pass('time.reasonable_duration'));
 
-  if (steps.length > 1) {
-    const withRound = steps.filter(s => s.attributes?.['gen_ai.react.round'] !== undefined);
+  for (const agentSteps of stepGroups) {
+    const withRound = agentSteps.filter(s => s.attributes?.['gen_ai.react.round'] !== undefined);
     if (withRound.length > 1) {
       const byTime = [...withRound].sort((a, b) => {
         const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
@@ -432,7 +502,7 @@ function validateTime(trace, rules) {
         const r1 = byTime[i].attributes['gen_ai.react.round'];
         const r2 = byTime[i + 1].attributes['gen_ai.react.round'];
         if (r1 >= r2) {
-          checks.push(warn('time.chronological_steps', `round ${r1} before round ${r2} but starts later`));
+          checks.push(warn('time.chronological_steps', `round ${r1} before round ${r2} but starts later`, byTime[i].spanId, byTime[i].name));
           chrono = false;
           break;
         }
@@ -441,8 +511,6 @@ function validateTime(trace, rules) {
     } else {
       checks.push(pass('time.chronological_steps'));
     }
-  } else {
-    checks.push(pass('time.chronological_steps'));
   }
 
   return checks;
@@ -533,9 +601,10 @@ function validateSchema(trace, rules) {
   return checks;
 }
 
-function validateMessageField(attrs, key, ruleId, span, checks) {
+export function validateMessageField(attrs, key, ruleId, span, checks) {
   const raw = attrs[key];
   if (raw === undefined || raw === null) return;
+  const isInput = key === 'gen_ai.input.messages';
   try {
     const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
     if (!Array.isArray(parsed)) {
@@ -544,38 +613,64 @@ function validateMessageField(attrs, key, ruleId, span, checks) {
     }
     for (let i = 0; i < parsed.length; i++) {
       const msg = parsed[i];
-      if (!msg.role) {
-        checks.push(error(ruleId, `${key}[${i}] missing role`, span.spanId, span.name));
+      const messagePath = `${key}[${i}]`;
+      if (isInput && !isObject(msg)) {
+        checks.push(error(ruleId, `${messagePath} is not an object`, span.spanId, span.name));
+        continue;
+      }
+      if (isInput && typeof msg.role !== 'string') {
+        checks.push(error(ruleId, `${messagePath} missing required string "role"`, span.spanId, span.name));
+      } else if (!isInput && !msg.role) {
+        checks.push(error(ruleId, `${messagePath} missing role`, span.spanId, span.name));
+      }
+      if (isInput &&
+          Object.hasOwn(msg, 'name') &&
+          msg.name !== null &&
+          typeof msg.name !== 'string') {
+        checks.push(error(ruleId, `${messagePath}.name must be a string or null`, span.spanId, span.name));
       }
       if (ruleId === 'schema.output_messages') {
         if (msg.finish_reason === undefined) {
-          checks.push(warn(ruleId, `${key}[${i}] missing finish_reason`, span.spanId, span.name));
+          checks.push(warn(ruleId, `${messagePath} missing finish_reason`, span.spanId, span.name));
         } else if (!VALID_FINISH_REASONS.has(msg.finish_reason)) {
           checks.push(error(ruleId,
-            `${key}[${i}] finish_reason="${msg.finish_reason}" is not a valid FinishReason (expected: ${[...VALID_FINISH_REASONS].join(', ')})`,
+            `${messagePath} finish_reason="${msg.finish_reason}" is not a valid FinishReason (expected: ${[...VALID_FINISH_REASONS].join(', ')})`,
             span.spanId, span.name));
         }
       }
-      if (msg.parts && Array.isArray(msg.parts)) {
-        for (let j = 0; j < msg.parts.length; j++) {
-          const part = msg.parts[j];
-          if (!part.type) {
-            checks.push(error(ruleId, `${key}[${i}].parts[${j}] missing type`, span.spanId, span.name));
-            continue;
+      if (isInput && !Array.isArray(msg.parts)) {
+        checks.push(error(ruleId, `${messagePath} missing required array "parts"`, span.spanId, span.name));
+        continue;
+      }
+      if (!Array.isArray(msg.parts)) continue;
+      for (let j = 0; j < msg.parts.length; j++) {
+        const part = msg.parts[j];
+        const partPath = `${messagePath}.parts[${j}]`;
+        if (isInput && !isObject(part)) {
+          checks.push(error(ruleId, `${partPath} is not an object`, span.spanId, span.name));
+          continue;
+        }
+        if (isInput && typeof part.type !== 'string') {
+          checks.push(error(ruleId, `${partPath} missing required string "type"`, span.spanId, span.name));
+          continue;
+        } else if (!isInput && !part.type) {
+          checks.push(error(ruleId, `${partPath} missing type`, span.spanId, span.name));
+          continue;
+        }
+        if (isInput) {
+          validateInputMessagePart(part, partPath, ruleId, span, checks);
+        } else if (VALID_PART_TYPES.has(part.type)) {
+          if (part.type === 'text' && part.content === undefined) {
+            checks.push(error(ruleId, `${partPath} TextPart missing required "content"`, span.spanId, span.name));
           }
-          if (VALID_PART_TYPES.has(part.type)) {
-            if (part.type === 'text' && part.content === undefined) {
-              checks.push(error(ruleId, `${key}[${i}].parts[${j}] TextPart missing required "content"`, span.spanId, span.name));
-            }
-            if (part.type === 'tool_call' && !part.id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallPart missing "id"`, span.spanId, span.name));
-            }
-            if (part.type === 'tool_call_response' && !part.id) {
-              checks.push(warn(ruleId, `${key}[${i}].parts[${j}] ToolCallResponsePart missing "id"`, span.spanId, span.name));
-            }
-          } else {
-            checks.push(warn(ruleId, `${key}[${i}].parts[${j}] unknown part type="${part.type}"`, span.spanId, span.name));
+          if (part.type === 'tool_call' && !part.id) {
+            checks.push(warn(ruleId, `${partPath} ToolCallPart missing "id"`, span.spanId, span.name));
           }
+          if (part.type === 'tool_call_response' && !part.id) {
+            checks.push(warn(ruleId, `${partPath} ToolCallResponsePart missing "id"`, span.spanId, span.name));
+          }
+        } else {
+          checks.push(warn(ruleId, `${partPath} unknown part type="${part.type}"`, span.spanId, span.name));
         }
       }
     }
@@ -584,29 +679,126 @@ function validateMessageField(attrs, key, ruleId, span, checks) {
   }
 }
 
+function validateInputMessagePart(part, partPath, ruleId, span, checks) {
+  const report = (detail) => checks.push(error(ruleId, `${partPath} ${detail}`, span.spanId, span.name));
+
+  switch (part.type) {
+    case 'text':
+      requireString(part, 'content', 'TextPart', report);
+      break;
+    case 'tool_call':
+      requireString(part, 'name', 'ToolCallRequestPart', report);
+      optionalNullableString(part, 'id', 'ToolCallRequestPart', report);
+      break;
+    case 'tool_call_response':
+      requireProperty(part, 'response', 'ToolCallResponsePart', report);
+      optionalNullableString(part, 'id', 'ToolCallResponsePart', report);
+      break;
+    case 'server_tool_call':
+      requireString(part, 'name', 'ServerToolCallPart', report);
+      requireGenericServerTool(part, 'server_tool_call', 'ServerToolCallPart', report);
+      optionalNullableString(part, 'id', 'ServerToolCallPart', report);
+      break;
+    case 'server_tool_call_response':
+      requireGenericServerTool(part, 'server_tool_call_response', 'ServerToolCallResponsePart', report);
+      optionalNullableString(part, 'id', 'ServerToolCallResponsePart', report);
+      break;
+    case 'blob':
+      requireString(part, 'modality', 'BlobPart', report);
+      requireString(part, 'content', 'BlobPart', report);
+      optionalNullableString(part, 'mime_type', 'BlobPart', report);
+      break;
+    case 'file':
+      requireString(part, 'modality', 'FilePart', report);
+      requireString(part, 'file_id', 'FilePart', report);
+      optionalNullableString(part, 'mime_type', 'FilePart', report);
+      break;
+    case 'uri':
+      requireString(part, 'modality', 'UriPart', report);
+      requireString(part, 'uri', 'UriPart', report);
+      optionalNullableString(part, 'mime_type', 'UriPart', report);
+      break;
+    case 'reasoning':
+      requireString(part, 'content', 'ReasoningPart', report);
+      break;
+    default:
+      checks.push(warn(
+        ruleId,
+        `${partPath} uses GenericPart extension type="${part.type}"`,
+        span.spanId,
+        span.name,
+      ));
+  }
+}
+
+function requireProperty(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+  }
+}
+
+function requireString(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+  } else if (typeof value[property] !== 'string') {
+    report(`${title}.${property} must be a string`);
+  }
+}
+
+function optionalNullableString(value, property, title, report) {
+  if (Object.hasOwn(value, property) &&
+      value[property] !== null &&
+      typeof value[property] !== 'string') {
+    report(`${title}.${property} must be a string or null`);
+  }
+}
+
+function requireGenericServerTool(value, property, title, report) {
+  if (!Object.hasOwn(value, property)) {
+    report(`${title} missing required "${property}"`);
+    return;
+  }
+  const nested = value[property];
+  if (!isObject(nested)) {
+    report(`${title}.${property} must be an object`);
+  } else if (typeof nested.type !== 'string') {
+    report(`${title}.${property} missing required string "type"`);
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 // ─── 5e. Semantic Validation ────────────────────────────────────────────────
 
-function validateSemantic(trace, rules) {
+export function validateSemantic(trace, rules) {
   const checks = [];
   const { spans, childrenMap, hasMessageContent } = trace;
 
-  // consistent_session_id
-  const sessionIds = new Set(spans.map(s => s.attributes?.['gen_ai.session.id']).filter(Boolean));
-  checks.push(sessionIds.size <= 1
-    ? pass('semantic.consistent_session_id')
-    : error('semantic.consistent_session_id', `found ${sessionIds.size} distinct session IDs: ${[...sessionIds].join(', ')}`));
+  const agents = spans.filter(s => s._kind === 'AGENT');
+  const executions = agents.map(agent => ({ agent, spans: agentExecutionSpans(trace, agent) }));
+  for (const execution of executions) {
+    const parent = trace.spanMap.get(execution.agent.parentSpanId);
+    const identitySpans = parent?._kind === 'ENTRY' ? [parent, ...execution.spans] : execution.spans;
+    for (const [key, ruleId, severity] of [
+      ['gen_ai.session.id', 'semantic.consistent_session_id', error],
+      ['gen_ai.turn.id', 'semantic.consistent_turn_id', error],
+      ['gen_ai.agent.name', 'semantic.consistent_agent_name', warn],
+    ]) {
+      const values = new Set(identitySpans.map(s => s.attributes?.[key]).filter(Boolean));
+      checks.push(values.size <= 1
+        ? pass(ruleId)
+        : severity(ruleId, `AGENT execution has ${values.size} distinct ${key}: ${[...values].join(', ')}`,
+            execution.agent.spanId, execution.agent.name));
+    }
+  }
 
   // consistent_user_id
   const userIds = new Set(spans.map(s => s.attributes?.['gen_ai.user.id']).filter(Boolean));
   checks.push(userIds.size <= 1
     ? pass('semantic.consistent_user_id')
     : error('semantic.consistent_user_id', `found ${userIds.size} distinct user IDs`));
-
-  // consistent_agent_name
-  const agentNames = new Set(spans.map(s => s.attributes?.['gen_ai.agent.name']).filter(Boolean));
-  checks.push(agentNames.size <= 1
-    ? pass('semantic.consistent_agent_name')
-    : warn('semantic.consistent_agent_name', `found ${agentNames.size} distinct agent names: ${[...agentNames].join(', ')}`));
 
   // operation_kind_mapping
   const mapping = rules.operationKindMapping || {};
@@ -638,9 +830,8 @@ function validateSemantic(trace, rules) {
   if (allNamesOk) checks.push(pass('semantic.span_name_pattern'));
 
   // agent_token_sum
-  const agentSpan = spans.find(s => s._kind === 'AGENT');
-  if (agentSpan) {
-    const llmSpans = spans.filter(s => s._kind === 'LLM');
+  for (const { agent: agentSpan, spans: executionSpans } of executions) {
+    const llmSpans = executionSpans.filter(s => s._kind === 'LLM');
     for (const tokenKey of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
       const agentVal = agentSpan.attributes?.[tokenKey];
       if (agentVal === undefined || agentVal === null) continue;
@@ -694,24 +885,18 @@ function validateSemantic(trace, rules) {
         }
       } catch { continue; }
 
-      for (const tool of tools) {
+      // Runtime/user-triggered Skill loads are truthful TOOL spans but are not
+      // emitted by the model, so they intentionally have no output tool_call.
+      for (const tool of unmatchedToolsForLlmOutput(tools, expectedToolCalls)) {
         const toolCallId = tool.attributes?.['gen_ai.tool.call.id'];
         const toolName = tool.attributes?.['gen_ai.tool.name'];
-        const matched = expectedToolCalls.some(tc =>
-          (toolCallId && tc.id && tc.id === toolCallId) || (toolName && tc.name && tc.name === toolName)
-        );
-        if (!matched) {
-          checks.push(error('semantic.tool_matches_llm_output',
-            `TOOL ${toolName || toolCallId} not found in LLM output tool_calls`, tool.spanId, tool.name));
-          allToolsMatch = false;
-        }
+        checks.push(error('semantic.tool_matches_llm_output',
+          `TOOL ${toolName || toolCallId} not found in LLM output tool_calls`, tool.spanId, tool.name));
+        allToolsMatch = false;
       }
 
       for (const tc of expectedToolCalls) {
-        const matched = tools.some(t =>
-          (tc.id && t.attributes?.['gen_ai.tool.call.id'] === tc.id) ||
-          (tc.name && t.attributes?.['gen_ai.tool.name'] === tc.name)
-        );
+        const matched = hasModelToolSpanForOutput(tools, tc);
         if (!matched) {
           if (KNOWN_SUBAGENT_TOOLS.has(tc.name)) {
             checks.push(warn('semantic.tool_matches_llm_output',
@@ -754,7 +939,8 @@ function validateSemantic(trace, rules) {
     checks.push(skipped('semantic.entry_output_matches'));
   } else {
     const entry = spans.find(s => s._kind === 'ENTRY');
-    const llmSpans = spans.filter(s => s._kind === 'LLM');
+    const rootExecution = executions.find(e => e.agent.parentSpanId === entry?.spanId);
+    const llmSpans = (rootExecution?.spans || []).filter(s => s._kind === 'LLM');
     if (entry && llmSpans.length > 0) {
       const lastLlm = llmSpans.sort((a, b) => {
         const d = BigInt(a.endTimeUnixNano) - BigInt(b.endTimeUnixNano);
@@ -838,40 +1024,42 @@ function validateSemantic(trace, rules) {
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
-    const stepSpans = spans.filter(s => s._kind === 'STEP');
-    if (stepSpans.length > 0) {
-      const sorted = [...stepSpans].sort((a, b) => {
-        const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-        return d < 0n ? -1 : d > 0n ? 1 : 0;
-      });
-      const lastStep = sorted[sorted.length - 1];
-      const children = childrenMap.get(lastStep.spanId) || [];
-      const llm = children.find(c => c._kind === 'LLM');
-      if (llm) {
-        const raw = llm.attributes?.['gen_ai.output.messages'];
-        if (raw) {
-          try {
-            const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            let hasToolCall = false;
-            if (Array.isArray(msgs)) {
-              for (const msg of msgs) {
-                if (Array.isArray(msg.parts)) {
-                  for (const part of msg.parts) {
-                    if (part.type === 'tool_call') hasToolCall = true;
+    for (const { spans: executionSpans } of executions) {
+      const stepSpans = executionSpans.filter(s => s._kind === 'STEP');
+      if (stepSpans.length > 0) {
+        const sorted = [...stepSpans].sort((a, b) => {
+          const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
+          return d < 0n ? -1 : d > 0n ? 1 : 0;
+        });
+        const lastStep = sorted[sorted.length - 1];
+        const children = childrenMap.get(lastStep.spanId) || [];
+        const llm = children.find(c => c._kind === 'LLM');
+        if (llm) {
+          const raw = llm.attributes?.['gen_ai.output.messages'];
+          if (raw) {
+            try {
+              const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+              let hasToolCall = false;
+              if (Array.isArray(msgs)) {
+                for (const msg of msgs) {
+                  if (Array.isArray(msg.parts)) {
+                    for (const part of msg.parts) {
+                      if (part.type === 'tool_call') hasToolCall = true;
+                    }
                   }
                 }
               }
+              checks.push(hasToolCall
+                ? error('semantic.last_step_no_tool_call',
+                    'last STEP LLM output contains tool_call, expected final answer without tool calls',
+                    llm.spanId, llm.name)
+                : pass('semantic.last_step_no_tool_call'));
+            } catch {
+              checks.push(pass('semantic.last_step_no_tool_call'));
             }
-            checks.push(hasToolCall
-              ? error('semantic.last_step_no_tool_call',
-                  'last STEP LLM output contains tool_call, expected final answer without tool calls',
-                  llm.spanId, llm.name)
-              : pass('semantic.last_step_no_tool_call'));
-          } catch {
+          } else {
             checks.push(pass('semantic.last_step_no_tool_call'));
           }
-        } else {
-          checks.push(pass('semantic.last_step_no_tool_call'));
         }
       }
     }
@@ -1063,4 +1251,6 @@ function main() {
   process.exit(report.summary.verdict === 'FAIL' ? 1 : 0);
 }
 
-main();
+const isCliEntry = process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCliEntry) main();

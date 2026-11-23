@@ -24,9 +24,8 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 function makeConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
     ...overrides,
   };
@@ -86,7 +85,7 @@ describe('OtlpTraceFlusher - zcode orphan synthesis (P0-1/P0-2/P2-7)', () => {
     // Verify exportSpy was called with spans (the converter mock returns 0,
     // so we instead verify the convertEventLogToTrace mock was called with
     // synthesized records).
-    
+
     const calls = vi.mocked(convertEventLogToTrace).mock.calls;
     expect(calls.length).toBeGreaterThan(0);
     const lastCallRecords = calls[calls.length - 1][0] as any[];
@@ -154,7 +153,7 @@ describe('OtlpTraceFlusher - zcode orphan synthesis (P0-1/P0-2/P2-7)', () => {
     await flusher.sendBatch([...orphans, terminal]);
     await flusher.flush();
 
-    
+
     const calls = vi.mocked(convertEventLogToTrace).mock.calls;
     const lastCallRecords = calls[calls.length - 1][0] as any[];
     const synthLlmResp = lastCallRecords.find(
@@ -166,6 +165,35 @@ describe('OtlpTraceFlusher - zcode orphan synthesis (P0-1/P0-2/P2-7)', () => {
     expect(outMsgs[0].parts.length).toBe(3);
     const ids = outMsgs[0].parts.map((p: any) => p.id).sort();
     expect(ids).toEqual(['call_a', 'call_b', 'call_c']);
+  });
+
+  it('associates reused tool and turn IDs only within their ZCode session', async () => {
+    flusher = new OtlpTraceFlusher(makeConfig() as any);
+    const sessionEntries = (sessionId: string, stepId: string): AgentActivityEntry[] => [
+      { ...makeToolCall('call_reused', 'Read', 4000), 'gen_ai.session.id': sessionId },
+      {
+        ...makeLlmResponse(['tool_call'], 4001),
+        'event.id': `response-${sessionId}`,
+        'gen_ai.session.id': sessionId,
+        'gen_ai.step.id': stepId,
+        'gen_ai.output.messages': [{
+          role: 'assistant',
+          parts: [{ type: 'tool_call', id: 'call_reused', name: 'Read' }],
+        }],
+      },
+      { ...makeLlmResponse(['stop'], 4002), 'gen_ai.session.id': sessionId },
+    ];
+
+    await flusher.sendBatch([
+      ...sessionEntries('session-a', 'step-a'),
+      ...sessionEntries('session-b', 'step-b'),
+    ]);
+
+    const results = vi.mocked(convertEventLogToTrace).mock.calls.flatMap(([records]) =>
+      records.filter(r => r['event.name'] === 'tool.call')
+        .map(r => [r['gen_ai.session.id'], r['gen_ai.step.id']]),
+    );
+    expect(results).toEqual([['session-a', 'step-a'], ['session-b', 'step-b']]);
   });
 
   it('non-zcode agent buffer: no synthesis', async () => {
@@ -185,6 +213,7 @@ describe('OtlpTraceFlusher - zcode orphan synthesis (P0-1/P0-2/P2-7)', () => {
       'gen_ai.session.id': 'sess_other',
       'gen_ai.turn.id': 'turn_other',
       'gen_ai.response.finish_reasons': ['stop'],
+      'gen_ai.response.id': 'non-zcode-response',
       time_unix_nano: String(5000) + '000000',
       timestamp: 5000,
     } as unknown as AgentActivityEntry;
@@ -192,12 +221,10 @@ describe('OtlpTraceFlusher - zcode orphan synthesis (P0-1/P0-2/P2-7)', () => {
     await flusher.sendBatch([orphan, terminal]);
     await flusher.flush();
 
-    
     const calls = vi.mocked(convertEventLogToTrace).mock.calls;
     const lastCallRecords = calls[calls.length - 1][0] as any[];
-    // 2 original, no synthesis
-    expect(lastCallRecords.length).toBe(2);
-    expect(lastCallRecords.find((r) => r['gen_ai.response.id']?.startsWith('synthetic-resp-'))).toBeUndefined();
+    // The generic converter still drops unpaired tool calls.
+    expect(lastCallRecords.map(r => r['gen_ai.response.id'])).toEqual(['non-zcode-response']);
   });
 
   // S2 failure path (Round 2 E2E): Read tool.call has a real step.id from a

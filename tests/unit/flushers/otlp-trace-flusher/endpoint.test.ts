@@ -27,9 +27,8 @@ describe('OtlpTraceFlusher - endpoint normalization', () => {
   it('appends /v1/traces when not present', async () => {
     const flusher = new OtlpTraceFlusher({
       enabled: true,
-      endpoint: 'https://example.com/apm/trace/opentelemetry',
+      endpoints: [{ name: 'primary', endpoint: 'https://example.com/apm/trace/opentelemetry', headers: { 'x-key': 'val' } }],
       protocol: 'http/protobuf',
-      headers: { 'x-key': 'val' },
       serviceName: 'test',
     });
 
@@ -47,9 +46,8 @@ describe('OtlpTraceFlusher - endpoint normalization', () => {
   it('does not double-append if already ends with /v1/traces', async () => {
     const flusher = new OtlpTraceFlusher({
       enabled: true,
-      endpoint: 'https://example.com/v1/traces',
+      endpoints: [{ name: 'primary', endpoint: 'https://example.com/v1/traces', headers: { 'x-key': 'val' } }],
       protocol: 'http/protobuf',
-      headers: { 'x-key': 'val' },
       serviceName: 'test',
     });
 
@@ -66,9 +64,8 @@ describe('OtlpTraceFlusher - endpoint normalization', () => {
   it('strips trailing slash before appending', async () => {
     const flusher = new OtlpTraceFlusher({
       enabled: true,
-      endpoint: 'https://example.com/otlp/',
+      endpoints: [{ name: 'primary', endpoint: 'https://example.com/otlp/', headers: { 'x-key': 'val' } }],
       protocol: 'http/protobuf',
-      headers: { 'x-key': 'val' },
       serviceName: 'test',
     });
 

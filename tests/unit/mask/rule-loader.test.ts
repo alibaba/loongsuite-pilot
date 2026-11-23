@@ -1,11 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import type { MaskConfig } from '../../../src/types/index.js';
+import { PII_MASK_TYPES, SUPPORTED_MASK_TYPES } from '../../../src/types/index.js';
 import {
   compileSensitiveRules,
   loadEnabledRules,
+  loadMaskPlan,
   loadSensitiveRules,
+  resolveEnabledMaskTypes,
 } from '../../../src/mask/rule-loader.js';
+import { maskString } from '../../../src/mask/string-masker.js';
 
 describe('mask rule loader', () => {
   const allConfig: MaskConfig = { mode: 'all', types: [] };
@@ -42,6 +46,42 @@ describe('mask rule loader', () => {
     const enabledRules = loadEnabledRules({ mode: 'none', types: [] });
 
     expect(enabledRules).toHaveLength(0);
+  });
+
+  it('builds a mask plan with all five PII detectors in all mode', () => {
+    const plan = loadMaskPlan(allConfig);
+
+    expect([...plan.piiTypes]).toEqual(PII_MASK_TYPES);
+    expect(plan.rules).toHaveLength(loadSensitiveRules().length);
+    expect(plan.replacementMode).toBe('preview');
+  });
+
+  it('keeps explicit placeholder mode available', () => {
+    const plan = loadMaskPlan({
+      mode: 'all',
+      types: [],
+      replacementMode: 'placeholder',
+    });
+
+    expect(plan.replacementMode).toBe('placeholder');
+    expect(maskString('13800138000', plan)).toBe('[PHONE_MASKED]');
+    expect(maskString('13800138000', loadMaskPlan(allConfig))).toBe(
+      '[PHONE_MASKED]{138****8000}',
+    );
+  });
+
+  it('enables every type from the canonical supported-type list in all mode', () => {
+    expect([...resolveEnabledMaskTypes(allConfig)]).toEqual(SUPPORTED_MASK_TYPES);
+  });
+
+  it('builds a custom mask plan with only selected PII types', () => {
+    const plan = loadMaskPlan({
+      mode: 'custom',
+      types: ['email', 'bankCard'],
+    });
+
+    expect([...plan.piiTypes]).toEqual(['email', 'bankCard']);
+    expect(plan.rules).toHaveLength(0);
   });
 
   it('keeps database URL prefilters aligned with supported database schemes', () => {

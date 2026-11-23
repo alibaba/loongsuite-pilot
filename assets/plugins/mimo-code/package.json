@@ -1,0 +1,8 @@
+{
+  "name": "loongsuite-pilot-mimo-code",
+  "version": "1.0.0",
+  "description": "loongsuite-pilot MiMo Code event_t plugin",
+  "main": "plugin.mjs",
+  "type": "module",
+  "private": true
+}

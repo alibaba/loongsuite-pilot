@@ -22,9 +22,8 @@ vi.mock('@opentelemetry/exporter-trace-otlp-proto', () => ({
 function makeConfig(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: { 'x-test': '1' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-test': '1' },
     serviceName: 'test-pilot',
     ...overrides,
   };
@@ -137,8 +136,16 @@ describe('OtlpTraceFlusher - plan 2.1/2.2 (zcode TTL + debounce)', () => {
       },
     }) as any);
 
-    // send llm.request only — no stop signal (cmdStop missing)
-    await flusher.send(makeZcodeEntry({ 'event.name': 'llm.request' }));
+    // Send a valid request without a Stop hook.
+    await flusher.send(makeZcodeEntry({
+      'event.name': 'llm.request',
+      'gen_ai.request.id': 'idle-request',
+      'gen_ai.input.messages': [{ role: 'user', parts: [{ type: 'text', content: 'request' }] }],
+    }));
+    await flusher.send(makeZcodeEntry({
+      'gen_ai.response.id': 'idle-response',
+      'gen_ai.response.finish_reasons': ['tool_call'],
+    }));
     expect(mockConvert).not.toHaveBeenCalled();
 
     // Wait past idle timeout (100ms) + slack for 1s tick interval
@@ -147,7 +154,7 @@ describe('OtlpTraceFlusher - plan 2.1/2.2 (zcode TTL + debounce)', () => {
     await new Promise((r) => setTimeout(r, 1500));
 
     expect(mockConvert).toHaveBeenCalledTimes(1);
-    expect(mockConvert.mock.calls[0][0]).toHaveLength(1);
+    expect(mockConvert.mock.calls[0][0]).toHaveLength(2);
   });
 
   // P0 race condition fix: rollout input's terminal llm.response (with

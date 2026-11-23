@@ -21,9 +21,8 @@ import type { AgentActivityEntry } from '../../../../src/types/index.js';
 function makeConfig() {
   return {
     enabled: true,
-    endpoint: 'http://localhost:4318',
+    endpoints: [{ name: 'primary', endpoint: 'http://localhost:4318', headers: { 'x-key': 'val' } }],
     protocol: 'http/protobuf' as const,
-    headers: { 'x-key': 'val' },
     serviceName: 'test-pilot',
   };
 }

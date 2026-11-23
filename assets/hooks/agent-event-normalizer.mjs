@@ -7,7 +7,13 @@ import { isQoderIdeaSession } from './shared/qoder-db-utils.mjs';
 const MESSAGE_CONTENT_FIELDS = new Set([
   'gen_ai.input.messages',
   'gen_ai.input.messages_delta',
+  'gen_ai.input.multimodal_metadata',
+  'gen_ai.input.multimodal_metadata_delta',
   'gen_ai.output.messages',
+  'gen_ai.output.messages_delta',
+  'gen_ai.output.multimodal_metadata',
+  'gen_ai.system_instructions',
+  'gen_ai.tool.definitions',
   'gen_ai.tool.call.arguments',
   'gen_ai.tool.call.result',
   'input.messages',
@@ -16,14 +22,17 @@ const MESSAGE_CONTENT_FIELDS = new Set([
   'tool.arguments',
   'tool.result.payload',
   'content',
+  'error_message',
   'inlineDiffMessage',
   'agent.content',
   'agent.inline_diff_message',
+  'error.message',
 ]);
 
 const MESSAGE_CONTENT_SOURCE_KEYS = new Set([
   'attachments',
   'content',
+  'error_message',
   'inlineDiffMessage',
   'input',
   'input_messages',
@@ -128,6 +137,47 @@ const QODER_MAPPED_SOURCE_KEYS = new Set([
   'uuid',
 ]);
 
+const COPILOT_MAPPED_SOURCE_KEYS = new Set([
+  'apiCallId',
+  'chosenModel',
+  'cwd',
+  'decisionSource',
+  'event.id',
+  'event.name',
+  'gen_ai.session.id',
+  'hookEvent',
+  'hook_event_name',
+  'hookInvocationId',
+  'interactionId',
+  'interaction_id',
+  'model',
+  'newModel',
+  'observed_time_unix_nano',
+  'parentAgentTaskId',
+  'permissionMode',
+  'permissionRequest',
+  'promptRequest',
+  'reasoningEffort',
+  'reasoningOpaque',
+  'reasoningText',
+  'requestId',
+  'routingMethod',
+  'sessionId',
+  'session_id',
+  'shutdownType',
+  'timestamp',
+  'time_unix_nano',
+  'toolCallId',
+  'tool_call_id',
+  'toolName',
+  'tool_name',
+  'toolRequests',
+  'toolTelemetry',
+  'turnId',
+  'turn_id',
+  'user.id',
+]);
+
 export function sanitizeObject(obj) {
   if (obj === null || obj === undefined) return undefined;
   if (Array.isArray(obj)) {
@@ -217,14 +267,23 @@ export function hashJson(value) {
 }
 
 export function loadHookRuntimeConfig(dataDir) {
-  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG
+  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
     || path.join(dataDir || path.join(os.homedir(), '.loongsuite-pilot'), 'config.json');
   let file = {};
   try {
-    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
   } catch {
     file = {};
   }
+
+  const envBool = (name, fallback) => {
+    const raw = process.env[name];
+    if (raw === undefined || raw === '') return fallback;
+    return raw === '1' || raw.toLowerCase() === 'true';
+  };
+  const upstreamLink = file.upstreamLink && typeof file.upstreamLink === 'object'
+    ? file.upstreamLink
+    : {};
 
   return {
     userId: process.env.LOONGSUITE_PILOT_USER_ID
@@ -232,6 +291,20 @@ export function loadHookRuntimeConfig(dataDir) {
       || file['user.id']
       || os.hostname(),
     agents: file.agents && typeof file.agents === 'object' ? file.agents : {},
+    upstreamLink: {
+      enabled: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK',
+        upstreamLink.enabled === true,
+      ),
+      propagateToTools: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
+        upstreamLink.propagateToTools === true,
+      ),
+      generateTraceWhenMissing: envBool(
+        'LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING',
+        upstreamLink.generateTraceWhenMissing === true,
+      ),
+    },
   };
 }
 
@@ -281,6 +354,7 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'qoder-cn-hook': 'qoder-cn',
   'cursor-hook': 'cursor',
   'cursor-cli': 'cursor',
+  'openclaw': 'openclaw',
 };
 
 export function applyHookContentPolicy(record, runtimeConfig = {}) {
@@ -526,6 +600,7 @@ function buildQoderPostToolUseRecord(row, runtimeConfig, sourceAgentId, turnId) 
     'tool.result.status': 'success',
     'host.name': os.hostname(),
     'workspace.current_root': getStringValue(data, 'cwd') || getStringValue(row, 'cwd') || undefined,
+    [`agent.${sourceNamespace}.cwd`]: getStringValue(data, 'cwd') || getStringValue(row, 'cwd') || undefined,
     'agent.source': 'qoder-transcript-hook',
     [`agent.${sourceNamespace}.variant`]: variant,
     [`agent.${sourceNamespace}.raw_type`]: eventType,
@@ -803,4 +878,60 @@ export class ZcodeStepResolver {
     this.pendingByTurn.delete(turnId);
     return unresolved;
   }
+}
+
+/**
+ * Build a normalized hook record for Copilot (GitHub Copilot CLI).
+ *
+ * Note: CopilotLogInput reads events.jsonl directly via transcript-parser.mjs
+ * and does not flow through this builder. This function exists for parity with
+ * buildCursorHookRecord / buildQoderHookRecord so future hook-JSONL paths
+ * (should the Copilot hook processor ever emit raw JSONL) have a stable
+ * normalization contract. It is intentionally isolated: it never touches the
+ * shared MESSAGE_CONTENT_FIELDS / MESSAGE_CONTENT_SOURCE_KEYS sets and only
+ * attaches Copilot-specific source fields under the `agent.copilot.*`
+ * namespace.
+ */
+export function buildCopilotHookRecord(payload, options = {}) {
+  const now = options.now || new Date();
+  const runtimeConfig = options.runtimeConfig || {};
+  const sourceEvent = getSourceHookEvent(payload);
+  const eventName = getStringValue(payload, 'event.name') || mapSourceHookEventToEventName(sourceEvent);
+  const model = getStringValue(payload, 'model') || 'unknown';
+  const toolArguments = parseMaybeJson(payload.toolArguments ?? payload.arguments);
+  const toolResult = parseMaybeJson(payload.toolResult ?? payload.result);
+  const record = {
+    'event.id': getStringValue(payload, 'event.id') || crypto.randomUUID(),
+    'event.name': eventName,
+    'user.id': resolveUserId(payload, runtimeConfig),
+    'gen_ai.session.id': getStringValue(payload, 'gen_ai.session.id')
+      || getStringValue(payload, 'sessionId')
+      || getStringValue(payload, 'session_id')
+      || '',
+    'gen_ai.turn.id': getStringValue(payload, 'gen_ai.turn.id')
+      || getStringValue(payload, 'turnId')
+      || getStringValue(payload, 'turn_id'),
+    'gen_ai.agent.type': 'copilot',
+    'gen_ai.provider.name': inferProviderName({ ...payload, 'gen_ai.request.model': model, 'gen_ai.agent.type': 'copilot' }),
+    'gen_ai.request.model': getStringValue(payload, 'gen_ai.request.model') || model,
+    'gen_ai.response.model': getStringValue(payload, 'gen_ai.response.model') || model,
+    'gen_ai.tool.name': getStringValue(payload, 'toolName') || getStringValue(payload, 'tool_name'),
+    'gen_ai.tool.call.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.exec.id': getStringValue(payload, 'toolCallId') || getStringValue(payload, 'tool_call_id'),
+    'gen_ai.tool.call.arguments': eventName === 'tool.call' ? toJsonValue(toolArguments) : undefined,
+    'gen_ai.tool.call.result': eventName === 'tool.result' ? toJsonValue(toolResult) : undefined,
+    'gen_ai.tool.success': typeof payload.success === 'boolean' ? payload.success : undefined,
+    'error.code': getStringValue(payload, 'error.code') || getStringValue(payload, 'error_code'),
+    'error.message': getStringValue(payload, 'error.message') || getStringValue(payload, 'error_message'),
+    'permission.result.kind': getStringValue(payload, 'permission.result.kind'),
+    'permission.decision_source': getStringValue(payload, 'decisionSource') || getStringValue(payload, 'decision_source'),
+    'agent.copilot.hook_event_name': sourceEvent,
+    'agent.copilot.hook_invocation_id': getStringValue(payload, 'hookInvocationId'),
+    'agent.copilot.interaction_id': getStringValue(payload, 'interactionId'),
+    'agent.copilot.reasoning_text': getStringValue(payload, 'reasoningText'),
+    observed_time_unix_nano: getStringValue(payload, 'observed_time_unix_nano') || timestampToUnixNanos(now),
+    time_unix_nano: getStringValue(payload, 'time_unix_nano') || timestampToUnixNanos(payload.timestamp ?? now),
+  };
+  addSourceAttributes(record, 'copilot', payload, COPILOT_MAPPED_SOURCE_KEYS);
+  return sanitizeObject(applyHookContentPolicy(record, runtimeConfig)) || {};
 }

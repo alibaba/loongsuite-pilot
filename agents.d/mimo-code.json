@@ -1,0 +1,25 @@
+{
+  "id": "mimo-code",
+  "displayName": "MiMo Code",
+  "deployMode": "plugin-inject",
+  "detection": {
+    "paths": ["~/.mimocode", "~/.config/mimocode", "~/.local/share/mimocode"],
+    "commands": ["mimo"]
+  },
+  "pluginInject": {
+    "configPaths": [
+      "~/.config/mimocode/mimocode.jsonc",
+      "~/.config/mimocode/mimocode.json"
+    ],
+    "pluginSpec": "file://$PILOT_DATA/plugins/mimo-code/plugin.mjs",
+    "pluginId": "loongsuite-pilot-mimo-code",
+    "replaceSpecs": [
+      "loongsuite-pilot-mimo-code",
+      "loongsuite-pilot-mimo-code-smoke"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/mimo-code"
+  }
+}
