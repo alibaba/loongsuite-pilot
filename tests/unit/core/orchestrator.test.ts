@@ -315,6 +315,12 @@ describe('Orchestrator', () => {
         process.env.CODEX_HOME = path.join(homeDir, '.codex') + path.sep;
         expect(see()).toEqual([{ id: 'codex-transcript', agentId: 'codex', lastActiveTime: 0 }]);
 
+        process.env.CODEX_HOME = ` ${path.join(homeDir, '.codex')}${path.sep} `;
+        expect(see()).toEqual([{ id: 'codex-transcript', agentId: 'codex', lastActiveTime: 0 }]);
+
+        process.env.CODEX_HOME = ' ';
+        expect(see()).toEqual([{ id: 'codex-transcript', agentId: 'codex', lastActiveTime: 0 }]);
+
         process.env.CODEX_HOME = path.join(homeDir, 'alternate-codex');
         expect(see()).toEqual([]);
       } finally {

@@ -126,6 +126,48 @@ describe('collection self-check', () => {
     expect(alarms.serialize()).toEqual([]);
   });
 
+  it('keeps checking other agents when a local activity indicator is malformed', async () => {
+    definitions.unshift({
+      ...definitions[0], id: 'qoder', displayName: 'Qoder',
+      activityIndicator: 1 as unknown as string,
+    });
+    inputs.unshift({ id: 'qoder-trace', agentId: 'qoder', lastActiveTime: 0 });
+    await service.runCheck();
+    clock += 1100;
+    const indicator = definitions[1].activityIndicator!;
+    await fs.writeFile(indicator, 'synthetic native activity');
+    await fs.utimes(indicator, new Date(clock - 10), new Date(clock - 10));
+    await service.runCheck();
+    expect(alarms.serialize()).toMatchObject([
+      { alarm_type: 'SELF_CHECK_NEVER_COLLECTED_ALARM', input_name: 'codex' },
+    ]);
+  });
+
+  it('uses the newest version file inside run directories', async () => {
+    const runs = path.join(root, 'runs');
+    const oldRun = path.join(runs, 'old');
+    const currentRun = path.join(runs, 'current');
+    const incompleteRun = path.join(runs, 'incomplete');
+    for (const run of [oldRun, currentRun, incompleteRun]) await fs.mkdir(run, { recursive: true });
+    const oldFile = path.join(oldRun, 'manifest.json');
+    const currentFile = path.join(currentRun, 'manifest.json');
+    await fs.writeFile(oldFile, '{"version":"1.0.0"}');
+    await fs.writeFile(currentFile, '{"version":"2.0.0"}');
+    const stamp = async (file: string, delta: number) => {
+      const time = new Date(clock + delta);
+      await fs.utimes(file, time, time);
+    };
+    await stamp(oldFile, -2000);
+    await stamp(currentFile, -1000);
+    await stamp(oldRun, 2000);
+    await stamp(currentRun, 1000);
+    await stamp(incompleteRun, 3000);
+    const signal = new AbortController().signal;
+    expect(await versions.resolveAgentVersion(
+      { type: 'newestSubdirFile', dir: runs, file: 'manifest.json', key: 'version' }, signal,
+    )).toBe('2.0.0');
+  });
+
   it('reads a bounded version tail and treats incomplete and non-version strings as unknown', async () => {
     const file = path.join(root, 'version-tail.jsonl');
     await fs.writeFile(file, `${' '.repeat(156_000)}\n{"version":"4.3.2"}\n{"version":`);

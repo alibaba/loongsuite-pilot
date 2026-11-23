@@ -19,11 +19,12 @@ export async function resolveAgentVersion(
     if (source.type === 'jsonFile' || source.type === 'jsonlTail') {
       return await readVersion(resolveHome(source.file), source.key, source.type === 'jsonlTail');
     }
-    const name = await newestPath(resolveHome(source.dir), source.type === 'newestSubdirFile', signal);
-    if (!name || signal.aborted) return UNKNOWN;
-    if (source.type === 'newestSubdirFile' && path.basename(source.file) !== source.file) return UNKNOWN;
-    const file = source.type === 'newestSubdirFile' ? path.join(name, source.file) : name;
-    return await readVersion(file, source.key, false);
+    const nestedFile = source.type === 'newestSubdirFile' ? source.file : undefined;
+    if (source.type === 'newestSubdirFile' && (!nestedFile || path.basename(nestedFile) !== nestedFile)) {
+      return UNKNOWN;
+    }
+    const file = await newestVersionFile(resolveHome(source.dir), nestedFile, signal);
+    return file && !signal.aborted ? await readVersion(file, source.key, false) : UNKNOWN;
   } catch {
     return UNKNOWN;
   }
@@ -62,7 +63,7 @@ async function readVersion(file: string, key: string, tail: boolean): Promise<st
   }
 }
 
-async function newestPath(dir: string, nested: boolean, signal: AbortSignal): Promise<string | null> {
+async function newestVersionFile(dir: string, nestedFile: string | undefined, signal: AbortSignal): Promise<string | null> {
   if (!path.isAbsolute(dir)) return null;
   const entries = await fs.opendir(dir);
   let seen = 0;
@@ -70,10 +71,10 @@ async function newestPath(dir: string, nested: boolean, signal: AbortSignal): Pr
   for await (const entry of entries) {
     // Avoid claiming an older version when the search cannot cover the directory.
     if (signal.aborted || ++seen > MAX_DIRECTORY_ENTRIES) return null;
-    if (nested ? !entry.isDirectory() : !entry.isFile() || !entry.name.endsWith('.json')) continue;
-    const file = path.join(dir, entry.name);
+    if (nestedFile ? !entry.isDirectory() : !entry.isFile() || !entry.name.endsWith('.json')) continue;
+    const file = nestedFile ? path.join(dir, entry.name, nestedFile) : path.join(dir, entry.name);
     const stat = await fs.stat(file).catch(() => null);
-    if (stat && (!newest || stat.mtimeMs > newest.mtime)) newest = { file, mtime: stat.mtimeMs };
+    if (stat?.isFile() && (!newest || stat.mtimeMs > newest.mtime)) newest = { file, mtime: stat.mtimeMs };
   }
   return newest?.file ?? null;
 }
