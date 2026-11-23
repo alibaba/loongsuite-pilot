@@ -92,6 +92,7 @@ import {
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
+import { redownloadCurrentHookAssets } from '../updater/redownload-hook-assets.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -826,6 +827,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private createHookWatchdog(): HookWatchdog {
+    const pilotDir = this.resolvePilotDir();
     const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
       ...this.buildGrokBuildInterceptTargets(),
@@ -833,7 +835,16 @@ export class Orchestrator extends EventEmitter {
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
-    ]);
+    ], {
+      pilotDir,
+      dataDir: this.dataDir,
+      redownloadHooks: (expected) => redownloadCurrentHookAssets({
+        pilotDir,
+        manifestUrl: this.config.autoUpdate?.manifestUrl,
+        packageUrl: this.config.autoUpdate?.packageUrl,
+        expected,
+      }),
+    });
     this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
     return watchdog;
   }
