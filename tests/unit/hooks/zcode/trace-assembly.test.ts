@@ -9,6 +9,7 @@ import { StateStore } from '../../../../src/checkpoints/state-store.js';
 import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
 import { ZCodeRolloutInput } from '../../../../src/inputs/zcode-rollout/zcode-rollout-input.js';
 import { buildAgentActivityEntry } from '../../../../src/normalization/entry-builder.js';
+import { TurnBoundaryProcessor } from '../../../../src/normalization/turn-boundary-processor.js';
 
 let dataDir: string;
 let input: ZCodeRolloutInput;
@@ -114,13 +115,22 @@ it('does not seal a turn when a failed attempt arrives after its hook and before
   expect(spansOf('TOOL')).toHaveLength(3);
 });
 
-it('does not seal a turn on a model response that requests tools and reports stop', async () => {
+it.each(['stop', 'tool-calls'])('keeps a tool request reporting %s open until the final response', async finishReason => {
   const [first, ...rest] = lines;
-  const toolRequest = { ...first, response: { ...(first?.response as object), finishReason: 'stop' } };
+  const toolRequest = { ...first, response: { ...(first?.response as object), finishReason } };
+  const boundary = new TurnBoundaryProcessor();
+  const toolBatch = input.buildEntriesFromRolloutLines([toolRequest]);
+  const finalBatch = input.buildEntriesFromRolloutLines(rest);
+  boundary.enrich(toolBatch);
+  boundary.enrich(finalBatch);
+  const toolResponse = toolBatch.find(record => record['event.name'] === 'llm.response');
+  expect(toolResponse?.['gen_ai.response.finish_reasons']).toEqual(['tool_call']);
+  expect(toolBatch.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(0);
+  expect(finalBatch.filter(record => record['gen_ai.turn.end'] === true)).toHaveLength(1);
   await flusher.sendBatch(envelope());
-  await flusher.sendBatch(input.buildEntriesFromRolloutLines([toolRequest]));
+  await flusher.sendBatch(toolBatch);
   expect(spans).toHaveLength(0);
-  await flusher.sendBatch(input.buildEntriesFromRolloutLines(rest));
+  await flusher.sendBatch(finalBatch);
   expect(spansOf('LLM')).toHaveLength(4);
   expect(spansOf('TOOL')).toHaveLength(3);
 });

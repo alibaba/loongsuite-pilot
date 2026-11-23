@@ -614,8 +614,15 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.provider.name': providerId,
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': responseModelId,
-      'gen_ai.response.finish_reasons': [finishReason],
-      ...(toolCalls.length > 0 ? { 'gen_ai.turn.end': false } : {}),
+      // Some providers report stop even though they returned tool calls.
+      // Normalize the continuation as a model finish reason so the shared
+      // turn-boundary processor can still mark the actual final response.
+      'gen_ai.response.finish_reasons': [
+        finishReason === 'tool-calls'
+          || (toolCalls.length > 0 && (finishReason === 'stop' || finishReason === 'end_turn'))
+          ? 'tool_call'
+          : finishReason,
+      ],
       ...(inputTokens !== undefined ? { 'gen_ai.usage.input_tokens': inputTokens } : {}),
       ...(outputTokens !== undefined ? { 'gen_ai.usage.output_tokens': outputTokens } : {}),
       ...(cacheReadTokens !== undefined ? { 'gen_ai.usage.cache_read.input_tokens': cacheReadTokens } : {}),
