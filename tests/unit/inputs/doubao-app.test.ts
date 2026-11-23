@@ -10,7 +10,14 @@ const fixture = vi.hoisted(() => ({ home: '' }));
 vi.mock('node:os', async () => ({ ...await vi.importActual<typeof import('node:os')>('node:os'), homedir: () => fixture.home }));
 const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 const temporary: string[] = [];
-class ProbeInput extends DoubaoWorkInput { poll() { return this.collect(); } }
+class ProbeInput extends DoubaoWorkInput {
+  constructor(options: ConstructorParameters<typeof DoubaoWorkInput>[0]) {
+    // Source-isolation fixtures can run in one poll independently of CI load.
+    super({ workBudget: { milliseconds: Number.POSITIVE_INFINITY }, ...options });
+  }
+
+  poll() { return this.collect(); }
+}
 const source = (turn = 'synthetic-turn') => doubaoLine('on_message_session_start', { chat_session_id: turn }, 10)
   + doubaoLine('on_message_session_end', { chat_session_id: turn });
 

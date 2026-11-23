@@ -225,17 +225,14 @@ describe('Codex HTTP recovery through the input/checkpoint/output pipeline', () 
       f.input.enqueue('event-shared-checkpoint');
       const codexStart = f.manager.startInput(f.input.id);
       await vi.waitFor(() => expect(requests).toBeGreaterThan(0));
-      let otherStarted = false;
-      const otherStart = f.manager.startInput(other.id).then(() => { otherStarted = true; });
-      await vi.waitFor(() => expect(f.store.getOffset(other.id)).toBe(1));
-      expect(otherStarted).toBe(true);
+      await within(f.manager.startInput(other.id));
+      // Input readiness can precede completion of the atomic checkpoint write.
+      await vi.waitFor(async () => expect(await f.checkpoint(other.id)).toBe(1));
       expect(await f.checkpoint()).toBe(0);
-      expect(await f.checkpoint(other.id)).toBe(1);
 
       // Stopping the healthy input must not cancel Codex's output hold or
       // advance the Codex cursor.
       await within(f.manager.stopInput(other.id));
-      await within(otherStart);
       expect(other.running).toBe(false);
       expect(f.input.running).toBe(true);
       expect(await f.checkpoint()).toBe(0);
