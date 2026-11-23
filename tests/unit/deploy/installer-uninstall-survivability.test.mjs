@@ -27,7 +27,10 @@
 // (three plus the service wrapper) without editing. The prose form of the native-stderr
 // rule is pinned separately, by whichever repo's AGENTS.md carries that section.
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const PS1 = [
   'deploy/installer.ps1',
@@ -87,6 +90,80 @@ describe('Resolve-Node cannot take the caller down with it', () => {
 });
 
 const INSTALLERS = PS1.filter(f => f.startsWith('deploy/installer'));
+const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+const psArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
+const hasPowerShell = spawnSync(powershell, [...psArgs, '-Command', 'exit 0']).status === 0;
+
+describe.skipIf(!hasPowerShell)('legacy Claude hook cleanup during a purge', () => {
+  const scenarios = ['valid BOM JSON with stderr', 'invalid JSON', 'missing executable', 'launch failure'];
+  it.each(scenarios)('handles %s before deleting Pilot data', scenario => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pilot-otel-uninstall-'));
+    const installer = read('deploy/installer-opensource.ps1');
+    const settingsPath = path.join(root, '.claude', 'settings.json');
+    const cachePath = path.join(root, '.cache', 'opentelemetry.instrumentation.claude');
+    const dataDir = path.join(root, 'pilot-data');
+    const nativeSettings = { hooks: { Stop: [{ hooks: [
+      { command: 'otel-claude-hook' }, { command: 'unrelated-claude-hook' },
+    ] }] } };
+    const settings = scenario === 'invalid JSON' ? '{"hooks":,"name":"otel-claude-hook"}'
+      : '\uFEFF' + JSON.stringify(nativeSettings);
+    try {
+      mkdirSync(path.dirname(settingsPath), { recursive: true });
+      mkdirSync(cachePath, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(settingsPath, settings);
+      writeFileSync(path.join(dataDir, 'config.json'), '{}');
+      const noisyNodeProbe = path.join(root, 'emit-warning.cjs');
+      writeFileSync(noisyNodeProbe, 'process.stderr.write("synthetic native warning\\n");');
+      const skippedCleanups = [
+        'Stop-PilotService', 'Remove-PilotScheduledTasks', 'Remove-DshYamlPatch', 'Remove-HermesPlugin',
+        'Remove-OpenClawPlugin', 'Remove-GrokBuildHookConfig', 'Remove-CopilotOtelEnvironment',
+        'Remove-CopilotPlugin', 'Remove-HookConfigs', 'Remove-CodexHookConfig', 'Get-PilotRuntimeOverride',
+        'Remove-OpenCodePlugin', 'Remove-PiCodingAgentExtension', 'Remove-MimoCodePlugin', 'Remove-PilotInstallationFiles',
+      ];
+      const script = path.join(root, 'probe.ps1');
+      writeFileSync(script, '\uFEFF' + `
+$ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = 0
+$DataDir = $env:PROBE_PILOT_DATA
+$Purge = $true
+$script:NODE_BIN = $env:PROBE_NODE_BIN
+function Msg { param($Zh, $En) Write-Host $En }
+function Assert-SafePilotDirectory { param($Path, $Purpose) return $Path }
+function Remove-PilotPath { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+function Invoke-BrokenNode { throw 'synthetic launch failure' }
+${skippedCleanups.map(name => `function ${name} {}`).join('\n')}
+${funcOf(installer, 'Remove-OtelPlugin')}
+${funcOf(installer, 'Cmd-Uninstall')}
+Cmd-Uninstall
+if ($ErrorActionPreference -ne 'Stop') { throw 'uninstall changed the error preference' }
+`);
+      let nodeBin = process.execPath;
+      if (scenario === 'missing executable') nodeBin = path.join(root, 'missing-node');
+      if (scenario === 'launch failure') nodeBin = 'Invoke-BrokenNode';
+      const run = spawnSync(powershell, [...psArgs, '-File', script], {
+        encoding: 'utf8', timeout: 15_000,
+        env: { ...process.env, USERPROFILE: root, PROBE_PILOT_DATA: dataDir, PROBE_NODE_BIN: nodeBin,
+          NODE_OPTIONS: `--require ${JSON.stringify(noisyNodeProbe)}` },
+      });
+      expect(run.status, run.stderr || String(run.error)).toBe(0);
+      expect(existsSync(dataDir)).toBe(false);
+      if (scenario === 'valid BOM JSON with stderr') {
+        expect(JSON.parse(read(settingsPath))).toEqual({ hooks: { Stop: [{ hooks: [
+          { command: 'unrelated-claude-hook' },
+        ] }] } });
+        expect(existsSync(cachePath)).toBe(false);
+      } else {
+        expect(run.stdout).toContain('Legacy Claude plugin cleanup failed; continuing uninstall');
+        expect(run.stdout).not.toContain('settings.json hooks cleaned');
+        expect(read(settingsPath)).toBe(settings);
+        expect(existsSync(cachePath)).toBe(true);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('uninstall continues when Node cannot be resolved', () => {
   for (const file of INSTALLERS) {

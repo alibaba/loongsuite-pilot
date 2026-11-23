@@ -2717,25 +2717,23 @@ function Remove-OtelPlugin {
 
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
-    if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
-        $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $claudeSettings) {
+        $content = Get-Content -LiteralPath $claudeSettings -Raw
         if ($content -match "otel-claude-hook|hook-entry") {
-            # Restored in finally, not on the line after the call: this function is
-            # called bare from Cmd-Uninstall, ahead of the install-directory removal and
-            # -Purge, so anything that terminates in here costs the user the credentials
-            # in config.json. The relax itself is what keeps a single stderr line from
-            # node from terminating at all (NativeCommandError under 2>, promoted by the
-            # header's EAP = Stop), and the finally keeps the rest of the uninstall from
-            # silently running at "Continue" if it ever does.
+            if (-not $script:NODE_BIN) { throw "Node is unavailable to clean legacy Claude hooks in settings.json" }
+            # Windows PowerShell 5.1 treats redirected native stderr as a PowerShell error.
+            # Restore the caller's preference before checking the cleanup outcome.
             $prevEAP = $ErrorActionPreference
             $ErrorActionPreference = "Continue"
             try {
+                # A failed launch can leave the previous native command's exit code untouched.
+                $global:LASTEXITCODE = 1
                 & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
 const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
 try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8').replace(/^\uFEFF/, ''));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       if (!Array.isArray(d.hooks[ev])) continue;
@@ -2749,11 +2747,13 @@ try {
     if (Object.keys(d.hooks).length === 0) delete d.hooks;
     fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
   }
-} catch {}
+} catch { process.exitCode = 1; }
 '@ $claudeSettings 2>$null
+                $cleaned = $LASTEXITCODE -eq 0
             } finally {
                 $ErrorActionPreference = $prevEAP
             }
+            if (-not $cleaned) { throw "Could not remove legacy Claude hooks from settings.json" }
             Msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
         }
     }
@@ -3725,7 +3725,12 @@ function Cmd-Uninstall {
     Write-Host ""
 
     Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
-    Remove-OtelPlugin
+    try {
+        Remove-OtelPlugin
+    } catch {
+        Msg "    ⚠️  Claude 旧插件清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Legacy Claude plugin cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
     Write-Host ""
 
     Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."
