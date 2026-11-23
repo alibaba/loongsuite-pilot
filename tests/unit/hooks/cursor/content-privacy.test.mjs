@@ -278,3 +278,108 @@ it.each(['1.7.0', '2026.07.31'])('retries a completed %s conversation after poli
   send('sessionStart', {}, version, 'third');
   expect(readHistory()).toBe(before);
 });
+
+function installProcessor(policy, implicitDefault = false) {
+  const hooks = path.join(data, 'hooks');
+  fs.mkdirSync(hooks, { recursive: true });
+  fs.cpSync(path.dirname(processor), hooks, { recursive: true });
+  fs.writeFileSync(path.join(hooks, 'cursor-config-path'), JSON.stringify({
+    path: policy, implicitDefault,
+  }));
+  return fs.realpathSync(path.join(hooks, path.basename(processor)));
+}
+
+it.each(['legacy', 'structured'])('ignores inherited config when the %s marker pins an opt-out', format => {
+  configure({ cursor: { captureMessageContent: false } });
+  // The old plain-path deployment marker must also take precedence.
+  const installed = installProcessor(path.join(home, '.loongsuite-pilot/config.json'));
+  if (format === 'legacy') fs.writeFileSync(path.join(path.dirname(installed), 'cursor-config-path'), path.join(home, '.loongsuite-pilot/config.json'));
+  writeInstallConfig('{}');
+  env.AGENT_DATA_COLLECTION_CONFIG = path.join(data, 'config.json');
+  send('beforeSubmitPrompt', { prompt: 'inherited-override-private' }, '1.7.0', 'session', installed);
+  expect(journal()).not.toContain('inherited-override-private');
+  expect(fs.existsSync(path.join(data, 'logs/cursor/raw'))).toBe(false);
+  send('afterAgentResponse', { text: 'inherited-override-private', output_tokens: 19 }, '1.7.0', 'session', installed);
+  send('stop', {}, '1.7.0', 'session', installed);
+  expect(readHistory()).toContain('"gen_ai.usage.output_tokens":19');
+  expect(readHistory()).not.toContain('inherited-override-private');
+});
+
+it.each([true, false])('preserves missing-config semantics from deployment (implicit: %s)', implicit => {
+  const installed = installProcessor(path.join(home, '.loongsuite-pilot/config.json'), implicit);
+  delete env.LOONGSUITE_PILOT_DATA_DIR;
+  send('beforeSubmitPrompt', { prompt: 'default-prompt' }, '1.7.0', 'session', installed);
+  send('afterAgentResponse', { text: 'default-response', output_tokens: 17 }, '1.7.0', 'session', installed);
+  send('stop', {}, '1.7.0', 'session', installed);
+  if (implicit) expect(readHistory()).toContain('"gen_ai.usage.output_tokens":17');
+  else {
+    expect(readHistory()).toBe('');
+    expect(journal()).not.toContain('default-prompt');
+  }
+});
+
+it.each(['1.7.0', '2026.07.31'])('keeps recovered and new generations separate in the same %s conversation', version => {
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  fs.writeFileSync(path.join(home, '.loongsuite-pilot/config.json'), '{');
+  send('beforeSubmitPrompt', { generation_id: 'old', prompt: 'old-private' }, version);
+  send('afterAgentResponse', { generation_id: 'old', text: 'old-private', output_tokens: 11 }, version);
+  send('stop', { generation_id: 'old' }, version);
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  send('beforeSubmitPrompt', { generation_id: 'new', prompt: 'new-private' }, version);
+  send('afterAgentResponse', { generation_id: 'new', text: 'new-private', output_tokens: 22 }, version);
+  send('stop', { generation_id: 'new' }, version);
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
+});
+
+it.each([1, 2, 3])('emits one recovered turn with twelve concurrent hooks (run %s)', async () => {
+  configure({ cursor: { captureMessageContent: false } });
+  fs.writeFileSync(path.join(home, '.loongsuite-pilot/config.json'), '{');
+  send('beforeSubmitPrompt', { generation_id: 'queued', prompt: 'queued-private' }, '1.7.0');
+  send('afterAgentResponse', { generation_id: 'queued', text: 'queued-private', output_tokens: 11 }, '1.7.0');
+  send('stop', { generation_id: 'queued' }, '1.7.0');
+  configure({ cursor: { captureMessageContent: false } });
+  const { spawn } = await import('node:child_process');
+  await Promise.all(Array.from({ length: 12 }, (_, i) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [processor], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.on('error', reject);
+    child.on('close', code => {
+      try { expect(code).toBe(0); expect(stdout.trim()).toBe('{}'); resolve(); } catch (error) { reject(error); }
+    });
+    child.stdin.end(JSON.stringify({ hook_event_name: 'sessionStart', conversation_id: `parallel-${i}`, cursor_version: '1.7.0' }));
+  })));
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => r['gen_ai.usage.output_tokens'])).toEqual([11]);
+}, 20000);
+
+it.each(['1.7.0', '2026.07.31'])('recovers two queued generations without mixing usage (%s)', version => {
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  fs.writeFileSync(path.join(home, '.loongsuite-pilot/config.json'), '{');
+  for (const [generation_id, output_tokens] of [['old', 11], ['new', 22]]) {
+    send('beforeSubmitPrompt', { generation_id, prompt: 'private' }, version);
+    send('afterAgentResponse', { generation_id, text: 'private', output_tokens }, version);
+    send('stop', { generation_id }, version);
+  }
+  configure({ cursor: { captureMessageContent: false }, 'cursor-cli': { captureMessageContent: false } });
+  send('sessionStart', {}, version, 'other');
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
+});
+
+it('keeps a new CLI generation pending when an old response arrives late', () => {
+  configure({ 'cursor-cli': { captureMessageContent: false } });
+  const version = '2026.07.31';
+  send('beforeSubmitPrompt', { generation_id: 'old', prompt: 'old' }, version);
+  send('stop', { generation_id: 'old' }, version);
+  send('beforeSubmitPrompt', { generation_id: 'new', prompt: 'new' }, version);
+  send('afterAgentResponse', { generation_id: 'old', text: 'old', output_tokens: 11 }, version);
+  expect(journal()).toContain('"generation_id":"new"');
+  // A duplicate old stop must not take ownership of the new prompt.
+  send('stop', { generation_id: 'old' }, version);
+  send('stop', { generation_id: 'new' }, version);
+  send('afterAgentResponse', { generation_id: 'new', text: 'new', output_tokens: 22 }, version);
+  const usage = readHistory().trim().split('\n').map(JSON.parse).filter(r => r['gen_ai.usage.output_tokens']);
+  expect(usage.map(r => [r['gen_ai.turn.id'], r['gen_ai.usage.output_tokens']])).toEqual([['old', 11], ['new', 22]]);
+});

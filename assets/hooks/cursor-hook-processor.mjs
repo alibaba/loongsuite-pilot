@@ -27,6 +27,8 @@ import {
 } from './agent-event-normalizer.mjs';
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
+import { withAssemblyLock } from './cursor/assembly-lock.mjs';
+import { selectTurnEvents } from './cursor/turn-events.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
 import {
@@ -155,18 +157,9 @@ function applyCursorCliResourceContext(records, events, conversationId, variant)
   }
 }
 
-function compactJournal(allEvents, consumedConversationIds) {
-  const pendingTurnConvIds = new Set();
-  const remaining = [];
-  for (const ev of allEvents) {
-    if (consumedConversationIds.has(ev.conversation_id)) continue;
-    if (ev.hook_event === 'beforeSubmitPrompt') pendingTurnConvIds.add(ev.conversation_id);
-  }
-  for (const ev of allEvents) {
-    if (consumedConversationIds.has(ev.conversation_id)) continue;
-    if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
-  }
-  rewriteJournal(remaining, allEvents);
+function compactJournal(snapshot, consumedConversationIds, turnEvents) {
+  const consumed = new Set(turnEvents.filter(e => consumedConversationIds.has(e.conversation_id)));
+  rewriteJournal(snapshot.filter(e => !consumed.has(e)), snapshot);
 }
 
 function applyPolicy(record, runtimeConfig) {
@@ -474,28 +467,32 @@ async function main() {
     return;
   }
 
-  // Convert to internal event and append to journal
-  // Deployment records the collector's config path. A relocated log directory
-  // does not change that path. Older hooks use the collector's home default.
-  let configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
-  if (!configPath) {
-    try {
-      configPath = (await fs.readFile(new URL('./cursor-config-path', import.meta.url), 'utf8')).trim();
-      if (!path.isAbsolute(configPath)) throw new Error('Invalid deployed Cursor config path');
-    } catch (error) {
-      if (error.code !== 'ENOENT') throw error;
-      // No deployment marker: retain the normal implicit-home defaults.
-      configPath = undefined;
+  // Installed hooks follow the collector, even if Cursor inherited a different
+  // config override. Standalone hooks retain the normal environment fallback.
+  let configPath;
+  let implicitDefault = false;
+  try {
+    const marker = (await fs.readFile(new URL('./cursor-config-path', import.meta.url), 'utf8')).trim();
+    if (marker.startsWith('{')) {
+      const location = JSON.parse(marker);
+      configPath = location.path;
+      implicitDefault = location.implicitDefault === true;
+    } else {
+      configPath = marker; // Earlier deployments stored just the path.
     }
+    if (typeof configPath !== 'string' || !path.isAbsolute(configPath)) {
+      throw new Error('Invalid deployed Cursor config path');
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+    configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+    implicitDefault = !configPath;
   }
-  if (configPath) {
-    process.env.AGENT_DATA_COLLECTION_CONFIG = configPath.replace(/^~(?=[/\\]|$)/, os.homedir());
-  }
-  const runtimeConfig = loadHookRuntimeConfig();
-  // Workspace exclusions and message capture must read the same policy.
-  if (!configPath) {
-    process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
-  }
+  configPath = (configPath || path.join(os.homedir(), '.loongsuite-pilot', 'config.json'))
+    .replace(/^~(?=[/\\]|$)/, os.homedir());
+  const runtimeConfig = loadHookRuntimeConfig(undefined, { configPath, implicitDefault });
+  // Workspace exclusions and content capture must use the same file.
+  process.env.AGENT_DATA_COLLECTION_CONFIG = configPath;
   const eventVariant = cursorVariantFromVersion(payload.cursor_version);
   // Only inspect the open journal when this event would otherwise be allowed
   // and the other Cursor source has a different policy.
@@ -544,25 +541,26 @@ async function main() {
     return;
   }
 
-  // Retry completed conversations from earlier invocations after a policy or
-  // write failure. Assembly and workspace filtering still precede compaction.
-  const pending = readAllEvents();
-  const completed = new Map(pending.filter(event => event.hook_event === 'stop')
-    .map(event => [event.conversation_id, event]));
-  for (const event of completed.values()) {
-    if (event.conversation_id !== internalEvent.conversation_id) {
-      await assembleJournalEvent(event, dataDir, runtimeConfig, now);
+  // Ownership covers snapshot, history write and consumption. Other hooks may
+  // append meanwhile; journal compaction preserves those appended events.
+  await withAssemblyLock(async () => {
+    for (const stop of readAllEvents().filter(event => event.hook_event === 'stop')) {
+      const isCurrentStop = internalEvent.hook_event === 'stop'
+        && stop.conversation_id === internalEvent.conversation_id
+        && stop.generation_id === internalEvent.generation_id
+        && stop._journal_ts === internalEvent._journal_ts;
+      await assembleJournalEvent(stop, dataDir, runtimeConfig, now, isCurrentStop);
     }
-  }
-  await assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now);
+  });
   writeEmptyResponse();
 }
 
-async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now) {
+async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now, isCurrentStop) {
   // On stop: assemble turn and write history
   if (internalEvent.hook_event === 'stop') {
     try {
-      const allEvents = readAllEvents();
+      const snapshot = readAllEvents();
+      const allEvents = selectTurnEvents(snapshot, internalEvent);
 
       // NOTE: preToolUse events may arrive after stop is processed due to Cursor's
       // parallel hook invocation. When this happens, tool.call/result records are
@@ -591,7 +589,10 @@ async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now) 
       const convId = internalEvent.conversation_id;
       const history = prepareHistory(allEvents, convId, runtimeConfig);
       const { variant } = history;
-      const transcriptPath = history.allowTranscriptText ? internalEvent.transcript_path : undefined;
+      // A transcript may already describe a newer turn by the time recovery
+      // runs. Recover from the scoped journal instead of borrowing its text.
+      const transcriptPath = history.allowTranscriptText && isCurrentStop
+        ? internalEvent.transcript_path : undefined;
       const hasResponse = allEvents.some(e =>
         e.hook_event === 'afterAgentResponse' && e.conversation_id === convId
       );
@@ -663,51 +664,11 @@ async function assembleJournalEvent(internalEvent, dataDir, runtimeConfig, now) 
         await appendBatchJsonl(historyFile, records, variant);
       }
 
-      compactJournal(allEvents, consumedConversationIds);
+      compactJournal(snapshot, consumedConversationIds, allEvents);
     } catch (err) {
       await appendErrorJsonl(dataDir, now, {
         stage: 'assemble',
         'error.type': 'assemble_failed',
-        'error.message': err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // ─── Deferred-stop compensation: assemble when late response arrives ───
-  // When stop was deferred (no response yet), afterAgentResponse triggers assembly.
-  if (internalEvent.hook_event === 'afterAgentResponse') {
-    try {
-      const allEvents = readAllEvents();
-      const convId = internalEvent.conversation_id;
-      const hasStop = allEvents.some(e =>
-        e.hook_event === 'stop' && e.conversation_id === convId
-      );
-      if (hasStop) {
-        const history = prepareHistory(allEvents, convId, runtimeConfig);
-        const { variant } = history;
-        // Note: transcriptPath is deliberately omitted here — assembleTurn falls
-        // back to stopEvent?.transcript_path internally. Passing internalEvent's
-        // transcriptPath (from afterAgentResponse) would be incorrect.
-        const result = assembleTurn(history.events, {
-          runtimeConfig: history.runtimeConfig,
-          variant,
-          stopConversationId: convId,
-        });
-
-        applyCursorCliResourceContext(result.records, allEvents, convId, variant);
-
-        if (result.records.length > 0) {
-          const day = localDateString(now);
-          const historyFile = path.join(dataDir, 'logs', 'cursor', 'history', `cursor-${day}.jsonl`);
-          await appendBatchJsonl(historyFile, result.records, variant);
-        }
-
-        compactJournal(allEvents, result.consumedConversationIds);
-      }
-    } catch (err) {
-      await appendErrorJsonl(dataDir, now, {
-        stage: 'deferred_assemble',
-        'error.type': 'deferred_assemble_failed',
         'error.message': err instanceof Error ? err.message : String(err),
       });
     }

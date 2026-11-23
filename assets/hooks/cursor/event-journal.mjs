@@ -20,7 +20,8 @@ function pilotDataDir() {
   // The deployed Hook lives in <dataDir>/hooks even when the agent did not
   // inherit the environment of the installer or service.
   const deployedDataDir = fileURLToPath(new URL('../../', import.meta.url));
-  if (fs.existsSync(path.join(deployedDataDir, 'config.json'))) return deployedDataDir;
+  if (fs.existsSync(new URL('../cursor-config-path', import.meta.url))
+    || fs.existsSync(path.join(deployedDataDir, 'config.json'))) return deployedDataDir;
   return path.join(os.homedir(), '.loongsuite-pilot');
 }
 

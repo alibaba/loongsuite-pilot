@@ -266,8 +266,8 @@ export function hashJson(value) {
   }
 }
 
-export function loadHookRuntimeConfig(dataDir, { fallbackToHome = false } = {}) {
-  const explicitConfig = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+export function loadHookRuntimeConfig(dataDir, { fallbackToHome = false, configPath: resolvedConfigPath, implicitDefault = false } = {}) {
+  const explicitConfig = resolvedConfigPath ?? process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
   const homeConfigPath = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
   let configPath = explicitConfig || (dataDir ? path.join(dataDir, 'config.json') : homeConfigPath);
   if (configPath === '~') configPath = os.homedir();
@@ -287,7 +287,7 @@ export function loadHookRuntimeConfig(dataDir, { fallbackToHome = false } = {}) 
       else policyAvailable = false;
     } catch (error) {
       // Only an absent implicit config permits a fallback or the defaults.
-      if (error.code === 'ENOENT' && !explicitConfig) continue;
+      if (error.code === 'ENOENT' && (!explicitConfig || implicitDefault)) continue;
       policyAvailable = false;
     }
     break;

@@ -129,7 +129,7 @@ describe('HookStrategy', () => {
       expect(await strategy.needsDeploy(def)).toBe(true);
       vi.mocked(fs.readFile).mockResolvedValueOnce('/old/policy.json');
       expect(await strategy.needsDeploy(def)).toBe(true);
-      vi.mocked(fs.readFile).mockResolvedValueOnce(path.resolve('/custom/policy.json'));
+      vi.mocked(fs.readFile).mockResolvedValueOnce(JSON.stringify({ path: path.resolve('/custom/policy.json'), implicitDefault: false }));
       expect(await strategy.needsDeploy(def)).toBe(false);
     });
 
@@ -514,6 +514,26 @@ describe('HookStrategy', () => {
   });
 
   describe('deploy', () => {
+    it('records whether the config path was selected implicitly', async () => {
+      vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '');
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      mockHookManager.installHook.mockResolvedValue(true);
+      expect((await strategy.deploy(makeDef({ id: 'cursor' }))).success).toBe(true);
+      const location = JSON.parse(vi.mocked(writeTextFileAtomic).mock.calls[0][1]);
+      expect(location.implicitDefault).toBe(true);
+      expect(path.isAbsolute(location.path)).toBe(true);
+    });
+
+    it('does not write a config marker for a shared-hook declaration with no command', async () => {
+      const def = makeDef({ id: 'cursor-cli', hook: {
+        settingsPath: '/home/.cursor/hooks.json', events: [], hookCommand: '', format: 'flat',
+      } });
+      vi.mocked(readJsonFile).mockResolvedValue(null);
+      expect(await strategy.needsDeploy(def)).toBe(false);
+      expect((await strategy.deploy(def)).success).toBe(true);
+      expect(writeTextFileAtomic).not.toHaveBeenCalled();
+    });
+
     it.each(['cursor', 'cursor-cli'])('passes the collector config path to %s hooks', async (id) => {
       vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', '/custom/policy.json');
       vi.mocked(readJsonFile).mockResolvedValue(null);
@@ -521,7 +541,8 @@ describe('HookStrategy', () => {
       mockHookManager.installHook.mockResolvedValue(true);
       expect((await strategy.deploy(makeDef({ id }))).success).toBe(true);
       expect(writeTextFileAtomic).toHaveBeenCalledWith(
-        path.join('/opt/pilot/hooks', 'cursor-config-path'), path.resolve('/custom/policy.json'),
+        path.join('/opt/pilot/hooks', 'cursor-config-path'),
+        JSON.stringify({ path: path.resolve('/custom/policy.json'), implicitDefault: false }),
       );
     });
 
