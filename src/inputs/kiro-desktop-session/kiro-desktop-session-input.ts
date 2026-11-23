@@ -45,6 +45,7 @@ import { constants, type Dirent } from 'node:fs';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { stripAgentMessageContent } from '../../normalization/agent-content-policy.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
   BaseSessionInput,
@@ -65,12 +66,14 @@ export interface KiroDesktopSessionInputOptions
   extends Omit<SessionInputOptions, 'sessionDir' | 'filePattern'> {
   sessionDir?: string;
   filePattern?: string;
+  captureMessageContent?: boolean;
 }
 
 export class KiroDesktopSessionInput extends BaseSessionInput {
   readonly id = 'kiro-desktop-session';
   readonly agentType = ClientType.Kiro;
   override readonly collectionMethod = CollectionMethod.SessionFilePolling;
+  private readonly captureMessageContent: boolean;
 
   constructor(opts: KiroDesktopSessionInputOptions) {
     super({
@@ -81,6 +84,7 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
         opts.pollIntervalMs ??
         (Number(process.env.KIRO_DESKTOP_POLL_INTERVAL) || 30_000),
     });
+    this.captureMessageContent = opts.captureMessageContent ?? true;
   }
 
   static getWatchPaths(): string[] {
@@ -92,6 +96,7 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
   }
 
   protected override async onStart(): Promise<void> {
+    if (!this.captureMessageContent) this.clearSavedToolContent();
     const files = await this.discoverSessionFiles();
     for (const filePath of files) {
       const stateKey = this.stateKey(filePath);
@@ -133,7 +138,18 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
         }
       }
     }
-    return allEntries;
+    return this.captureMessageContent ? allEntries : allEntries.map(stripAgentMessageContent);
+  }
+
+  private clearSavedToolContent(): void {
+    const prefix = `${this.id}:turn:`;
+    for (const key of this.stateStore.keys()) {
+      if (!key.startsWith(prefix)) continue;
+      const result = this.loadTurnState(key.slice(prefix.length)).lastToolResult;
+      if (result?.content) {
+        this.stateStore.update(key, { extra: { lastToolResult: { ...result, content: '' } } });
+      }
+    }
   }
 
   private async processFileBatch(filePath: string): Promise<AgentActivityEntry[]> {
@@ -358,7 +374,7 @@ export class KiroDesktopSessionInput extends BaseSessionInput {
       }
       if (type === 'tool_result') {
         const toolCallId = stringValue(payload.toolCallId);
-        const content = stringValue(payload.content) ?? '';
+        const content = this.captureMessageContent ? stringValue(payload.content) ?? '' : '';
         const success = payload.success;
         const stepId = toolCallId ? `${executionId}#${toolCallId}` : `${executionId}#tool_${stepIndex}`;
         const bumpedTs = Math.max(ts + 1, (lastToolResult?.ts ?? 0) + 2);

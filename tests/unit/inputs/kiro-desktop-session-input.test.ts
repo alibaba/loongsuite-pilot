@@ -387,6 +387,43 @@ describe('KiroDesktopSessionInput', () => {
     expect(entries[0]?.['agent.kiro_event_type']).toBe('user');
   });
 
+  it.each([false, true])('keeps tool linkage without saving content after opt-out (previous capture: %s)', async previousCapture => {
+    const file = await writeSessionFile('hash-private', 'sess_private', []);
+    const stateFile = path.join(tmpDir, 'private-state.json');
+    const store = new StateStore(stateFile);
+    await store.load();
+    const original = new TestKiroDesktopSessionInput({
+      stateStore: store, sessionDir: tmpDir, captureMessageContent: previousCapture,
+    });
+    await original.baselineOnce();
+    const firstResult = REACT_FIXTURE_LINES.findIndex(line => line.includes('tooluse_listdir_1-result'));
+    await fs.appendFile(file, REACT_FIXTURE_LINES.slice(0, firstResult + 1).join('\n') + '\n');
+    const firstBatch = await original.collectOnce();
+    expect(firstBatch.some(entry => entry['gen_ai.tool.call.id'] === 'tooluse_listdir_1')).toBe(true);
+    await store.save();
+    const stateBefore = await fs.readFile(stateFile, 'utf8');
+    expect(stateBefore.includes('file_a.txt')).toBe(previousCapture);
+    expect(JSON.stringify(firstBatch).includes('file_a.txt')).toBe(previousCapture);
+
+    const reopened = new StateStore(stateFile);
+    await reopened.load();
+    const resumed = new TestKiroDesktopSessionInput({
+      stateStore: reopened, sessionDir: tmpDir, captureMessageContent: false,
+    });
+    await resumed.baselineOnce();
+    await reopened.save();
+    expect(await fs.readFile(stateFile, 'utf8')).not.toContain('file_a.txt');
+    await fs.appendFile(file, REACT_FIXTURE_LINES.slice(firstResult + 1).join('\n') + '\n');
+    const resumedBatch = await resumed.collectOnce();
+    expect(resumedBatch.filter(entry => entry['event.name'] === 'tool.result')
+      .map(entry => entry['gen_ai.tool.call.id'])).toEqual(['tooluse_bash_1', 'tooluse_read_1']);
+    expect(resumedBatch.every(entry => entry['gen_ai.tool.call.result'] === undefined)).toBe(true);
+    await reopened.save();
+    const saved = await fs.readFile(stateFile, 'utf8');
+    expect(saved).not.toContain('file_a.txt');
+    expect(saved).not.toContain('hello world');
+  });
+
   it('returns entries from other sessions if a discovered file disappears before open', async () => {
     const before = await writeSessionFile('hash-a', 'sess_first', REAL_FIXTURE_LINES);
     const removed = await writeSessionFile('hash-b', 'sess_removed', REAL_FIXTURE_LINES);

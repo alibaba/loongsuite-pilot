@@ -1736,6 +1736,7 @@ export class Orchestrator extends EventEmitter {
     // --- Kiro Desktop Session (Session File Polling, ~/.kiro/sessions/**/messages.jsonl) ---
     const kiroDesktopSessionInput = new KiroDesktopSessionInput({
       stateStore: this.stateStore,
+      captureMessageContent: this.config.agents.kiro?.captureMessageContent,
     });
     this.inputManager.registerInput(kiroDesktopSessionInput);
     entries.push(
