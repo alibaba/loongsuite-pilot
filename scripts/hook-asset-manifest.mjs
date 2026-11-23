@@ -1,0 +1,33 @@
+import { createHash } from 'node:crypto';
+import { readdir, readFile } from 'node:fs/promises';
+import path from 'node:path';
+
+/** SHA-256 of each regular file under root, keyed by relative path. `skip` drops those paths. `pattern` keeps only matching paths. */
+export async function collectFileManifest(root, skip = new Set(), pattern = null) {
+  /** @type {Record<string, string>} */
+  const manifest = {};
+
+  async function walk(dir, relative) {
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch (err) {
+      if (err && err.code === 'ENOENT') return;
+      throw err;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('._') || entry.name === '.DS_Store' || entry.isSymbolicLink()) continue;
+      const rel = relative ? `${relative}/${entry.name}` : entry.name;
+      if (skip.has(rel)) continue;
+      if (entry.isDirectory()) {
+        await walk(path.join(dir, entry.name), rel);
+      } else if (entry.isFile() && (!pattern || pattern.test(rel))) {
+        const bytes = await readFile(path.join(dir, entry.name));
+        manifest[rel] = createHash('sha256').update(bytes).digest('hex');
+      }
+    }
+  }
+
+  await walk(root, '');
+  return Object.fromEntries(Object.entries(manifest).sort(([a], [b]) => a.localeCompare(b)));
+}

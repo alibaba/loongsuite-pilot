@@ -1,8 +1,10 @@
 import { build } from 'esbuild';
 import { copyFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
+import { collectFileManifest } from './scripts/hook-asset-manifest.mjs';
 
 const isProprietary = process.env.BUILD_MODE === 'proprietary';
+const hookAssetManifest = await collectFileManifest(path.resolve('assets/hooks'), new Set(), /\.(sh|ps1)$/);
 
 const commonDefine = {
   '__PROPRIETARY_BUILD__': String(isProprietary),
@@ -27,7 +29,17 @@ const internalStubPlugin = {
   },
 };
 
-const commonPlugins = [internalStubPlugin];
+const hookAssetManifestPlugin = {
+  name: 'hook-asset-manifest',
+  setup(b) {
+    b.onLoad({ filter: /[/\\]hook-asset-manifest\.ts$/ }, () => ({
+      contents: `export const HOOK_ASSET_MANIFEST = ${JSON.stringify(hookAssetManifest)};\n`,
+      loader: 'ts',
+    }));
+  },
+};
+
+const commonPlugins = [internalStubPlugin, hookAssetManifestPlugin];
 
 await build({
   entryPoints: ['src/core/trace-context/runtime.ts'],
@@ -38,27 +50,7 @@ await build({
 await mkdir('dist', { recursive: true });
 await copyFile('assets/hooks/shared/trace-context.cjs', 'dist/trace-context.cjs');
 
-await build({
-  entryPoints: ['src/index.ts'],
-  outfile: 'dist/index.js',
-  platform: 'node',
-  target: 'es2022',
-  format: 'esm',
-  bundle: true,
-  minify: true,
-  treeShaking: true,
-  packages: 'external',
-  // The guard must run BEFORE this bundle's module graph loads. SQLite reads
-  // use node:sqlite; if that builtin cannot load on an unflagged Node
-  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
-  // exists. A static
-  // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
-  banner: { js: "import './native-deps-guard.cjs';" },
-  define: commonDefine,
-  plugins: commonPlugins,
-});
-
-// Loaded by the banner above, before the daemon graph. Must keep
+// Loaded by the collector banner, before the daemon graph. Must keep
 // `packages: 'external'`: require('node:sqlite') has to hit the runtime Node,
 // not a bundler rewrite.
 await build({
@@ -228,3 +220,23 @@ if (process.platform === 'darwin') {
     // non-fatal — status bar app build failure doesn't block the main build
   }
 }
+
+await build({
+  entryPoints: ['src/index.ts'],
+  outfile: 'dist/index.js',
+  platform: 'node',
+  target: 'es2022',
+  format: 'esm',
+  bundle: true,
+  minify: true,
+  treeShaking: true,
+  packages: 'external',
+  // The guard must run BEFORE this bundle's module graph loads. SQLite reads
+  // use node:sqlite; if that builtin cannot load on an unflagged Node
+  // (22.13+ / 23.4+) the process throws a readable FATAL before any logging
+  // exists. A static
+  // import in the banner is evaluated first by Node. See src/native-deps-guard.ts.
+  banner: { js: "import './native-deps-guard.cjs';" },
+  define: commonDefine,
+  plugins: commonPlugins,
+});
