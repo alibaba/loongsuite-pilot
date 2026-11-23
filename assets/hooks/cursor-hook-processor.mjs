@@ -28,7 +28,8 @@ import {
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
-import { buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
+import { buildCursorCliRecordsFromCompletedTurn, buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
+import { appendCursorCliRecoveredTurn, readCursorCliCompletedTurn } from './cursor/cli-transcript-recovery.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -167,6 +168,46 @@ function compactJournal(allEvents, consumedConversationIds) {
     if (pendingTurnConvIds.has(ev.conversation_id)) remaining.push(ev);
   }
   rewriteJournal(remaining, allEvents);
+}
+
+function recoverCursorCliSessionEnd(endEvent, dataDir, runtimeConfig) {
+  const allowed = filterWorkspaceRecords([{
+    'gen_ai.session.id': endEvent.conversation_id,
+    'agent.cursor-cli.cwd': endEvent.cwd || endEvent.workspace_roots?.[0],
+  }], 'cursor-cli').length > 0;
+  if (!allowed) return;
+  const turn = readCursorCliCompletedTurn(endEvent);
+  if (!turn) return;
+  const allEvents = readAllEvents();
+  const sessionEvents = allEvents.filter(event => {
+    const time = Date.parse(event._journal_ts);
+    return event.conversation_id === endEvent.conversation_id && time >= turn.startMs && time <= turn.endMs;
+  });
+  // An observed prompt still belongs to the regular Hook assembler. Leave it
+  // pending so a late response cannot race a second turn out of the transcript.
+  if (sessionEvents.some(event => event.hook_event === 'beforeSubmitPrompt')) return;
+  const history = prepareHistory(sessionEvents, endEvent.conversation_id, runtimeConfig);
+  if (history.variant !== 'cursor-cli') return;
+  const historyConfig = history.allowTranscriptText ? history.runtimeConfig : {
+    ...history.runtimeConfig,
+    agents: { ...history.runtimeConfig.agents, 'cursor-cli': { captureMessageContent: false } },
+  };
+  const records = buildCursorCliRecordsFromCompletedTurn(turn, history.events, endEvent, historyConfig);
+  if (!records.length) return;
+  applyCursorCliResourceContext(records, sessionEvents, endEvent.conversation_id, 'cursor-cli');
+
+  const historyDir = path.join(dataDir, 'logs', 'cursor', 'history');
+  const endDay = localDateString(new Date(turn.endMs));
+  const startDay = localDateString(new Date(turn.startMs));
+  const file = path.join(historyDir, `cursor-${endDay}.jsonl`);
+  const previousFile = startDay !== endDay ? path.join(historyDir, `cursor-${startDay}.jsonl`) : undefined;
+  const visible = filterWorkspaceRecords(records, 'cursor-cli');
+  if (visible.length > 0) appendCursorCliRecoveredTurn(file, previousFile, visible, endEvent, turn);
+
+  // Only retire evidence from this invocation. Other identity homes may be
+  // writing into the same journal while their own CLI processes are active.
+  const completed = new Set(sessionEvents);
+  rewriteJournal(allEvents.filter(event => !completed.has(event)), allEvents);
 }
 
 function applyPolicy(record, runtimeConfig) {
@@ -523,6 +564,18 @@ async function main() {
   if (!runtimeConfig.policyAvailable) {
     writeEmptyResponse();
     return;
+  }
+
+  if (eventVariant === 'cursor-cli' && internalEvent.hook_event === 'sessionEnd' && internalEvent.reason === 'completed') {
+    try {
+      recoverCursorCliSessionEnd(internalEvent, dataDir, runtimeConfig);
+    } catch (err) {
+      await appendErrorJsonl(dataDir, now, {
+        stage: 'cli_transcript_recovery',
+        'error.type': 'cli_transcript_recovery_failed',
+        'error.message': err?.code || 'Cursor CLI transcript recovery failed',
+      });
+    }
   }
 
   // On stop: assemble turn and write history

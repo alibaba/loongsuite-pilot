@@ -126,6 +126,11 @@ export function toInternalEvent(payload, captureContent = true) {
       event.composer_mode = payload.composer_mode || undefined;
       break;
 
+    case 'sessionEnd':
+      event.reason = payload.reason === 'completed' ? 'completed' : undefined;
+      event.duration_ms = toFiniteNumber(payload.duration_ms);
+      break;
+
     default:
       break;
   }

@@ -317,6 +317,41 @@ describe('Cursor enterprise system registration', () => {
     expect(JSON.parse(missing.stdout)).toEqual({});
   });
 
+  it('recovers a native headless turn through the installed system wrapper', async () => {
+    const target = systemHookDefinition({
+      ...def, hook: { ...def.hook!, events: [...def.hook!.events, 'sessionEnd'] },
+    });
+    const manager = new DeploymentManager({ dataDir, pilotDir });
+    await write(path.join(dataDir, 'config.json'), JSON.stringify({ privacy: { captureMessageContent: true } }));
+    expect((await manager.deployHookScope(target)).success).toBe(true);
+
+    const home = path.join(root, 'identity-created-after-install');
+    const session = 'headless-session';
+    const transcript = path.join(home, '.cursor/projects/workspace/agent-transcripts', session, session + '.jsonl');
+    await write(transcript, [
+      { role: 'user', message: { content: [{ type: 'text', text: 'native user prompt' }] } },
+      { role: 'assistant', message: { content: [{ type: 'text', text: 'native assistant reply' }] } },
+      { type: 'turn_ended', status: 'success' },
+    ].map(row => JSON.stringify(row)).join('\n') + '\n');
+
+    const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
+    const result = spawnSync('/bin/bash', ['-c', hooks.sessionEnd[0].command], {
+      env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10_000,
+      input: JSON.stringify({
+        hook_event_name: 'sessionEnd', session_id: session, conversation_id: session, generation_id: session,
+        cursor_version: '2026.09.26-dd393fe', reason: 'completed', duration_ms: 100,
+        transcript_path: transcript, workspace_roots: [home],
+      }),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({});
+    const history = path.join(dataDir, 'logs/cursor/history');
+    const files = (await fs.readdir(history)).filter(file => file.endsWith('.jsonl'));
+    expect(files).toHaveLength(1);
+    expect(await fs.readFile(path.join(history, files[0]), 'utf8')).toContain('native assistant reply');
+    await expect(fs.stat(path.join(home, '.loongsuite-pilot'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('refuses an untrusted installed asset, Node pin or executable without using the caller fallback', async () => {
     const target = systemHookDefinition(def);
     const manager = new DeploymentManager({ dataDir, pilotDir });

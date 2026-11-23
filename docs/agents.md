@@ -185,6 +185,13 @@ the UID running the collector and CLI.
 `--agents cursor-cli` selects the shared Cursor registration. Start new CLI
 processes after installation so they can read the updated policy.
 
+For [official headless CLI runs](https://cursor.com/docs/cli/headless) that omit
+the normal prompt and response hooks, Pilot can recover a completed turn from
+the native transcript referenced by the CLI's `sessionEnd` hook. The transcript
+must be readable under the active identity's `~/.cursor/projects`. Message
+capture follows the existing privacy settings. Token usage is only reported
+when present in the source.
+
 Pi reuses its existing configuration root (`PI_CODING_AGENT_DIR`, default
 `~/.pi/agent`). Later sessions using that root load the same extension, even
 when their session files live in subdirectories. An independently selected

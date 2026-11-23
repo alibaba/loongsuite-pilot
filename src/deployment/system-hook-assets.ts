@@ -15,11 +15,11 @@ export const CODEX_SYSTEM_HOOK_ASSETS = [
 
 const CURSOR_SYSTEM_HOOK_ASSETS = [
   CURSOR_SYSTEM_HOOK_SCRIPT, 'cursor-hook-processor.mjs', 'agent-event-normalizer.mjs',
-  'cursor/event-journal.mjs', 'cursor/react-assembler.mjs', 'cursor/skill-detector.mjs',
+  'cursor/cli-transcript-recovery.mjs', 'cursor/event-journal.mjs', 'cursor/react-assembler.mjs', 'cursor/skill-detector.mjs',
   'cursor/source-event.mjs', 'cursor/transcript-assembler.mjs', 'cursor/workspace-context.mjs',
   'shared/decode-payload.mjs', 'shared/qoder-db-utils.mjs', 'shared/raw-jsonl-writer.mjs',
   'shared/raw-source-gate.mjs', 'shared/resource-context.mjs', 'shared/workspace-policy.mjs',
-  'shared/workspace-privacy.mjs',
+  'shared/workspace-privacy.mjs', 'shared/sync-file-lock.mjs',
 ] as const;
 const CURSOR_SYSTEM_MANIFEST = 'cursor-system-assets.list';
 const CURSOR_SYSTEM_MANIFEST_TEXT = CURSOR_SYSTEM_HOOK_ASSETS.join('\n') + '\n';
