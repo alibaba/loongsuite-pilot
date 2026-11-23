@@ -612,6 +612,8 @@ impl Policy {
                 .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
         );
+        hooks["embedded_codex"] = serde_json::json!(init.codex_home.is_some());
+        hooks["codex_hook_channel"] = serde_json::json!(codex_hook_channel);
         hooks["data_dir"] = serde_json::json!(init.data_dir);
         hooks["home_dir"] = serde_json::json!(init.home_dir);
         hooks["user_id"] = serde_json::json!(init.user_id);

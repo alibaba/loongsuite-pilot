@@ -25,6 +25,7 @@ pub struct Collector {
 struct Agent {
     plan: AgentPlan,
     cancel: Arc<AtomicBool>,
+    activate: Option<mpsc::Sender<()>>,
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
     report: Arc<Mutex<Value>>,
@@ -40,7 +41,11 @@ impl Collector {
             global_stop: stop,
         }
     }
-    pub fn apply(&mut self, policy: &Policy) -> anyhow::Result<()> {
+    pub fn apply(
+        &mut self,
+        policy: &Policy,
+        commit: impl FnOnce() -> anyhow::Result<()>,
+    ) -> anyhow::Result<()> {
         let mut plans = policy.agents.clone();
         if let Some(recovery) = &policy.codex_recovery {
             plans.insert("codex-recovery".into(), recovery.clone());
@@ -62,15 +67,10 @@ impl Collector {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        for id in removed {
-            if let Some(mut old) = self.agents.remove(&id) {
-                old.stop();
-            }
-        }
-        self.queue.update(policy.delivery.clone());
+        let mut staged = BTreeMap::new();
         for (id, plan) in plans {
-            if !self.agents.contains_key(&id) {
-                self.agents.insert(
+            if !self.agents.contains_key(&id) || removed.contains(&id) {
+                staged.insert(
                     id,
                     Agent::start(
                         &self.init,
@@ -80,6 +80,20 @@ impl Collector {
                     )?,
                 );
             }
+        }
+        commit()?;
+        for id in removed {
+            self.agents.remove(&id);
+        }
+        self.queue.update(policy.delivery.clone());
+        for (id, mut agent) in staged {
+            agent
+                .activate
+                .take()
+                .expect("staged source")
+                .send(())
+                .expect("source waiting for activation");
+            self.agents.insert(id, agent);
         }
         Ok(())
     }
@@ -148,6 +162,7 @@ impl Agent {
         let metrics = Arc::new(Mutex::new(None));
         let source_metrics = metrics.clone();
         let (tx, rx) = mpsc::channel();
+        let (activate, activation) = mpsc::channel();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         let context = (
             init.clone(),
@@ -169,29 +184,35 @@ impl Agent {
                         (cancel, global),
                         (report.clone(), source_metrics),
                         rx,
-                        ready_tx,
+                        (ready_tx.clone(), activation),
                     )
                 }))
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("SDK source task panicked")));
                 if let Err(error) = result {
+                    if ready_tx.send(Err(error.to_string())).is_ok() {
+                        return;
+                    }
                     queue.alarm("SDK_SOURCE_FAILURE", &error.to_string());
                     *report.lock().unwrap() = json!({"state":"failed","reason":error.to_string()});
                 }
             })?;
         // Thread creation/runtime setup, not source availability, is the start
         // barrier. Missing sources remain observable per-agent waiting states.
-        if ready_rx
+        let initialized = ready_rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .is_err()
-        {
+            .map_err(|err| err.to_string())
+            .and_then(|result| result);
+        if let Err(error) = initialized {
             cancel.store(true, Ordering::SeqCst);
             let _ = tx.send(());
+            drop(activate);
             let _ = thread.join();
-            anyhow::bail!("source runtime failed to initialize");
+            anyhow::bail!("source runtime failed to initialize: {error}");
         }
         Ok(Self {
             plan,
             cancel,
+            activate: Some(activate),
             stop: tx,
             thread: Some(thread),
             report,
@@ -199,6 +220,7 @@ impl Agent {
         })
     }
     fn stop(&mut self) {
+        self.activate.take();
         self.cancel.store(true, Ordering::SeqCst);
         let _ = self.stop.send(());
         if let Some(thread) = self.thread.take() {
@@ -308,7 +330,7 @@ fn run_agent(
     cancellation: (Arc<AtomicBool>, Arc<AtomicBool>),
     observer: SourceObserver,
     stop: mpsc::Receiver<()>,
-    ready: mpsc::SyncSender<()>,
+    activation: (mpsc::SyncSender<Result<(), String>>, mpsc::Receiver<()>),
 ) -> anyhow::Result<()> {
     let (cancel, global) = cancellation;
     let (report, metrics) = observer;
@@ -317,50 +339,8 @@ fn run_agent(
     source_access::private_path(&state_dir)?;
     std::fs::create_dir_all(&state_dir)?;
     let checkpoint = state_dir.join("input-state.json");
+    source_access::private_path(&checkpoint)?;
     let checkpoint_key = plan.checkpoint_key();
-    use super::outbox::LegacyCheckpointHandoff;
-    let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
-        let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
-        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
-            host.data_dir.join(super::STANDALONE_QODER_DATA)
-        } else {
-            host.data_dir
-                .join("state")
-                .join(format!("standalone-{checkpoint_key}-sdk"))
-        };
-        (init.data_dir == expected).then_some((host, handoff))
-    });
-    if let Some((host, handoff)) = shell_handoff {
-        let legacy_path = host.data_dir.join("logs/input-state.json");
-        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
-            use std::io::Read;
-            source_access::private_path(&legacy_path)?;
-            let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
-                Ok(file) => file,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.into()),
-            };
-            anyhow::ensure!(
-                file.metadata()?.len() <= 64 * 1024 * 1024,
-                "Pilot shell checkpoint exceeds 64 MiB"
-            );
-            let mut body = String::new();
-            file.read_to_string(&mut body)?;
-            filter_shell_checkpoint(&body, checkpoint_key)
-        })?;
-        if let Some(text) = imported {
-            write_checkpoint(&checkpoint, &text)?;
-        } else if handoff == LegacyCheckpointHandoff::Codex {
-            source_access::private_path(&checkpoint)?;
-            match std::fs::remove_file(&checkpoint) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-    } else {
-        queue.restore(&namespace, &checkpoint)?;
-    }
     let mut roots = plan
         .sources
         .iter()
@@ -441,6 +421,54 @@ fn run_agent(
         .on_thread_start(move || source_access::install(Some(start_scope.clone())))
         .on_thread_stop(|| source_access::install(None))
         .build()?;
+    // Wait before reading or changing shared checkpoints, starting inputs or enqueueing events.
+    let (ready, activate) = activation;
+    if ready.send(Ok(())).is_err() || activate.recv().is_err() {
+        return Ok(());
+    }
+    use super::outbox::LegacyCheckpointHandoff;
+    let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
+        let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
+        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
+            host.data_dir.join(super::STANDALONE_QODER_DATA)
+        } else {
+            host.data_dir
+                .join("state")
+                .join(format!("standalone-{checkpoint_key}-sdk"))
+        };
+        (init.data_dir == expected).then_some((host, handoff))
+    });
+    if let Some((host, handoff)) = shell_handoff {
+        let legacy_path = host.data_dir.join("logs/input-state.json");
+        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
+            use std::io::Read;
+            source_access::private_path(&legacy_path)?;
+            let mut file = match source_access::open_under(&legacy_path, &host.data_dir) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            anyhow::ensure!(
+                file.metadata()?.len() <= 64 * 1024 * 1024,
+                "Pilot shell checkpoint exceeds 64 MiB"
+            );
+            let mut body = String::new();
+            file.read_to_string(&mut body)?;
+            filter_shell_checkpoint(&body, checkpoint_key)
+        })?;
+        if let Some(text) = imported {
+            write_checkpoint(&checkpoint, &text)?;
+        } else if handoff == LegacyCheckpointHandoff::Codex {
+            source_access::private_path(&checkpoint)?;
+            match std::fs::remove_file(&checkpoint) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    } else {
+        queue.restore(&namespace, &checkpoint)?;
+    }
     let store = Arc::new(if isolated_codex {
         StateStore::new_sdk_source(&checkpoint)
     } else {
@@ -720,7 +748,6 @@ fn run_agent(
     manager.register_input(input.clone());
     // Missing Agent sources stay waiting. Do not let a native input's setup
     // create a directory in the Agent installation merely because HCD names it.
-    let _ = ready.send(());
     let mut started = false;
     let mut next_start = std::time::Instant::now();
     while !cancel.load(Ordering::SeqCst) && !global.load(Ordering::SeqCst) {
@@ -891,6 +918,75 @@ impl QoderTraceReaders for AuthorizedReaders {
     > {
         Ok(Default::default())
     }
+}
+
+#[cfg(test)]
+#[test]
+fn failed_codex_commit_discards_staged_source_before_checkpoint_or_delivery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    let sessions = home.join("sessions");
+    let settings = home.join("hooks.json");
+    let trust = home.join("config.toml");
+    let init: Init = serde_json::from_value(
+        json!({"data_dir":root.join("sdk"),"resource_dir":root.join("package"),"codex_home":home}),
+    )
+    .unwrap();
+    let day = sessions.join("2026/08/07");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = "rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl";
+    std::fs::write(day.join(rollout), include_bytes!("../../tests/fixtures/codex-subagent/rollout-2026-08-07T10-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl")).unwrap();
+    std::fs::write(&trust, "model = 'original'\n").unwrap();
+    std::fs::create_dir_all(init.resource_dir.join("bin")).unwrap();
+    let binary = format!("loongsuite-pilot-sdk-hook{}", std::env::consts::EXE_SUFFIX);
+    // Only the executable permission is needed to plan the Hook command.
+    std::fs::copy(
+        std::env::current_exe().unwrap(),
+        init.resource_dir.join("bin").join(binary),
+    )
+    .unwrap();
+    let policy = Policy::parse(
+        json!({"agents":["codex"],"hcd":{"agent_configs":{"codex":{
+            "collection":{"enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions],
+                "sources":[{"id":"rollout","type":"transcript","path":sessions}]},
+            "hook_deployment":{"channel":"cloud","settings_path":settings}
+        }}}}),
+        &init,
+    )
+    .unwrap();
+    let queue = Outbox::open(&init.data_dir.join("outbox"), Default::default()).unwrap();
+    let namespace = policy.agents["codex"].namespace();
+    queue.checkpoint(&namespace, "{}").unwrap();
+    let mirror = init
+        .data_dir
+        .join("sources")
+        .join(namespace)
+        .join("input-state.json");
+    let mut collector = Collector::new(init.clone(), queue.clone(), Default::default());
+    let error = collector
+        .apply(&policy, || {
+            crate::deployment::reconcile_embedded_codex_hooks(
+                &home,
+                &init.data_dir,
+                &init.resource_dir,
+                Some("cloud"),
+                || {
+                    assert!(std::fs::read_to_string(&settings)?.contains("--pilot-sdk-managed"));
+                    assert!(!mirror.exists());
+                    // An external writer restores the original bytes before commit validation.
+                    std::fs::write(&trust, "model = 'original'\n")?;
+                    Ok(())
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("提交前"), "{error:#}");
+    assert!(!settings.exists());
+    assert!(!mirror.exists());
+    assert_eq!(queue.pending_bytes().unwrap(), 0);
+    assert_eq!(collector.snapshot(), json!([]));
 }
 
 #[cfg(test)]

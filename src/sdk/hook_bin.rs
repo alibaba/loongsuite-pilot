@@ -121,6 +121,13 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         return None;
     }
     let configured_agent = flag(&args, "--agent")?;
+    let managed =
+        configured_agent == "codex" && args.iter().any(|arg| arg == "--pilot-sdk-managed");
+    if managed
+        && !matches!(std::fs::symlink_metadata(data.join("codex-hook-deployment/update-recovery.json")), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+    {
+        return None;
+    }
     let configured_event = flag(&args, "--event");
     if configured_event.is_none() && configured_agent != "qoder-auto" {
         return None;
@@ -263,6 +270,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             .as_millis()
             .saturating_sub(started.elapsed().as_millis()) as u64,
         length: if capacity_probe { 0 } else { body.len() },
+        managed,
         agent: agent.clone(),
         event: event.clone(),
         want_receipt: descriptor.request_receipts,

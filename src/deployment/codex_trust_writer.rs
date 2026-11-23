@@ -833,13 +833,32 @@ fn marker_line_membership(content: &str, marker: &str) -> Vec<bool> {
         .collect()
 }
 
-pub(super) fn marked_trust_keys(content: &str, marker: &str) -> Vec<String> {
+pub(super) fn marked_trust_keys(
+    content: &str,
+    marker: &str,
+) -> Result<Vec<String>, InvalidCodexConfigError> {
     let marked = marker_line_membership(content, marker);
-    trust_section_ranges(content)
-        .into_iter()
-        .filter(|section| marked[section.start])
-        .map(|section| section.key)
-        .collect()
+    let doc = toml_edit::ImDocument::parse(content).map_err(|err| InvalidCodexConfigError {
+        message: err.to_string(),
+    })?;
+    let Some(states) = doc
+        .get("hooks")
+        .and_then(|h| h.get("state"))
+        .and_then(toml_edit::Item::as_table_like)
+    else {
+        return Ok(Vec::new());
+    };
+    let lines: Vec<_> = content
+        .match_indices('\n')
+        .map(|(offset, _)| offset)
+        .collect();
+    Ok(states
+        .iter()
+        .filter_map(|(key, _)| {
+            let offset = states.key(key)?.span()?.start;
+            marked[lines.partition_point(|n| *n < offset)].then(|| key.to_owned())
+        })
+        .collect())
 }
 
 pub(super) fn plan_remove_embedded_trust(
@@ -852,7 +871,7 @@ pub(super) fn plan_remove_embedded_trust(
     let is_marker =
         |line: &ConfigLine| line.editable && (line.text.trim() == begin || line.text.trim() == end);
     let keys = keys.iter().cloned().collect::<HashSet<_>>();
-    let has_retained_marked_keys = marked_trust_keys(before, marker)
+    let has_retained_marked_keys = marked_trust_keys(before, marker)?
         .iter()
         .any(|key| !keys.contains(key));
     let content = if has_retained_marked_keys {
@@ -876,8 +895,58 @@ pub(super) fn plan_remove_embedded_trust(
                 && text.ends_with(" trust")
         })
         .collect::<Vec<_>>();
-    let content = remove_trust_sections(&content, &keys, &protected_lines)?;
-    validate_config(&content)?;
+    let mut content = remove_trust_sections(&content, &keys, &protected_lines)?;
+    let doc =
+        toml_edit::ImDocument::parse(content.as_str()).map_err(|err| InvalidCodexConfigError {
+            message: err.to_string(),
+        })?;
+    let mut ranges = Vec::new();
+    if let Some(states) = doc
+        .get("hooks")
+        .and_then(|h| h.get("state"))
+        .and_then(toml_edit::Item::as_table_like)
+    {
+        for key in &keys {
+            let Some(item) = states.get(key) else {
+                continue;
+            };
+            let span = states.key(key).and_then(|k| k.span()).zip(item.span());
+            if let Some((name, value)) = span {
+                // Remove only a complete assignment. A nested inline table may
+                // share a line with foreign entries and must be preserved intact.
+                let prefix = content[..name.start]
+                    .rsplit('\n')
+                    .next()
+                    .unwrap_or_default();
+                let suffix = content[value.end..]
+                    .split('\n')
+                    .next()
+                    .unwrap_or_default()
+                    .trim_start();
+                if item.is_inline_table()
+                    && prefix.trim().is_empty()
+                    && (suffix.is_empty() || suffix.starts_with('#'))
+                {
+                    ranges.push(name.start..value.end);
+                }
+            }
+        }
+    }
+    ranges.sort_unstable_by_key(|range| std::cmp::Reverse(range.start));
+    for range in ranges {
+        content.replace_range(range, "");
+    }
+    let parsed: toml::Table = toml::from_str(&content).map_err(|err| InvalidCodexConfigError {
+        message: err.to_string(),
+    })?;
+    if let Some(states) = parsed.get("hooks").and_then(|h| h.get("state")) {
+        if keys.iter().any(|key| states.get(key).is_some()) {
+            return Err(InvalidCodexConfigError {
+                message: "cannot safely remove embedded Codex trust in this TOML representation"
+                    .into(),
+            });
+        }
+    }
     Ok((content != before).then_some(content))
 }
 
@@ -1069,6 +1138,25 @@ mod tests {
             retired_keys: vec![],
             marker: "otel-codex-hook".into(),
         })
+    }
+
+    #[test]
+    fn embedded_codex_clear_preserves_inline_neighbors_and_refuses_shared_assignments() {
+        let marker = "sdk-owner";
+        let config = "# BEGIN sdk-owner trust\n[hooks.state]\n'ours' = { trusted_hash = 'one' } # keep comment\n'other' = { trusted_hash = 'two' }\n# END sdk-owner trust\n";
+        let keys = vec!["ours".to_owned()];
+        let after = plan_remove_embedded_trust(config, marker, &keys)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            after,
+            config.replace("'ours' = { trusted_hash = 'one' }", "")
+        );
+        let shared = "# BEGIN sdk-owner trust\nhooks = { state = { ours = { trusted_hash = 'one' }, other = { trusted_hash = 'two' } } }\n# END sdk-owner trust\n";
+        assert!(marked_trust_keys(shared, marker)
+            .unwrap()
+            .contains(&keys[0]));
+        assert!(plan_remove_embedded_trust(shared, marker, &keys).is_err());
     }
 
     #[test]

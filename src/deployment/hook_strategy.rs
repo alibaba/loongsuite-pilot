@@ -914,7 +914,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     data_dir: &Path,
     resource_dir: &Path,
     channel: Option<&'static str>,
-    apply_collection: impl FnOnce() -> anyhow::Result<()>,
+    before_commit: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<Value> {
     use crate::utils::source_access::private_path;
 
@@ -926,7 +926,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     private_path(&scratch)?;
     // Let policy wait for Codex to create its own config directory.
     if !home.is_dir() {
-        apply_collection()?;
+        before_commit()?;
         return Ok(
             serde_json::json!({"state": if channel.is_some() {"waiting"} else {"disabled"}}),
         );
@@ -965,7 +965,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
         for (key, value) in edits {
             tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
         }
-        apply_collection()?;
+        before_commit()?;
         tx.commit()
     })();
     if let Err(error) = result {
@@ -1013,12 +1013,31 @@ fn embedded_codex_definition(
 }
 
 // Handler indices can be reused by a different owner after manual edits.
-fn orphaned_codex_trust_keys(
+fn embedded_codex_trust_keys(
     settings: &Value,
     path: &str,
     trust: &str,
     marker: &str,
-) -> Vec<String> {
+    locations: &[InstalledCodexHookLocation],
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let parsed: toml::Table = toml::from_str(trust)?;
+    let states = parsed.get("hooks").and_then(|h| h.get("state"));
+    let hashes = locations
+        .iter()
+        .map(|location| {
+            super::codex_trust_writer::compute_installed_hook_trust_hash(
+                location,
+                super::codex_trust_writer::TrustPlatform::current(),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect::<anyhow::Result<HashSet<_>>>()?;
+    let executable = |handler: &Value| {
+        ["command", "commandWindows", "command_windows"]
+            .iter()
+            .any(|key| handler[key].as_str().is_some_and(|s| !s.trim().is_empty()))
+            || handler["type"].as_str().is_some_and(|t| t != "command")
+    };
     let mut occupied = HashSet::new();
     if let Some(events) = settings["hooks"].as_object() {
         for (event, groups) in events {
@@ -1027,20 +1046,30 @@ fn orphaned_codex_trust_keys(
             };
             for (group_index, group) in groups.as_array().into_iter().flatten().enumerate() {
                 if let Some(handlers) = group["hooks"].as_array() {
-                    for handler_index in 0..handlers.len() {
+                    for (handler_index, _) in
+                        handlers.iter().enumerate().filter(|(_, h)| executable(h))
+                    {
                         occupied
                             .insert(format!("{path}:{event_key}:{group_index}:{handler_index}"));
                     }
-                } else if group.get("command").is_some() {
+                } else if executable(group) {
                     occupied.insert(format!("{path}:{event_key}:{group_index}:0"));
                 }
             }
         }
     }
-    super::codex_trust_writer::marked_trust_keys(trust, marker)
+    Ok(super::codex_trust_writer::marked_trust_keys(trust, marker)?
         .into_iter()
-        .filter(|key| key.rsplitn(4, ':').nth(3) == Some(path) && !occupied.contains(key))
-        .collect()
+        .filter(|key| {
+            key.rsplitn(4, ':').nth(3) == Some(path)
+                && (!occupied.contains(key)
+                    || states
+                        .and_then(|s| s.get(key))
+                        .and_then(|t| t.get("trusted_hash"))
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|h| hashes.contains(h)))
+        })
+        .collect())
 }
 
 pub(crate) fn inspect_embedded_codex_hooks(
@@ -1069,26 +1098,31 @@ pub(crate) fn inspect_embedded_codex_hooks(
         .resolve_codex_hook_locations_from_data(&def, &hook.events, true, &doc.data, false, false)
         .map_err(anyhow::Error::msg)?;
     let path = node_resolve(&hook.settings_path);
-    let mut keys = std::collections::BTreeSet::new();
+    let raw =
+        super::codex_trust_writer::read_config_snapshot(&trust.config_path)?.unwrap_or_default();
+    let keys = embedded_codex_trust_keys(&doc.data, &path, &raw, &trust.marker, &locations)?;
+    let parsed: toml::Table = toml::from_str(&raw)?;
+    let states = parsed.get("hooks").and_then(|hooks| hooks.get("state"));
     let mut hooks = Vec::new();
     for location in locations {
         let key = installed_hook_state_key(&path, &location);
-        keys.insert(key.clone());
+        let hash = super::codex_trust_writer::compute_installed_hook_trust_hash(
+            &location,
+            super::codex_trust_writer::TrustPlatform::current(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let key = keys.get(&key).filter(|key| {
+            states
+                .and_then(|s| s.get(*key))
+                .and_then(|e| e.get("trusted_hash"))
+                .and_then(toml::Value::as_str)
+                == Some(&hash)
+        });
         hooks.push(serde_json::json!({
             "event":location.event_name, "matcher":location.matcher, "command":location.handler.command,
             "group_index":location.group_index, "handler_index":location.handler_index, "trust_key":key,
         }));
     }
-    let raw =
-        super::codex_trust_writer::read_config_snapshot(&trust.config_path)?.unwrap_or_default();
-    keys.extend(orphaned_codex_trust_keys(
-        &doc.data,
-        &path,
-        &raw,
-        &trust.marker,
-    ));
-    let parsed: toml::Table = toml::from_str(raw.trim_start_matches('\u{feff}'))?;
-    let states = parsed.get("hooks").and_then(|hooks| hooks.get("state"));
     let mut records = Vec::new();
     for key in keys {
         if let Some(entry) = states.and_then(|state| state.get(&key)) {
@@ -1669,6 +1703,21 @@ impl HookStrategy {
         } else {
             Vec::new()
         };
+        let embedded_removal_keys = if uninstall && self.embedded_codex.is_some() {
+            let trust = hook.trust_toml.as_ref().expect("embedded trust");
+            Some(
+                embedded_codex_trust_keys(
+                    &document.data,
+                    &hooks_json,
+                    &snapshot("trust")?.unwrap_or_default(),
+                    &trust.marker,
+                    &old_locations,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         if self.codex_legacy_cache.is_some()
             && !old_locations.iter().any(|location| {
                 self.owns_codex_sdk_command(def, &location.event_name, &location.handler.command)
@@ -1765,13 +1814,10 @@ impl HookStrategy {
             if uninstall {
                 if let Some(raw) = original.as_deref() {
                     let removal = if self.embedded_codex.is_some() {
-                        let mut keys = owned_keys;
-                        keys.extend(orphaned_codex_trust_keys(
-                            &document.data,
-                            &hooks_json,
-                            raw,
-                            &cfg.marker,
-                        ));
+                        let keys: Vec<_> = embedded_removal_keys
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
                         super::codex_trust_writer::plan_remove_embedded_trust(
                             raw,
                             &cfg.marker,
@@ -2845,6 +2891,7 @@ mod tests {
         );
         assert!(
             super::super::codex_trust_writer::marked_trust_keys(&remaining, &marker)
+                .unwrap()
                 .contains(&other)
         );
         assert!(parsed["hooks"]["state"].get(&ours).is_none());
@@ -2853,7 +2900,7 @@ mod tests {
     }
 
     #[test]
-    fn codex_hook_transaction_restores_files_when_collection_update_fails() {
+    fn codex_hook_transaction_restores_files_when_precommit_check_fails() {
         let root = tempfile::tempdir().unwrap();
         let root = root.path().canonicalize().unwrap();
         let home = root.join("codex");
@@ -2874,12 +2921,12 @@ mod tests {
             reconcile_embedded_codex_hooks(&home, &state, &resources, Some("cloud"), || {
                 assert!(std::fs::read_to_string(&settings)?.contains("sdk-hook"));
                 assert!(std::fs::read_to_string(&trust)?.contains("trusted_hash"));
-                anyhow::bail!("collection update failed")
+                anyhow::bail!("precommit check failed")
             });
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("collection update failed"));
+            .contains("precommit check failed"));
         assert_eq!(std::fs::read_to_string(settings).unwrap(), original_hooks);
         assert_eq!(std::fs::read_to_string(trust).unwrap(), original_trust);
     }

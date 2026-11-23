@@ -644,7 +644,9 @@ impl Session {
             instance.stop_requested.clone(),
             instance.activated.clone(),
         )?);
-        update_codex_deployment(instance, policy, || session.collector.apply(policy))?;
+        session
+            .collector
+            .apply(policy, || update_codex_deployment(instance, policy))?;
         Ok(session)
     }
     fn shutdown(&mut self) {
@@ -677,11 +679,7 @@ impl Drop for Session {
     }
 }
 
-fn update_codex_deployment(
-    instance: &Instance,
-    policy: &Policy,
-    apply_collection: impl FnOnce() -> anyhow::Result<()>,
-) -> anyhow::Result<()> {
+fn update_codex_deployment(instance: &Instance, policy: &Policy) -> anyhow::Result<()> {
     let _guard = instance.hook_files.lock().unwrap();
     if let Some(home) = &instance.init.codex_home {
         let deployment = crate::deployment::reconcile_embedded_codex_hooks(
@@ -689,11 +687,9 @@ fn update_codex_deployment(
             &instance.init.data_dir,
             &instance.init.resource_dir,
             policy.codex_hook_channel,
-            apply_collection,
+            || Ok(()),
         )?;
         instance.status.lock().unwrap().codex_hook_deployment = deployment;
-    } else {
-        apply_collection()?;
     }
     Ok(())
 }
@@ -764,34 +760,23 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 let result = if instance.stop_requested.load(Ordering::SeqCst) {
                     Err("SDK is stopping".into())
                 } else if let Some(session) = session.as_mut() {
-                    let mut collector_touched = false;
-                    match update_codex_deployment(&instance, &next, || {
-                        collector_touched = true;
-                        session.collector.apply(&next)
+                    match session.collector.apply(&next, || {
+                        let hooks = session.hooks.as_ref().expect("running Hook endpoints");
+                        let mut settings = hooks.settings.write().unwrap();
+                        update_codex_deployment(&instance, &next)?;
+                        instance.status.lock().unwrap().version = next.version.clone();
+                        *settings = next.hooks.clone();
+                        super::hooks::update_local_status(&session.queue, &next.hooks);
+                        Ok(())
                     }) {
                         Ok(()) => {
-                            if let Some(hooks) = &session.hooks {
-                                *hooks.settings.write().unwrap() = next.hooks.clone();
-                                super::hooks::update_local_status(&session.queue, &next.hooks);
-                            }
                             policy = *next;
                             let mut status = instance.status.lock().unwrap();
-                            status.version = policy.version.clone();
                             status.agents = session.collector.snapshot();
                             drop(status);
                             Ok(instance.snapshot())
                         }
-                        Err(error) => {
-                            let rollback = collector_touched
-                                .then(|| session.collector.apply(&policy))
-                                .transpose();
-                            match rollback {
-                                Ok(_) => Err(format!("{error:#}")),
-                                Err(cause) => Err(format!(
-                                    "{error:#}; restoring collection failed: {cause:#}"
-                                )),
-                            }
-                        }
+                        Err(error) => Err(format!("{error:#}")),
                     }
                 } else {
                     Err("SDK is not running".into())
@@ -822,7 +807,7 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                             != "deployed";
                     if check {
                         next_codex_deployment_check = Instant::now() + Duration::from_secs(1);
-                        if let Err(error) = update_codex_deployment(&instance, &policy, || Ok(())) {
+                        if let Err(error) = update_codex_deployment(&instance, &policy) {
                             session
                                 .queue
                                 .alarm("SDK_CODEX_HOOK_DEPLOY", &error.to_string());

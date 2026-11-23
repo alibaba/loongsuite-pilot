@@ -1961,8 +1961,12 @@ fn codex_management_lists_live_hooks_and_trust_and_clears_after_stop() {
         json!({"hooks":{"Stop":[{"hooks":[foreign]}]}}).to_string(),
     )
     .unwrap();
-    let foreign_trust = "[hooks.state.third_party]\nenabled = false\ntrusted_hash = 'keep'\n";
-    std::fs::write(&trust, foreign_trust).unwrap();
+    let foreign_key = format!("{}:stop:0:0", settings.display());
+    let foreign_trust = format!(
+        "[hooks.state.{}]\nenabled = false\ntrusted_hash = 'keep'\n",
+        serde_json::to_string(&foreign_key).unwrap()
+    );
+    std::fs::write(&trust, &foreign_trust).unwrap();
     let mut host = Host::start_with_init(init.clone(), plan.clone(), Box::default());
     host.ready();
     assert_ne!(host.api().capabilities & CAP_CODEX_HOOK_CONTROL, 0);
@@ -1997,13 +2001,41 @@ fn codex_management_lists_live_hooks_and_trust_and_clears_after_stop() {
     replacement.ready();
     assert_eq!(host.apply(request("clear")).0, BUSY);
     replacement.stop();
-    // Simulate a manual deletion of just the managed Stop command.
     let mut altered: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
-    altered["hooks"]["Stop"]
-        .as_array_mut()
-        .unwrap()
-        .retain(|group| group["hooks"][0] == foreign);
+    altered["hooks"]["Stop"].as_array_mut().unwrap().swap(0, 1);
+    // Another event has a group and handler index but no executable.
+    altered["hooks"]["PreToolUse"][0]["hooks"][0] = json!({});
     std::fs::write(&settings, altered.to_string()).unwrap();
+    let (code, reordered) = host.apply(request("list"));
+    assert_eq!(code, OK);
+    let stop = reordered["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["event"] == "Stop")
+        .unwrap();
+    assert_eq!(stop["group_index"], 0);
+    assert!(stop["trust_key"].is_null());
+    assert!(reordered["trust_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["key"] != foreign_key));
+    let before = std::fs::read_to_string(&trust).unwrap();
+    let owned_stop = records
+        .iter()
+        .find(|r| r["key"].as_str().unwrap().ends_with(":stop:1:0"))
+        .unwrap();
+    let key = owned_stop["key"].as_str().unwrap();
+    let quoted = serde_json::to_string(key).unwrap();
+    let hash = &owned_stop["trusted_hash"];
+    let inline = before.replace(
+        &format!("[hooks.state.{quoted}]\ntrusted_hash = {hash}"),
+        &format!("[hooks.state]\n{quoted} = {{ trusted_hash = {hash} }}"),
+    );
+    assert_ne!(inline, before);
+    std::fs::write(&trust, &inline).unwrap();
+    assert_eq!(host.apply(request("list")).1, reordered);
     let updated = host.apply(request("list")).1;
     assert_eq!(updated["hooks"].as_array().unwrap().len(), 6);
     assert_eq!(updated["trust_records"].as_array().unwrap().len(), 7);
@@ -2109,6 +2141,45 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
             assert_eq!(verdict["decision"], "block");
         }
     }
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
+    let managed_hook = || {
+        let mut child = Command::new(binary)
+            .args([
+                "sdk-hook",
+                "--data-dir",
+                data.to_str().unwrap(),
+                "--agent",
+                "codex",
+                "--channel",
+                "cloud",
+                "--event",
+                "PreToolUse",
+                "--pilot-sdk-managed",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"echo blocked"}}"#)
+            .ok();
+        child.wait_with_output().unwrap()
+    };
+    let journal = data.join("codex-hook-deployment/update-recovery.json");
+    std::fs::write(&journal, "{}").unwrap();
+    let during_commit = managed_hook();
+    assert!(during_commit.status.success() && during_commit.stdout.is_empty());
+    std::fs::remove_file(journal).unwrap();
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
+    // A client can still have the cloud command after the policy changes.
+    let mut local = policy.clone();
+    local["hcd"]["agent_configs"]["codex"]["hook_deployment"]["channel"] = json!("local");
+    assert_eq!(host.apply(local).0, OK);
+    let stale = managed_hook();
+    assert!(stale.status.success() && stale.stdout.is_empty());
     assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
     host.stop();
 

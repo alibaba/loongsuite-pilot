@@ -361,6 +361,28 @@ impl Endpoint {
             {
                 continue;
             }
+            if packet.managed && packet.agent == "codex" {
+                // A client may have cached commands from a rolled-back deployment.
+                let Ok(settings) = self.settings.try_read() else {
+                    continue;
+                };
+                if settings["embedded_codex"] == true {
+                    let Some(channel) = settings["codex_hook_channel"].as_str() else {
+                        continue;
+                    };
+                    let expected = if super::agent_hooks::AgentHook::for_wire_id("codex")
+                        .expect("Codex Hook")
+                        .supports_blocking(&packet.event)
+                    {
+                        channel
+                    } else {
+                        "observe"
+                    };
+                    if self.channel != expected {
+                        continue;
+                    }
+                }
+            }
             seen.retain(|_, prior| prior.received.elapsed() < Duration::from_secs(5));
             if let Some(prior) = seen.get(&packet.id) {
                 // Retransmission is only supported by the paired cloud bin.
