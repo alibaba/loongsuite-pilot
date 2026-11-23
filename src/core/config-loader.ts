@@ -3,7 +3,9 @@ import { validateExcludedWorkspaces } from './workspace-policy.js';
 import {
   DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_ZCODE_HOOK_POLL_INTERVAL_MS,
   globalPollIntervalMs,
+  resolvePollIntervalMs,
 } from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
@@ -1112,6 +1114,10 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    zcodeSourceWaitMs: 2 * Math.max(
+      resolvePollIntervalMs(config.listeners['zcode-hook']?.pollInterval, DEFAULT_ZCODE_HOOK_POLL_INTERVAL_MS),
+      resolvePollIntervalMs(config.listeners['zcode-rollout']?.pollInterval, DEFAULT_POLL_INTERVAL_MS),
+    ),
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),

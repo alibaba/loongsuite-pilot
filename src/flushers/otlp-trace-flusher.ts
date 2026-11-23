@@ -175,6 +175,8 @@ interface TurnBuffer {
   hermesDrainFailures?: number;
   /** A fixed-session cron execution has an explicit outer completion event. */
   isObservedOpenClawCron?: boolean;
+  zcodeStopObserved?: boolean;
+  zcodeRolloutFinish?: 'complete' | 'error';
   /** Native Antigravity tool calls the input has explicitly left open. */
   pendingAntigravityTools?: Set<string>;
   /** Usage already reported while its transcript planner is still missing. */
@@ -757,8 +759,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     process.env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT = 'SPAN_ONLY';
 
     if (cfg.turnIdleTimeoutMs && cfg.turnIdleTimeoutMs > 0) {
-      this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
-      this.idleTimer.unref();
+      this.startIdleTimer();
     }
     if (process.platform === 'linux') {
       this.hermesOwnerTimer = setInterval(() => { void this.recoverAbandonedHermesTurns(); }, HERMES_OWNER_CHECK_INTERVAL_MS);
@@ -916,6 +917,11 @@ export class OtlpTraceFlusher extends BaseFlusher {
     const agentType = normalizeAgentType(
       (entry['gen_ai.agent.type'] as string) ?? '',
     );
+    // Older Stop hooks wrote the same metadata on a session-only ENTRY and
+    // a turn-scoped AGENT. Only the latter can join the rollout. Exporting
+    // the former on its own creates a duplicate root for the same trace.
+    if (agentType === 'zcode' && source !== 'turn_id'
+      && entry['event.name'] === 'other' && entry['gen_ai.span.kind'] === 'entry') return;
     const isAntigravity = resolveAgentSystem(agentType) === 'antigravity';
     const plannerJoined = isAntigravity && entry['agent.antigravity.planner_joined'] === true;
     // A recovered join can outlive the export buffer across a process restart.
@@ -958,7 +964,8 @@ export class OtlpTraceFlusher extends BaseFlusher {
     for (const [bufKey, buf] of this.turnBuffers) {
       // Native Codex task_complete/turn_aborted is authoritative. A second
       // work item in the same thread must not truncate a still-running turn.
-      if (agentType === 'codex' || isDoubaoAgentType(agentType) || continuesAntigravityTurn) break;
+      // ZCode's independent inputs can interleave successive native turns.
+      if (agentType === 'codex' || agentType === 'zcode' || isDoubaoAgentType(agentType) || continuesAntigravityTurn) break;
       if (buf.agentType !== agentType || bufKey === key || buf.completed) continue;
       // Incremental Hermes turns may overlap inside one IM session. They have
       // their own explicit completion, so a successor is not an implicit end.
@@ -1098,7 +1105,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
     // model call carries its own finish reason.
     // 逐条模式下立即 flush；批量模式下（batchDepth>0）仅标记 completed，
     // 由 sendBatch() 在所有 entries append 完后统一 flush。
-    if (this.isTerminalEvent(entry)) {
+    const terminal = agentType === 'zcode' && source === 'turn_id'
+      ? this.observeZCodeCompletion(buf, entry)
+      : this.isTerminalEvent(entry);
+    if (terminal) {
       if (isAntigravity && entry['gen_ai.response.finish_reasons']?.includes('cancelled')) {
         buf.pendingAntigravityTools?.clear();
         buf.pendingAntigravityPlanners?.clear();
@@ -1346,6 +1356,25 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
   // --- Internal ---
 
+  private observeZCodeCompletion(buf: TurnBuffer, entry: AgentActivityEntry): boolean {
+    if (entry['event.name'] === 'other' && entry['gen_ai.span.kind'] === 'agent'
+      && entry['gen_ai.response.finish_reasons']?.length) {
+      buf.zcodeStopObserved = true;
+    } else if (entry['event.name'] === 'llm.request') {
+      buf.zcodeRolloutFinish = undefined;
+    } else if (entry['event.name'] === 'llm.response') {
+      const reasons = entry['gen_ai.response.finish_reasons'];
+      buf.zcodeRolloutFinish = undefined;
+      if (entry['gen_ai.turn.end'] !== false && hasTerminalFinishReason(reasons)) {
+        // A failed model attempt may be followed by a retry that the input
+        // has not polled yet. Only complete model responses close the join.
+        buf.zcodeRolloutFinish = reasons?.includes('error') ? 'error' : 'complete';
+      }
+    }
+    if (!this.idleTimer && (buf.zcodeStopObserved || buf.zcodeRolloutFinish)) this.startIdleTimer();
+    return buf.zcodeStopObserved === true && buf.zcodeRolloutFinish === 'complete';
+  }
+
   private isTerminalEvent(entry: AgentActivityEntry): boolean {
     if (resolveAgentSystem(String(entry['gen_ai.agent.type'] ?? '')) === 'antigravity'
       && entry['gen_ai.turn.end'] !== undefined) return entry['gen_ai.turn.end'];
@@ -1460,6 +1489,10 @@ export class OtlpTraceFlusher extends BaseFlusher {
         return { source: 'turn_id', value: turnId,
           key: `codex:${[entry['user.id'], entry['gen_ai.session.id'], turnId]
             .map(v => typeof v === 'string' ? `${v.length}:${v}` : '0:').join('')}` };
+      }
+      if (agentType === 'zcode') {
+        return { source: 'turn_id', value: turnId,
+          key: `zcode:${JSON.stringify([entry['gen_ai.session.id'], turnId])}` };
       }
       if (resolveAgentSystem(agentType) === 'antigravity') {
         return { source: 'turn_id', value: turnId,
@@ -3027,12 +3060,29 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
   }
 
+  private startIdleTimer(): void {
+    this.idleTimer = setInterval(() => this.tickIdleTimeout(), 1000);
+    this.idleTimer.unref();
+  }
+
   private tickIdleTimeout(): void {
     const timeout = this.cfg.turnIdleTimeoutMs ?? 0;
-    if (timeout <= 0 || this.batchDepth > 0) return;
+    if (this.batchDepth > 0) return;
     const now = Date.now();
     for (const [, buf] of this.turnBuffers) {
-      if (!buf.completed && now - buf.lastActivityMs > timeout) {
+      if (buf.completed) continue;
+      const idleMs = now - buf.lastActivityMs;
+      if (buf.zcodeStopObserved || buf.zcodeRolloutFinish) {
+        // These sources poll independently. Allow the other poll to arrive
+        // before exporting, even when the general idle timeout is disabled.
+        if (idleMs >= (this.cfg.zcodeSourceWaitMs ?? 60_000)) {
+          buf.completed = true;
+          // A Stop envelope or failed attempt can precede late model output.
+          this.triggerFlush(buf, buf.zcodeRolloutFinish === 'complete');
+        }
+        continue;
+      }
+      if (timeout > 0 && idleMs > timeout) {
         if (hasPendingAntigravityData(buf)) continue;
         if (buf.isObservedOpenClawCron) {
           if (!this.warnedOpenClawCronIdleTimeout) {

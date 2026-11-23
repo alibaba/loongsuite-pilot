@@ -615,6 +615,7 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': responseModelId,
       'gen_ai.response.finish_reasons': [finishReason],
+      ...(toolCalls.length > 0 ? { 'gen_ai.turn.end': false } : {}),
       ...(inputTokens !== undefined ? { 'gen_ai.usage.input_tokens': inputTokens } : {}),
       ...(outputTokens !== undefined ? { 'gen_ai.usage.output_tokens': outputTokens } : {}),
       ...(cacheReadTokens !== undefined ? { 'gen_ai.usage.cache_read.input_tokens': cacheReadTokens } : {}),

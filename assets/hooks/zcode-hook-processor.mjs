@@ -159,6 +159,7 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
   const baseFields = {
     trace_id: w3cTraceId,
     'gen_ai.session.id': sessionId,
+    ...(turnId ? { 'gen_ai.turn.id': turnId } : {}),
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
     'user.id': userId || os.hostname(),
@@ -183,7 +184,6 @@ export function buildEnvelopeRecords({ sessionId, turnId, traceId, timestamp, us
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
       ...baseFields,
-      'gen_ai.turn.id': turnId,
       span_id: agentSpanId,
       parent_span_id: entrySpanId,
       'gen_ai.span.kind': 'agent',

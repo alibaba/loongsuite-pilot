@@ -2061,6 +2061,7 @@ export class Orchestrator extends EventEmitter {
     const zcodeHookInput = new ZCodeHookInput({
       stateStore: this.stateStore,
       logDir: zcodeHookLogDir,
+      pollIntervalMs: listenerCfg['zcode-hook']?.pollInterval,
     });
     this.inputManager.registerInput(zcodeHookInput);
     entries.push(
@@ -2085,6 +2086,7 @@ export class Orchestrator extends EventEmitter {
     // flusher handles the "hook didn't fire" fallback (spec §1.2).
     const zcodeRolloutInput = new ZCodeRolloutInput({
       stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['zcode-rollout']?.pollInterval,
     });
     this.inputManager.registerInput(zcodeRolloutInput);
     entries.push(
