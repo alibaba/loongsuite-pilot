@@ -1,6 +1,14 @@
 {
   "id": "codex",
   "displayName": "Codex",
+  "activityIndicator": {
+    "type": "codexRollouts",
+    "home": "~/.codex"
+  },
+  "versionSource": {
+    "type": "command",
+    "command": "codex --version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.codex"],

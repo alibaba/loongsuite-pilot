@@ -1,6 +1,13 @@
 {
   "id": "qoder",
   "displayName": "Qoder",
+  "activityIndicator": "~/.qoder/audit/audit.jsonl",
+  "versionSource": {
+    "type": "newestSubdirFile",
+    "dir": "~/.qoder/logs/runs",
+    "file": "manifest.json",
+    "key": "cli_version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.qoder"],

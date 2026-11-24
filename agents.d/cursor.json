@@ -1,6 +1,12 @@
 {
   "id": "cursor",
   "displayName": "Cursor",
+  "activityIndicator": "~/.cursor/audit/audit.jsonl",
+  "versionSource": {
+    "type": "jsonlTail",
+    "file": "~/.cursor/audit/audit.jsonl",
+    "key": "cursor_version"
+  },
   "deployMode": "hook",
   "detection": {
     "paths": ["~/.cursor"],

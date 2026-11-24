@@ -138,6 +138,7 @@ export interface AnalyticsConfig {
   agents: AgentsConfig;
   mask: MaskConfig;
   hookWatchdog: HookWatchdogConfig;
+  selfCheck?: SelfCheckConfig;
   fileCollection: FileCollectionToggle;
   pipeline: PipelineToggle;
   statusBar: StatusBarConfig;
@@ -414,6 +415,14 @@ export interface HookWatchdogConfig {
   intervalMs: number;
   repairCooldownMs: number;
   tamperProtection: boolean;
+}
+
+export interface SelfCheckConfig {
+  enabled: boolean;
+  intervalMs: number;
+  dataGapThresholdMs: number;
+  neverCollectedGraceMs: number;
+  cooldownMs: number;
 }
 
 export interface PipelineToggle {

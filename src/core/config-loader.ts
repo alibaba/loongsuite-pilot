@@ -16,6 +16,7 @@ import type {
   PipelineToggle,
   FlusherConfig,
   HookWatchdogConfig,
+  SelfCheckConfig,
   LogRetentionConfig,
   MaskConfig,
   MaskReplacementMode,
@@ -149,6 +150,7 @@ export interface ConfigFile {
       enabled?: boolean;
     };
   };
+  selfCheck?: Partial<SelfCheckConfig>;
 
   privacy?: { excludeWorkspaces?: string[] };
   interceptor?: {
@@ -346,6 +348,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     privacy: { excludeWorkspaces: validateExcludedWorkspaces(file?.privacy?.excludeWorkspaces) },
     mask: ensureMaskCoversInterceptor(buildMaskConfig(file), interceptor),
     hookWatchdog: buildHookWatchdogConfig(file),
+    selfCheck: buildSelfCheckConfig(file),
     fileCollection: pipeline,
     pipeline,
     statusBar: buildStatusBarConfig(file),
@@ -354,6 +357,21 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     multimodal: buildMultimodalConfig(file, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
     interceptor,
+  };
+}
+
+function buildSelfCheckConfig(file: ConfigFile | null): SelfCheckConfig {
+  function duration(key: string, value: number | undefined, fallback: number, timer = false): number {
+    const resolved = envInt(`LOONGSUITE_PILOT_SELFCHECK_${key}`, value ?? fallback);
+    return Number.isSafeInteger(resolved) && resolved >= 0 && (!timer || resolved > 0 && resolved <= 2_147_483_647)
+      ? resolved : fallback;
+  }
+  return {
+    enabled: envBool('LOONGSUITE_PILOT_SELFCHECK_ENABLED', file?.selfCheck?.enabled ?? true),
+    intervalMs: duration('INTERVAL_MS', file?.selfCheck?.intervalMs, 600_000, true),
+    dataGapThresholdMs: duration('DATA_GAP_THRESHOLD_MS', file?.selfCheck?.dataGapThresholdMs, 14_400_000),
+    neverCollectedGraceMs: duration('NEVER_COLLECTED_GRACE_MS', file?.selfCheck?.neverCollectedGraceMs, 14_400_000),
+    cooldownMs: duration('COOLDOWN_MS', file?.selfCheck?.cooldownMs, 86_400_000),
   };
 }
 

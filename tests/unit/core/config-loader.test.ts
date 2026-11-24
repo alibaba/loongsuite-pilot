@@ -27,6 +27,25 @@ function clearSlsEnv() {
 }
 
 describe('ConfigLoader', () => {
+  it('preserves self-check defaults and applies valid environment overrides', async () => {
+    const defaults = (await loadConfig()).selfCheck;
+    expect(defaults).toEqual({
+      enabled: true, intervalMs: 600_000, dataGapThresholdMs: 14_400_000,
+      neverCollectedGraceMs: 14_400_000, cooldownMs: 86_400_000,
+    });
+    mockReadJsonFile.mockResolvedValueOnce({ selfCheck: { enabled: true, dataGapThresholdMs: 3000 } });
+    try {
+      vi.stubEnv('LOONGSUITE_PILOT_SELFCHECK_ENABLED', 'false');
+      vi.stubEnv('LOONGSUITE_PILOT_SELFCHECK_INTERVAL_MS', '2147483648');
+      vi.stubEnv('LOONGSUITE_PILOT_SELFCHECK_COOLDOWN_MS', '18000');
+      expect((await loadConfig()).selfCheck).toEqual({
+        ...defaults, enabled: false, dataGapThresholdMs: 3000, cooldownMs: 18000,
+      });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('keeps a collaboration conversation allowlist and fails closed for invalid scopes', async () => {
     mockReadJsonFile.mockResolvedValueOnce({ listeners: {
       'qwen-work-cn-collaboration': { includeConversationIds: [' space-a ', 'space-a', 'space-b'] },
