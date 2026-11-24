@@ -8,13 +8,13 @@ import { HOOK_ASSET_MANIFEST } from '../core/hook-asset-manifest.js';
 import { writeTextFileAtomic } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
 import {
+  claimHookRestoreRequest,
   classifyPath,
-  clearHookRestoreRequest,
   hookUpgradeInProgress,
   installedVersionDir,
   parentIsSymlink,
   readActiveVersionDir,
-  readHookRestoreRequest,
+  settleHookRestoreClaim,
   type HookRestoreRequest,
 } from '../utils/hook-restore-request.js';
 import { extractTarGz, getAsciiTempRoot } from '../utils/win-archive.js';
@@ -38,32 +38,36 @@ export interface HookAssetRepairOptions {
  * This process rechecks the active version and writes the deployed files.
  */
 export async function repairRequestedHookAssets(options: HookAssetRepairOptions): Promise<void> {
-  const request = await readHookRestoreRequest(options.cacheDir);
-  if (!request) return;
-  if (await hookUpgradeInProgress(options.cacheDir)) {
-    logger.info('hook-asset-repair.skipped', { reason: 'upgrade-in-progress' });
-    return;
-  }
+  const claimed = await claimHookRestoreRequest(options.cacheDir);
+  if (!claimed) return;
+  let discard = false;
+  try {
+    if (await hookUpgradeInProgress(options.cacheDir)) {
+      logger.info('hook-asset-repair.skipped', { reason: 'upgrade-in-progress' });
+      return;
+    }
 
-  const active = readActiveVersionDir(options.cacheDir);
-  if (!active) {
-    logger.info('hook-asset-repair.skipped', { reason: 'version-unknown' });
-    return;
-  }
-  if (path.resolve(active) !== path.resolve(request.pilotDir)) {
-    logger.info('hook-asset-repair.skipped', { reason: 'version-moved' });
-    await clearHookRestoreRequest(options.cacheDir);
-    return;
-  }
-  const installed = installedVersionDir(import.meta.url);
-  if (installed && path.resolve(installed) !== path.resolve(active)) {
-    logger.info('hook-asset-repair.skipped', { reason: 'updater-not-active', path: installed });
-    return;
-  }
+    const active = readActiveVersionDir(options.cacheDir);
+    if (!active) {
+      logger.info('hook-asset-repair.skipped', { reason: 'version-unknown' });
+      return;
+    }
+    if (path.resolve(active) !== path.resolve(claimed.request.pilotDir)) {
+      logger.info('hook-asset-repair.skipped', { reason: 'version-moved' });
+      discard = true;
+      return;
+    }
+    const installed = installedVersionDir(import.meta.url);
+    if (installed && path.resolve(installed) !== path.resolve(active)) {
+      logger.info('hook-asset-repair.skipped', { reason: 'updater-not-active', path: installed });
+      return;
+    }
 
-  const expected = options.expected ?? HOOK_ASSET_MANIFEST;
-  const restored = await restoreRequestedPaths(active, options.dataDir, request, expected, options);
-  if (restored) await clearHookRestoreRequest(options.cacheDir);
+    const expected = options.expected ?? HOOK_ASSET_MANIFEST;
+    discard = await restoreRequestedPaths(active, options.dataDir, claimed.request, expected, options);
+  } finally {
+    await settleHookRestoreClaim(options.cacheDir, claimed.claimedPath, discard);
+  }
 }
 
 async function restoreRequestedPaths(

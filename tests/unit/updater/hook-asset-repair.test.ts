@@ -12,7 +12,10 @@ import { resolveHome } from '../../../src/utils/fs-utils.js';
 import { getHookRestoreRequestPath, writeHookRestoreRequest } from '../../../src/utils/hook-restore-request.js';
 import { redownloadCurrentHookAssets, repairRequestedHookAssets } from '../../../src/updater/hook-asset-repair.js';
 
-const stagingOverride = vi.hoisted(() => ({ dir: '' }));
+const stagingOverride = vi.hoisted(() => ({
+  dir: '',
+  duringDeploy: null as null | (() => Promise<void>),
+}));
 
 vi.mock('node:fs/promises', async () => {
   const actual = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
@@ -21,7 +24,15 @@ vi.mock('node:fs/promises', async () => {
     if (stagingOverride.dir) return stagingOverride.dir;
     return makeTemp(prefix, options);
   }) as typeof actual.mkdtemp;
-  return { ...actual, mkdtemp };
+  const chmod = (async (target: string, mode: string | number) => {
+    await actual.chmod(target, mode);
+    if (stagingOverride.duringDeploy && String(target).endsWith('claude-code-loongsuite-pilot-hook.sh')) {
+      const hook = stagingOverride.duringDeploy;
+      stagingOverride.duringDeploy = null;
+      await hook();
+    }
+  }) as typeof actual.chmod;
+  return { ...actual, mkdtemp, chmod };
 });
 
 vi.mock('../../../src/core/hook-asset-manifest.js', () => ({
@@ -46,6 +57,7 @@ describe('hook asset repair', () => {
   });
 
   afterEach(async () => {
+    stagingOverride.duringDeploy = null;
     vi.unstubAllEnvs();
     await cleanupTempDir(tmpDir);
   });
@@ -84,6 +96,25 @@ describe('hook asset repair', () => {
 
     expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
     await expect(fs.readFile(getHookRestoreRequestPath(cacheDir))).rejects.toThrow();
+  });
+
+  it('keeps a request written while the claimed copy is being restored', async () => {
+    const { cacheDir, dataDir, pilotDir } = await install();
+    const deployed = path.join(dataDir, 'hooks', scriptName);
+    await fs.mkdir(path.dirname(deployed), { recursive: true });
+    await fs.writeFile(deployed, 'tampered\n');
+    await request(cacheDir, pilotDir, [scriptName]);
+    stagingOverride.duringDeploy = () => request(cacheDir, pilotDir, ['other.sh']);
+
+    await repairRequestedHookAssets({
+      cacheDir,
+      dataDir,
+      expected: { [scriptName]: hashText(scriptText) },
+    });
+
+    expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
+    expect(JSON.parse(await fs.readFile(getHookRestoreRequestPath(cacheDir), 'utf8')).paths).toEqual(['other.sh']);
+    await expect(fs.stat(path.join(cacheDir, `hook-restore-request.${process.pid}.json`))).rejects.toThrow();
   });
 
   async function deployedRequest(dataDir: string): Promise<{ cacheDir: string; pilotDir: string }> {

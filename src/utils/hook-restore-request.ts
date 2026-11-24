@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
+import { constants as fsConstants, existsSync, readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { writeTextFileAtomic } from './fs-utils.js';
@@ -40,9 +40,61 @@ export async function writeHookRestoreRequest(controlDir: string, request: HookR
   );
 }
 
-export async function readHookRestoreRequest(controlDir: string): Promise<HookRestoreRequest | null> {
+/**
+ * Move the live request aside before repair. The collector keeps writing
+ * hook-restore-request.json, so a later report is a different file.
+ */
+export async function claimHookRestoreRequest(
+  controlDir: string,
+): Promise<{ claimedPath: string; request: HookRestoreRequest } | null> {
+  const claimedPath = path.join(controlDir, `hook-restore-request.${process.pid}.json`);
+  await fs.rm(claimedPath, { force: true });
   try {
-    const text = await fs.readFile(getHookRestoreRequestPath(controlDir), 'utf8');
+    await fs.rename(getHookRestoreRequestPath(controlDir), claimedPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  const request = await readHookRestoreRequestFile(claimedPath);
+  if (!request) {
+    await fs.rm(claimedPath, { force: true });
+    return null;
+  }
+  return { claimedPath, request };
+}
+
+/** Drop the claimed copy, or put it back when the live path is still free. */
+export async function settleHookRestoreClaim(controlDir: string, claimedPath: string, discard: boolean): Promise<void> {
+  if (discard) {
+    await fs.rm(claimedPath, { force: true });
+    return;
+  }
+  const original = getHookRestoreRequestPath(controlDir);
+  try {
+    await fs.link(claimedPath, original);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      await fs.rm(claimedPath, { force: true });
+      return;
+    }
+    if (code === 'ENOENT') return;
+    try {
+      await fs.copyFile(claimedPath, original, fsConstants.COPYFILE_EXCL);
+    } catch (copyErr) {
+      if ((copyErr as NodeJS.ErrnoException).code === 'EEXIST') {
+        await fs.rm(claimedPath, { force: true });
+        return;
+      }
+      throw copyErr;
+    }
+  }
+  await fs.rm(claimedPath, { force: true });
+}
+
+async function readHookRestoreRequestFile(filePath: string): Promise<HookRestoreRequest | null> {
+  try {
+    const text = await fs.readFile(filePath, 'utf8');
     const parsed = JSON.parse(text) as Partial<HookRestoreRequest>;
     if (parsed.schema !== 1 || typeof parsed.pilotDir !== 'string' || !Array.isArray(parsed.paths)) return null;
     const paths = parsed.paths.filter((entry): entry is string => typeof entry === 'string' && safeRelativePath(entry));
@@ -56,10 +108,6 @@ export async function readHookRestoreRequest(controlDir: string): Promise<HookRe
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
     return null;
   }
-}
-
-export async function clearHookRestoreRequest(controlDir: string): Promise<void> {
-  await fs.rm(getHookRestoreRequestPath(controlDir), { force: true });
 }
 
 function safeRelativePath(relativePath: string): boolean {
