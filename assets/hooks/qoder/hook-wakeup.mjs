@@ -167,10 +167,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
     return false;
   }
   const root = qoderWakeupRoot(dataDir, agentId);
-  fs.mkdirSync(root, { recursive: true, mode: 0o700 });
   const key = qoderSourceKey(sessionId, transcriptPath);
-  const directory = path.join(root, key);
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const event = EVENTS.has(payload.hook_event_name) ? payload.hook_event_name : 'Stop';
   const record = {
     schema: 1, key, agentId, sessionId, transcriptPath, event,
@@ -189,10 +186,33 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
     resourceAttributes: collectResourceAttributesFromEnv(process.env, { agentId }),
     spanAttributes: parseSpanAttributesFromEnv(process.env, { agentId, allowInvocationIdentity: true }),
   };
+  if (!publishObservation(root, record)) return false;
+  if (!subagentId) recordUpstreamContextOnce({ agentId, sessionId, dataDir });
+  else {
+    const parentKey = qoderSourceKey(sessionId, canonicalSourcePath(parentPath));
+    if (!fs.existsSync(path.join(root, parentKey, 'source.json'))) {
+      // Index a still-running parent before its Stop arrives. This is discovery,
+      // not a terminal observation, and carries no transcript/tool contents.
+      publishQoderWakeup({ ...payload, agent_id: undefined, agent_transcript_path: undefined,
+        hook_event_name: 'SubagentStart' }, { dataDir, agentId, userIdentity });
+    }
+  }
+  return true;
+}
+
+/** Store an independently verified legacy source without copying Hook context. */
+export function publishLegacyQoderSource(root, source, observedAt) {
+  return publishObservation(root, { ...source, schema: 1, agentId: 'qoder', event: 'SubagentStart',
+    observedSize: 0, observedAt, legacyDiscovery: true, observationId: crypto.randomUUID() });
+}
+
+function publishObservation(root, record) {
   if (Buffer.byteLength(JSON.stringify(record)) > MAX_WAKEUP_BYTES) {
     warnCapacity(root, 'metadata-bytes');
     return false;
   }
+  const directory = path.join(root, record.key);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const descriptor = path.join(directory, 'source.json');
   if (!fs.existsSync(descriptor)) atomicJson(descriptor, record, true);
   const events = path.join(directory, 'events');
@@ -201,9 +221,9 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
   // coalesce; different lifecycle facts/identities retain their own record.
   const context = crypto.createHash('sha256').update(JSON.stringify([
     record.userIdentity, record.desktop, record.cwd, record.spanAttributes, record.resourceAttributes,
-    record.legacyTriggerLine, record.requestSetId,
+    record.legacyTriggerLine, record.requestSetId, ...(record.legacyDiscovery ? ['legacy-discovery'] : []),
   ])).digest('hex').slice(0, 24);
-  const destination = path.join(events, `${record.observedSize}-${event}-${context}.json`);
+  const destination = path.join(events, `${record.observedSize}-${record.event}-${context}.json`);
   const published = withQoderWakeupLock(directory, () => {
     if (!fs.existsSync(destination) && atCapacity(events, MAX_WAKEUPS_PER_SOURCE)) {
       warnCapacity(root, 'context-limit');
@@ -218,18 +238,7 @@ export function publishQoderWakeup(payload, { dataDir, agentId, userIdentity } =
     warnCapacity(root, published.reason ?? 'context-lock');
     return false;
   }
-  if (!published.value) return false;
-  if (!subagentId) recordUpstreamContextOnce({ agentId, sessionId, dataDir });
-  else {
-    const parentKey = qoderSourceKey(sessionId, canonicalSourcePath(parentPath));
-    if (!fs.existsSync(path.join(root, parentKey, 'source.json'))) {
-      // Index a still-running parent before its Stop arrives. This is discovery,
-      // not a terminal observation, and carries no transcript/tool contents.
-      publishQoderWakeup({ ...payload, agent_id: undefined, agent_transcript_path: undefined,
-        hook_event_name: 'SubagentStart' }, { dataDir, agentId, userIdentity });
-    }
-  }
-  return true;
+  return published.value;
 }
 
 export async function readQoderHookPayload() {

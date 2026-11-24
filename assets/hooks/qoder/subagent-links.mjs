@@ -1,6 +1,7 @@
 // Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
 import crypto from 'node:crypto';
+import { qoderSourceKey } from './hook-wakeup.mjs';
 
 export const QODER_DELEGATIONS_KEY = '__qoderDelegations';
 const MAX_DELEGATIONS = 4096;
@@ -35,6 +36,7 @@ export class QoderSubagentLinks {
     this.now = now;
     this.warn = warn;
     this.byCall = new Map();
+    this.legacySources = new Map();
     const saved = state && typeof state === 'object' && !Array.isArray(state) ? state : {};
     for (const [id, link] of Object.entries(saved).slice(-MAX_DELEGATIONS)) {
       if (!link || link.id !== id || !/^[0-9a-f]{32}$/.test(id)
@@ -54,6 +56,11 @@ export class QoderSubagentLinks {
     const matches = this.byCall.get(key) ?? [];
     matches.push(link);
     this.byCall.set(key, matches);
+    if (link.legacySource) {
+      const ids = this.legacySources.get(link.legacySource) ?? new Set();
+      ids.add(link.id);
+      this.legacySources.set(link.legacySource, ids);
+    }
   }
 
   update(link, fields) {
@@ -70,18 +77,63 @@ export class QoderSubagentLinks {
     return matches.length === 1 ? matches[0] : undefined;
   }
 
-  calls(source, row) {
+  calls(source, row, prompt) {
     // IDE and CN have separate source contracts. Only activate this adapter
     // for the international CLI protocol, including hosts of that runtime.
-    if (source.agentId !== 'qoder' || row?.entrypoint !== 'cli' || row.type !== 'assistant') return [];
+    if (source.agentId !== 'qoder' || row?.type !== 'assistant') return [];
+    if (row.entrypoint !== 'cli' && (row.entrypoint !== undefined || !this.legacyParent(source, row, prompt))) return [];
     return blocks(row).filter(block => ['Agent', 'Task'].includes(block?.name) && text(block.id)
       && block.input && typeof block.input === 'object');
   }
 
-  register(source, checkpoint, row) {
+  legacyParent(source, row, prompt) {
+    return !source.subagentId && !source.desktop && prompt?.entrypoint === 'cli'
+      && prompt.sessionId === source.sessionId && !prompt.isSidechain && !prompt.parent_tool_use_id
+      && !prompt.agentId && prompt.businessIdentity?.product !== 'app'
+      && row.sessionId === source.sessionId && !row.isSidechain && !row.agentId
+      && row.businessIdentity?.product !== 'app';
+  }
+
+  hasLegacyParent(key) {
+    return this.legacySources.has(key);
+  }
+
+  legacyCalls(key) {
+    const calls = new Set();
+    for (const id of this.legacySources.get(key) ?? []) {
+      if (this.state[id]) calls.add(this.state[id].callId);
+    }
+    return calls;
+  }
+
+  hasUncollectedLegacyChild(key) {
+    for (const id of this.legacySources.get(key) ?? []) {
+      const link = this.state[id];
+      if (link && !link.childComplete && !link.legacyPeerConflict) return true;
+    }
+    return false;
+  }
+
+  observeLegacyPeer(source, checkpoint, row) {
+    const peerId = text(row?.toolUseResult?.agentId);
+    if (!peerId) return;
+    for (const block of blocks(row)) {
+      if (block.type !== 'tool_result') continue;
+      const link = this.find(source.sessionId, block.tool_use_id, source.sessionId, checkpoint.turnId);
+      if (!link?.legacySource || link.legacyPeerId || link.legacyPeerConflict) continue;
+      if (!link.peerId) this.update(link, { peerId });
+      else if (link.peerId !== peerId) this.update(link, { legacyPeerConflict: true });
+    }
+  }
+
+  bindLegacyPeer(link, peerId) {
+    return link.legacyPeerId ? link : this.update(link, { legacyPeerId: peerId, peerId });
+  }
+
+  register(source, checkpoint, row, prompt) {
     const added = [];
     if (!checkpoint.turnId || !checkpoint.traceContext) return added;
-    for (const block of this.calls(source, row)) {
+    for (const block of this.calls(source, row, prompt)) {
       const id = qoderDigest(['qoder-delegation', source.sessionId,
         source.subagentId ?? source.sessionId, checkpoint.turnId, block.id]).slice(0, 32);
       if (this.state[id]) {
@@ -96,12 +148,19 @@ export class QoderSubagentLinks {
         const key = callKey(finished.sessionId, finished.callId);
         const matches = this.byCall.get(key).filter(link => link.id !== finished.id);
         if (matches.length) this.byCall.set(key, matches); else this.byCall.delete(key);
+        if (finished.legacySource) {
+          const ids = this.legacySources.get(finished.legacySource);
+          ids?.delete(finished.id);
+          if (!ids?.size) this.legacySources.delete(finished.legacySource);
+        }
         this.size--;
       }
       const link = { id, sessionId: source.sessionId, agentId: source.subagentId ?? source.sessionId,
         turnId: checkpoint.turnId, callId: block.id, toolName: block.name, traceId: checkpoint.traceContext.traceId,
         spanId: qoderDigest(['qoder-tool', source.sessionId, checkpoint.turnId, block.id]).slice(0, 16),
-        ...(text(block.input.subagent_type) ? { peerName: block.input.subagent_type } : {}), at: this.now };
+        ...(text(block.input.subagent_type) ? { peerName: block.input.subagent_type } : {}),
+        ...(this.legacyParent(source, row, prompt)
+          ? { legacySource: qoderSourceKey(source.sessionId, source.transcriptPath) } : {}), at: this.now };
       this.state = { ...this.state, [id]: link };
       this.size++;
       this.index(link);
@@ -136,14 +195,20 @@ export class QoderSubagentLinks {
       this.update(this.state[incoming.id], { childComplete: true });
     }
     const results = new Map();
+    const conflictingResults = new Set();
     for (const row of rows) {
       for (const block of blocks(row)) {
         if (block.type !== 'tool_result') continue;
-        results.set(block.tool_use_id, row.toolUseResult);
         const link = this.find(source.sessionId, block.tool_use_id, source.subagentId ?? source.sessionId, checkpoint.turnId);
-        if (link && text(row.toolUseResult?.agentId) && link.peerId !== row.toolUseResult.agentId) {
-          this.update(link, { peerId: row.toolUseResult.agentId });
+        const peerId = text(row.toolUseResult?.agentId);
+        if (link?.legacyPeerId && peerId && peerId !== link.legacyPeerId) {
+          // Keep the verified peer after binding. This native result still
+          // belongs to the parent tool, but cannot finish the bound child.
+          conflictingResults.add(block.tool_use_id);
+          continue;
         }
+        results.set(block.tool_use_id, row.toolUseResult);
+        if (link && peerId && link.peerId !== peerId) this.update(link, { peerId });
       }
     }
     for (const record of records) {
@@ -177,8 +242,9 @@ export class QoderSubagentLinks {
       if (name !== 'tool.call' && name !== 'tool.result') continue;
       const link = this.find(source.sessionId, record['gen_ai.tool.call.id'], source.subagentId ?? source.sessionId, checkpoint.turnId);
       if (!link || link.turnId !== checkpoint.turnId) continue;
+      if (name === 'tool.result' && conflictingResults.has(link.callId)) continue;
       const result = results.get(link.callId);
-      const peerId = text(result?.agentId);
+      const peerId = link.legacyPeerId ?? text(result?.agentId);
       if (peerId) record['gen_ai.agent.peer.id'] = peerId;
       const event = { ...record, 'event.id': qoderDigest([link.id, name === 'tool.call' ? 'invoke' : 'result']),
         'event.name': name === 'tool.call' ? 'gen_ai.agent.invoke' : 'gen_ai.agent.result',

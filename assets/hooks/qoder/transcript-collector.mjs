@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import fs from 'node:fs/promises';
-import { constants, statSync, unlinkSync } from 'node:fs';
+import { constants, statSync, unlinkSync, watch } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -11,7 +11,9 @@ import {
   hasQoderCnTerminalMarker,
 } from '../qoder-hook-processor.mjs';
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
-import { qoderWakeupRoot, qoderSourceKey, canonicalSourcePath, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
+import { qoderWakeupRoot, qoderSourceKey, canonicalSourcePath, MAX_WAKEUP_BYTES, withQoderWakeupLock,
+  publishLegacyQoderSource } from './hook-wakeup.mjs';
+import { LegacyTaskDescriptor } from './legacy-task-descriptor.mjs';
 import { QoderSubagentLinks, QODER_DELEGATIONS_KEY, qoderTurnId, qoderDigest, qoderTaskNotification } from './subagent-links.mjs';
 
 // Native background delivery starts a model turn without a new human prompt.
@@ -48,11 +50,36 @@ const noticeVersion = (value, stat) => typeof value.observationId === 'string' &
 const noticeName = name => /^\d+-(?:SessionStart|UserPromptSubmit|PreToolUse|PostToolUse|Stop|SessionEnd|SubagentStart|SubagentStop)-[a-f0-9]{24}\.json$/.test(name);
 const MAX_PRIORITY_SOURCES = 128;
 const PRIORITY_SOURCES_PER_CYCLE = 8;
+const LEGACY_RETRIES_PER_CYCLE = 8;
+const MAX_LEGACY_PROOF_RETRIES = MAX_SOURCES_PER_CYCLE + PRIORITY_SOURCES_PER_CYCLE;
+const LEGACY_DIRECTORIES_PER_CYCLE = 8;
+const LEGACY_DIRECTORY_ENTRIES_PER_CYCLE = 256;
+const MAX_LEGACY_TASK_METADATA_BYTES = 128 * 1024;
+const LEGACY_METADATA_BYTES_PER_CYCLE = 512 * 1024;
+const MAX_LEGACY_REVISION_WITNESSES = 1024;
+const legacyDescriptorName = name => /^task-[a-zA-Z0-9_-]+\.json$/.test(name);
+const LEGACY_PROOF_DEFERRED = Symbol('legacy-proof-deferred');
+const LEGACY_DESCRIPTOR_CHANGED = Symbol('legacy-descriptor-changed');
+const legacyAgentId = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{1,512}$/.test(value);
+const isInsideDirectory = (directory, file) => {
+  const relative = path.relative(directory, file);
+  return Boolean(relative) && relative !== '..' && !relative.startsWith('..' + path.sep) && !path.isAbsolute(relative);
+};
 
-async function openRegular(file) {
+function legacyDelegatedPrompt(source, prompt) {
+  return source.agentId === 'qoder' && source.subagentId && !source.desktop && prompt?.entrypoint === 'cli'
+    && prompt.isSidechain === true && !Object.hasOwn(prompt, 'isDelegatedTask')
+    && prompt.sessionId === source.sessionId && prompt.agentId === source.subagentId
+    && typeof prompt.parent_tool_use_id === 'string' && prompt.parent_tool_use_id.length > 0
+    && (!prompt.parent_agent_id || prompt.parent_agent_id === source.sessionId)
+    && prompt.businessIdentity?.product !== 'app';
+}
+
+async function openRegular(file, noFollow = false) {
   // A file can become a FIFO between the path stat and open. O_NONBLOCK makes
   // that open return so fstat can reject it instead of stranding the Input.
-  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0)
+    | (noFollow ? constants.O_NOFOLLOW ?? 0 : 0));
   try {
     if (!(await handle.stat()).isFile()) throw new Error('not-regular-file');
     return handle;
@@ -67,7 +94,7 @@ async function jsonSnapshot(file, limit = MAX_WAKEUP_BYTES) {
     const buffer = Buffer.alloc(limit + 1);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     if (bytesRead > limit) throw new Error('Qoder metadata grew past limit');
-    return { value: JSON.parse(buffer.toString('utf8', 0, bytesRead)), stat };
+    return { value: JSON.parse(buffer.toString('utf8', 0, bytesRead)), stat, bytesRead };
   } finally { await handle.close(); }
 }
 
@@ -131,12 +158,16 @@ export class QoderTranscriptCollector {
     this.deferredSources = new Map();
     this.legacyOwners = new Map();
     this.legacyPending = new Set();
+    this.legacyDescriptorContinuation = null;
+    this.legacyFirstPrompts = new Map();
     this.legacyInspections = new Map();
     this.legacyInspectionSequence = 0;
     this.promptInspections = new Map();
     this.promptInspectionSequence = 0;
     this.discovery = null;
     this.pendingSources = [];
+    this.legacyProofRetries = new Map();
+    this.nextSourceLane = 0;
     this.prioritySources = new Map();
     this.parentAttempts = new Map();
     this.parentOwners = new Map();
@@ -158,10 +189,13 @@ export class QoderTranscriptCollector {
     this.tailScans.clear(); this.deferredSources.clear();
     this.legacyOwners.clear();
     this.legacyPending.clear(); this.legacyInspections.clear();
+    this.discardLegacyDescriptorContinuation();
+    this.legacyFirstPrompts.clear();
     this.promptInspections.clear();
     const directory = this.discovery;
     this.discovery = null;
     this.pendingSources = [];
+    this.legacyProofRetries.clear();
     this.prioritySources.clear();
     this.parentAttempts.clear();
     this.parentOwners.clear(); this.parentProbes.clear();
@@ -290,14 +324,14 @@ export class QoderTranscriptCollector {
     return this.inFlight;
   }
 
-  async sources() {
+  async sources(limit) {
     // Keep a directory cursor across cycles. Historical sessions do not impose
     // a lifetime admission limit or an unbounded readdir/all-source stat walk.
-    if (this.pendingSources.length) return this.pendingSources;
+    if (this.pendingSources.length) return this.pendingSources.slice(0, limit);
     try {
       if (!this.discovery) this.discovery = await fs.opendir(this.root);
       this.discoveryStartedAt ??= this.now();
-      for (let count = 0; count < MAX_SOURCES_PER_CYCLE; count++) {
+      for (let count = 0; count < limit; count++) {
         const entry = await this.discovery.read();
         if (!entry) {
           await this.discovery.close(); this.discovery = null; this.discoveryComplete = true; break;
@@ -310,6 +344,23 @@ export class QoderTranscriptCollector {
       if (error.code !== 'ENOENT' && !this.stopped) throw error;
     }
     return this.pendingSources;
+  }
+
+  legacyRetrySources() {
+    const active = this.legacyProofRetries.get(this.legacyDescriptorContinuation?.entryKey);
+    const queued = [...this.legacyProofRetries.values()].filter(entry => entry !== active);
+    if (active) queued.unshift(active);
+    return queued.slice(0, LEGACY_RETRIES_PER_CYCLE);
+  }
+
+  rememberLegacyProofRetry(entry) {
+    if (this.legacyProofRetries.size >= MAX_LEGACY_PROOF_RETRIES) {
+      // Ordinary directory rotation will rediscover overflow; keep the one
+      // entry that owns an open directory proof so it can continue next poll.
+      if (entry.name !== this.legacyDescriptorContinuation?.entryKey) return;
+      this.legacyProofRetries.delete(this.legacyProofRetries.keys().next().value);
+    }
+    this.legacyProofRetries.set(entry.name, entry);
   }
 
   async metadataFor(directory) {
@@ -332,6 +383,295 @@ export class QoderTranscriptCollector {
     return value;
   }
 
+  deferLegacyProof() {
+    this.legacyProofDeferred = true;
+    return LEGACY_PROOF_DEFERRED;
+  }
+
+  discardLegacyDescriptorContinuation(scan = this.legacyDescriptorContinuation) {
+    if (this.legacyDescriptorContinuation === scan) this.legacyDescriptorContinuation = null;
+    scan?.watcher?.close();
+    if (scan) scan.watcher = null;
+    if (!scan?.handle) return;
+    const handle = scan.handle;
+    scan.handle = null;
+    void handle.close().catch(() => {});
+  }
+
+  watchLegacyDescriptorRevisions(scan, directory) {
+    try {
+      scan.watcher = watch(directory, { persistent: false }, (_event, filename) => {
+        if (!filename || legacyDescriptorName(filename)) scan.revisionChanged = true;
+      });
+      scan.watcher.on('error', () => { scan.watcherFailed = true; });
+    } catch { scan.watcherFailed = true; }
+  }
+
+  async readLegacyDescriptor(scan, file, observed) {
+    const version = fileVersion(observed);
+    const reader = scan.descriptor ?? {
+      version, offset: 0, parser: new LegacyTaskDescriptor(Math.min(MAX_LEGACY_TASK_METADATA_BYTES, observed.size)),
+    };
+    if (reader.version !== version) return LEGACY_DESCRIPTOR_CHANGED;
+    const handle = await openRegular(file, true);
+    try {
+      if (fileVersion(await handle.stat()) !== version) return LEGACY_DESCRIPTOR_CHANGED;
+      while (!this.stopped && reader.offset < observed.size && this.legacyMetadataBudget > 0) {
+        const length = Math.min(CHUNK_BYTES, observed.size - reader.offset, this.legacyMetadataBudget);
+        const buffer = Buffer.allocUnsafe(length);
+        const { bytesRead } = await handle.read(buffer, 0, length, reader.offset);
+        this.legacyMetadataBudget -= bytesRead;
+        if (!bytesRead) return LEGACY_DESCRIPTOR_CHANGED;
+        reader.parser.write(buffer.subarray(0, bytesRead));
+        reader.offset += bytesRead;
+      }
+      if (fileVersion(await handle.stat()) !== version || fileVersion(await fs.lstat(file)) !== version) return LEGACY_DESCRIPTOR_CHANGED;
+    } finally { await handle.close(); }
+    if (reader.offset < observed.size) {
+      scan.descriptor = reader;
+      return;
+    }
+    scan.descriptor = undefined;
+    return { task: reader.parser.finish(), version };
+  }
+
+  async legacyDescriptors(parentPath, sessionId) {
+    const scope = qoderSourceKey(sessionId, parentPath);
+    const cached = this.legacyTasks.get(scope);
+    if (cached === LEGACY_PROOF_DEFERRED) return this.deferLegacyProof();
+    if (cached) return cached;
+    let scan = this.legacyDescriptorContinuation;
+    // A single suspended scan retains only calls in the bounded delegation
+    // index. Directory entries and bytes are charged across all scopes this cycle.
+    if (this.legacyDirectoryBudget <= 0 || this.legacyEntryBudget <= 0
+      || (scan && scan.scope !== scope)) return this.deferLegacyProof();
+    this.legacyDirectoryBudget--;
+    const result = [];
+    this.legacyTasks.set(scope, result);
+    const directory = path.join(path.dirname(parentPath), path.basename(parentPath, '.jsonl'), 'subagents');
+    let retainScan = false;
+    const retry = () => {
+      this.legacyTasks.set(scope, LEGACY_PROOF_DEFERRED);
+      return this.deferLegacyProof();
+    };
+    try {
+      if (await fs.realpath(directory) !== directory) return result;
+      const stat = await fs.lstat(directory);
+      if (!stat.isDirectory()) return result;
+      const version = fileVersion(stat);
+      if (scan) {
+        if (scan.version !== version || scan.revisionChanged) return retry();
+      } else {
+        const handle = await fs.opendir(directory);
+        if (this.stopped) { await handle.close(); return result; }
+        scan = { scope, version, handle, entryKey: this.legacyDescriptorEntry,
+          eligibleCalls: this.links?.legacyCalls(scope) ?? new Set(), candidates: new Map(),
+          fingerprintKey: crypto.randomBytes(32), fingerprint: 0n, count: 0 };
+        this.legacyDescriptorContinuation = scan;
+      }
+      while (!this.stopped) {
+        if (!scan.entry && this.legacyEntryBudget > 0) {
+          scan.entry = await scan.handle.read();
+          if (scan.entry) this.legacyEntryBudget--;
+          else {
+            if (fileVersion(await fs.lstat(directory)) !== version || await fs.realpath(directory) !== directory) return retry();
+            if (scan.verification) {
+              if (scan.fingerprint !== scan.verification.fingerprint || scan.count !== scan.verification.count) return retry();
+              const { revisions } = scan.verification;
+              if (scan.count > revisions.size && scan.watcherFailed) {
+                // Larger inventories also need the change feed to cover
+                // descriptor revisions beyond the in-memory witnesses.
+                this.report(scope, 'legacy-subagent-descriptor-watch-unavailable');
+                return result;
+              }
+              if (revisions.size > this.legacyRevisionBudget) break;
+              // The verification pass may also span polls. Recheck its
+              // oldest named witnesses before returning any collected claims.
+              this.legacyRevisionBudget -= revisions.size;
+              for (const [name, observed] of revisions) {
+                if (fileVersion(await fs.lstat(path.join(directory, name))) !== observed) return retry();
+              }
+              if (fileVersion(await fs.lstat(directory)) !== version || await fs.realpath(directory) !== directory
+                || scan.revisionChanged) return retry();
+              result.push(...this.verifiedLegacyClaims(scan, parentPath, sessionId));
+              return result;
+            }
+            if (!scan.candidates.size) return result;
+            // Revisit every claim, including older descriptors outside the
+            // live parent index that may still conflict with a live candidate.
+            scan.verification = { fingerprint: scan.fingerprint, count: scan.count,
+              calls: new Map(), agents: new Map(), paths: new Map(), revisions: new Map() };
+            if (scan.count > MAX_LEGACY_REVISION_WITNESSES) this.watchLegacyDescriptorRevisions(scan, directory);
+            for (const claim of scan.candidates.values()) {
+              scan.verification.calls.set(claim.callId, 0);
+              scan.verification.agents.set(claim.agentId, 0);
+              scan.verification.paths.set(claim.transcriptPath, 0);
+            }
+            scan.fingerprint = 0n;
+            scan.count = 0;
+            const handle = scan.handle;
+            scan.handle = null;
+            await handle.close();
+            if (this.stopped) return result;
+            scan.handle = await fs.opendir(directory);
+            continue;
+          }
+        }
+        if (!scan.entry) break;
+        const { name } = scan.entry;
+        if (!legacyDescriptorName(name)) { scan.entry = null; continue; }
+        if (this.legacyMetadataBudget <= 0) break;
+        const file = path.join(directory, name);
+        const observed = await fs.lstat(file);
+        if (!observed.isFile()) throw new Error('invalid-legacy-descriptor');
+        const descriptor = await this.readLegacyDescriptor(scan, file, observed);
+        if (descriptor === LEGACY_DESCRIPTOR_CHANGED) return retry();
+        if (!descriptor) break;
+        const { task, version: descriptorVersion } = descriptor;
+        // A count and a keyed, order-independent digest recheck in-place
+        // rewrites without retaining older descriptor names or contents.
+        const identity = crypto.createHmac('sha256', scan.fingerprintKey)
+          .update(JSON.stringify([name, descriptorVersion])).digest('hex');
+        scan.fingerprint ^= BigInt('0x' + identity);
+        scan.count++;
+        scan.entry = null;
+        if (scan.verification && scan.count <= MAX_LEGACY_REVISION_WITNESSES) scan.verification.revisions.set(name, descriptorVersion);
+        const agentId = task?.agentId;
+        const callId = task?.parentToolUseId;
+        if (task?.sessionId !== sessionId || !legacyAgentId(agentId) || typeof callId !== 'string'
+          || !callId || callId.length > 512 || `task-${task.taskId}.json` !== name) continue;
+        const transcriptPath = typeof task.transcriptPath === 'string' && path.isAbsolute(task.transcriptPath)
+          ? path.resolve(task.transcriptPath) : undefined;
+        if (scan.verification) {
+          const { calls, agents, paths } = scan.verification;
+          if (calls.has(callId)) calls.set(callId, calls.get(callId) + 1);
+          if (agents.has(agentId)) agents.set(agentId, agents.get(agentId) + 1);
+          if (paths.has(transcriptPath)) paths.set(transcriptPath, paths.get(transcriptPath) + 1);
+          const candidate = scan.candidates.get(callId);
+          if (candidate?.agentId === agentId && candidate.transcriptPath === transcriptPath) {
+            try { candidate.available = await fs.realpath(transcriptPath) === transcriptPath && (await fs.lstat(transcriptPath)).isFile(); }
+            catch (error) { if (error.code !== 'ENOENT') throw error; }
+          }
+        } else if (scan.eligibleCalls.has(callId) && transcriptPath?.length <= 32_767 && transcriptPath === task.transcriptPath
+          && transcriptPath.endsWith('.jsonl') && isInsideDirectory(directory, transcriptPath)) {
+          scan.candidates.set(callId, { callId, agentId, transcriptPath });
+        }
+      }
+      if (!this.stopped) {
+        scan.entryKey = this.legacyDescriptorEntry;
+        retainScan = true;
+        return retry();
+      }
+    } catch (error) {
+      // An unreadable descriptor might be a competing claim. Keep the
+      // existing source untouched while waiting for a readable inventory.
+      if (error.code !== 'ENOENT') this.report(scope, 'legacy-subagent-descriptor-unreadable');
+      result.length = 0;
+    } finally {
+      if (!retainScan && scan?.scope === scope) this.discardLegacyDescriptorContinuation(scan);
+    }
+    return result;
+  }
+
+  verifiedLegacyClaims(scan, parentPath, sessionId) {
+    const result = [];
+    const { calls, agents, paths } = scan.verification;
+    for (const { callId, agentId, transcriptPath, available } of scan.candidates.values()) {
+      if (!available || calls.get(callId) !== 1 || agents.get(agentId) !== 1 || paths.get(transcriptPath) !== 1) continue;
+      result.push({ key: qoderSourceKey(sessionId, transcriptPath), agentId: 'qoder', sessionId,
+        transcriptPath, parentTranscriptPath: parentPath, subagentId: agentId, callId });
+    }
+    return result;
+  }
+
+  async firstLegacyPrompt(source) {
+    const file = source.transcriptPath;
+    try {
+      if (await fs.realpath(file) !== file) return;
+      const stat = await fs.lstat(file);
+      if (!stat.isFile()) return;
+      const version = fileVersion(stat);
+      let probe = this.legacyFirstPrompts.get(source.key);
+      if (probe?.version !== version) probe = { version, offset: 0, beforeScan: probe?.beforeScan };
+      this.legacyFirstPrompts.delete(source.key);
+      if (this.legacyFirstPrompts.size >= MAX_TAIL_SCANS) this.legacyFirstPrompts.delete(this.legacyFirstPrompts.keys().next().value);
+      this.legacyFirstPrompts.set(source.key, probe);
+      if (probe.done) return probe.first;
+      if (this.remainingBytes <= 0) return this.deferLegacyProof();
+      for await (const line of this.lines(file, probe.offset, stat.size, { checkpoint: probe, legacyPrefix: true })) {
+        probe.offset = line.end;
+        if (line.quarantine) {
+          this.report(source.key, `legacy-first-prompt-${line.quarantine}`);
+          probe.done = true;
+          break;
+        }
+        if (isRealUserPrompt(line.row)) {
+          if (legacyDelegatedPrompt(source, line.row)) probe.first = {
+            start: line.start, inode: stat.ino, callId: line.row.parent_tool_use_id, uuid: line.row.uuid };
+          probe.done = true;
+          break;
+        }
+      }
+      if (fileVersion(await fs.lstat(file)) !== version) {
+        this.legacyFirstPrompts.delete(source.key);
+        return this.deferLegacyProof();
+      }
+      if (!probe.done && probe.offset < stat.size) {
+        // A budget-limited prefix resumes every poll. A stable partial final
+        // row only needs another attempt when the source grows or is rewritten.
+        if (probe.pendingLine?.position < stat.size || this.remainingBytes <= 0) return this.deferLegacyProof();
+        return LEGACY_PROOF_DEFERRED;
+      }
+      return probe.first;
+    } catch (error) {
+      this.legacyFirstPrompts.delete(source.key);
+      if (error.code !== 'ENOENT') this.report(source.key, 'legacy-first-prompt-unreadable');
+    }
+  }
+
+  async verifyLegacySource(source, expectedCall) {
+    if (!source.subagentId || typeof source.parentTranscriptPath !== 'string'
+      || !path.isAbsolute(source.parentTranscriptPath)) return;
+    const parentKey = qoderSourceKey(source.sessionId, source.parentTranscriptPath);
+    if (!this.links.hasLegacyParent(parentKey)) return;
+    const claims = await this.legacyDescriptors(source.parentTranscriptPath, source.sessionId);
+    if (claims === LEGACY_PROOF_DEFERRED) return claims;
+    const childKey = qoderSourceKey(source.sessionId, source.transcriptPath);
+    const claim = claims.find(task => task.key === childKey && task.subagentId === source.subagentId);
+    if (!claim || (expectedCall && claim.callId !== expectedCall)) return;
+    return this.verifyLegacyClaim(source, parentKey, claim.callId);
+  }
+
+  async verifyLegacyClaim(source, parentKey, callId) {
+    const link = this.links.find(source.sessionId, callId, source.sessionId);
+    if (link?.legacySource !== parentKey || link.legacyPeerConflict) return;
+    const peerId = link.legacyPeerId ?? link.peerId;
+    if (peerId && peerId !== source.subagentId) return;
+    const first = await this.firstLegacyPrompt(source);
+    if (first === LEGACY_PROOF_DEFERRED) return first;
+    if (first?.callId === callId) return { first, link };
+  }
+
+  async discoverLegacySubagents(parent) {
+    const claims = await this.legacyDescriptors(parent.transcriptPath, parent.sessionId);
+    if (claims === LEGACY_PROOF_DEFERRED) return;
+    for (const { callId, ...source } of claims) {
+      if (this.remainingBytes <= 0) { this.deferLegacyProof(); break; }
+      const directory = path.join(this.root, source.key, 'events');
+      try { await fs.access(directory); continue; } catch (error) { if (error.code !== 'ENOENT') continue; }
+      const proof = await this.verifyLegacyClaim(source, parent.key, callId);
+      if (!proof || proof === LEGACY_PROOF_DEFERRED) continue;
+      try {
+        const subagentName = proof.link.peerName;
+        if (publishLegacyQoderSource(this.root, { ...source, inode: proof.first.inode,
+          ...(subagentName ? { subagentName } : {}) }, this.now())
+          && this.prioritySources.size < MAX_PRIORITY_SOURCES) {
+          this.prioritySources.set(source.key, { name: source.key });
+        }
+      } catch (error) { this.report(source.key, error.code ?? error.message); }
+    }
+  }
+
   async collectOnce(state) {
     const next = { ...state };
     this.links = new QoderSubagentLinks(state[QODER_DELEGATIONS_KEY], this.now(), (key, reason) => this.report(key, reason));
@@ -339,12 +679,12 @@ export class QoderTranscriptCollector {
     let changed = false;
     this.metrics = { bytesRead: 0, recordsParsed: 0, sourceFilesOpened: 0, peakCachedBytes: this.cacheSize };
     this.remainingBytes = this.scanBytes;
+    this.legacyTasks = new Map();
+    this.legacyEntryBudget = LEGACY_DIRECTORY_ENTRIES_PER_CYCLE;
+    this.legacyRevisionBudget = MAX_LEGACY_REVISION_WITNESSES;
+    this.legacyDirectoryBudget = LEGACY_DIRECTORIES_PER_CYCLE;
+    this.legacyMetadataBudget = LEGACY_METADATA_BYTES_PER_CYCLE;
     this.parentProbeBudget = 1;
-    // Seed only the bounded scheduler queues; ordinary discovery adds pending
-    // requests as it visits them. Do not walk/copy all historical checkpoints.
-    this.parentRequests = new Map([...new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name)])]
-      .filter(key => state[key]?.parentPendingCall && state[key].parentPendingSessionId)
-      .map(key => [key, { sessionId: state[key].parentPendingSessionId, callId: state[key].parentPendingCall, parentAgentId: state[key].parentPendingAgent }]));
     this.ownerInspectionBudget = 1;
     this.promptInspectionBudget = 1;
     if (this.stopped) return { records, state: next, metrics: this.metrics, changed };
@@ -352,11 +692,27 @@ export class QoderTranscriptCollector {
       const capacity = await smallJson(path.join(this.root, '..', 'capacity.json'));
       if (capacity.observedAt > this.now() - 60_000) this.report('wakeup', capacity.reason);
     } catch {}
-    let entries = await this.sources();
     const priority = [...this.prioritySources.values()].slice(0, PRIORITY_SOURCES_PER_CYCLE);
     const priorityKeys = new Set(priority.map(entry => entry.name));
-    for (const key of priorityKeys) this.prioritySources.delete(key);
-    if (priority.length) entries = [...priority, ...entries.filter(entry => !priorityKeys.has(entry.name))];
+    const retries = this.legacyRetrySources();
+    // Retrying changing legacy descriptors must not hold the wakeup directory
+    // cursor. Reserve room for new sources under the same per-poll limit.
+    const ordinary = await this.sources(MAX_SOURCES_PER_CYCLE - retries.length);
+    const lanes = [priority, retries, ordinary];
+    const contended = ordinary.length > 0 && (retries.length > 0 || priority.length > 0);
+    const firstLane = contended ? this.nextSourceLane : 0;
+    if (contended) this.nextSourceLane = (firstLane + 1) % lanes.length;
+    // A source may spend the whole transcript byte or record budget in one
+    // visit. Rotate which queue starts with the full budget under contention
+    // so priority parent discovery and legacy scan retries leave room for new work.
+    const scheduled = [...lanes.slice(firstLane), ...lanes.slice(0, firstLane)].flat();
+    const entries = [...new Map(scheduled.map(entry => [entry.name, entry])).values()];
+    // Seed only bounded scheduler queues; do not walk all historical checkpoints.
+    const queuedKeys = new Set([...this.prioritySources.keys(), ...this.pendingSources.map(entry => entry.name),
+      ...entries.map(entry => entry.name)]);
+    this.parentRequests = new Map([...queuedKeys]
+      .filter(key => state[key]?.parentPendingCall && state[key].parentPendingSessionId)
+      .map(key => [key, { sessionId: state[key].parentPendingSessionId, callId: state[key].parentPendingCall, parentAgentId: state[key].parentPendingAgent }]));
     if (!entries.length) { this.finishDiscovery(); return { records, state: next, metrics: this.metrics, changed }; }
     // One unavailable owner must not consume every cycle's shared DB budget.
     // Choose fairly from this bounded discovery batch, even if that source's
@@ -369,14 +725,18 @@ export class QoderTranscriptCollector {
       .reduce((chosen, entry) => !chosen || (this.legacyInspections.get(entry.name) ?? 0)
         < (this.legacyInspections.get(chosen) ?? 0) ? entry.name : chosen, null);
     if (this.legacyChosenKey) this.rememberLegacyInspection(this.legacyChosenKey);
-    let visited = 0;
+    const visited = new Set();
     for (const entry of entries) {
       if (this.stopped || this.remainingBytes <= 0 || records.length >= 4096) break;
-      visited++;
       const key = entry.name;
+      visited.add(key);
+      this.legacyProofRetries.delete(key);
       if (priorityKeys.has(key)) {
+        this.prioritySources.delete(key);
         this.parentAttempts.delete(key);
       }
+      this.legacyDescriptorEntry = key;
+      this.legacyProofDeferred = false;
       const directory = path.join(this.root, key);
       let source;
       let observedContexts;
@@ -407,8 +767,23 @@ export class QoderTranscriptCollector {
         this.deferredSources.delete(key);
         if (await this.legacyWorkerAlive(source.transcriptPath, key)) continue;
         if (source.suppliedPath && source.suppliedPath !== source.transcriptPath && await this.legacyWorkerAlive(source.suppliedPath, key)) continue;
-        const contexts = observedContexts.filter(context => context.inode === undefined || context.inode === stat.ino);
+        let contexts = observedContexts.filter(context => context.inode === undefined || context.inode === stat.ino);
+        if (contexts.some(context => context.legacyDiscovery !== true)) {
+          contexts = contexts.filter(context => !context.legacyDiscovery);
+        } else if (source.legacyDiscovery) {
+          // A fully committed, unchanged child cannot emit anything else.
+          // Fresh bytes or a replaced transcript still need a new proof.
+          if (old?.committedOffset === stat.size && old.offset === stat.size && old.activeStart === null
+            && old.inode === stat.ino && old.fileMtime === stat.mtimeMs && old.fileCtime === stat.ctimeMs) continue;
+          const proof = await this.verifyLegacySource(source);
+          if (!proof || proof === LEGACY_PROOF_DEFERRED) continue;
+        }
         if (!contexts.length) continue; // Replacement has not been observed by a Hook yet.
+        if (this.legacyFirstPrompts.get(key)?.beforeScan) {
+          if (await this.firstLegacyPrompt(source) === LEGACY_PROOF_DEFERRED) continue;
+          const probe = this.legacyFirstPrompts.get(key);
+          if (probe) delete probe.beforeScan;
+        }
         const rewritten = checkpoint?.fingerprint && (checkpoint.fileMtime !== stat.mtimeMs || checkpoint.fileCtime !== stat.ctimeMs)
           && !await this.matchesFingerprint(source.transcriptPath, checkpoint);
         if (!checkpoint || checkpoint.inode !== stat.ino || stat.size < checkpoint.offset || rewritten) {
@@ -451,6 +826,9 @@ export class QoderTranscriptCollector {
         records.push(...batch);
         if (priorityKeys.has(key) && checkpoint.offset >= stat.size) this.markParentAttempt(key);
         next[key] = checkpoint;
+        if (!source.subagentId && this.links.hasUncollectedLegacyChild(source.key)) {
+          await this.discoverLegacySubagents(source);
+        }
         if (Object.keys(this.links.state).length || state[QODER_DELEGATIONS_KEY]) {
           next[QODER_DELEGATIONS_KEY] = this.links.state;
           changed ||= previousLinks !== this.links.state;
@@ -475,9 +853,14 @@ export class QoderTranscriptCollector {
         this.report(key, error.code ?? error.message);
         // Retain the prior checkpoint and published observations on any I/O,
         // parse, capacity or cancellation failure. Other sources still run.
+      } finally {
+        if (this.legacyProofDeferred) this.rememberLegacyProofRetry(entry);
       }
     }
-    this.pendingSources = entries.slice(visited);
+    this.pendingSources = this.pendingSources.filter(entry => !visited.has(entry.name));
+    if (this.legacyDescriptorContinuation && !this.legacyProofRetries.has(this.legacyDescriptorContinuation.entryKey)) {
+      this.discardLegacyDescriptorContinuation();
+    }
     this.finishDiscovery();
     return { records, state: next, metrics: this.metrics, changed };
   }
@@ -627,9 +1010,9 @@ export class QoderTranscriptCollector {
     return checkpoint;
   }
 
-  async open(file) {
+  async open(file, noFollow = false) {
     this.metrics.sourceFilesOpened++;
-    return openRegular(file);
+    return openRegular(file, noFollow);
   }
 
   async fingerprint(file, offset) {
@@ -659,10 +1042,10 @@ export class QoderTranscriptCollector {
   }
 
   async *lines(file, start, end, { allowFinal = false, rebuild = false, countOnly = false, legacyCountFinal = false,
-    checkpoint, skipRanges = [] } = {}) {
+    checkpoint, skipRanges = [], legacyPrefix = false } = {}) {
     const countFinal = countOnly && legacyCountFinal;
-    const handle = await this.open(file);
-    const tailKey = rebuild ? file + '#rebuild' : file;
+    const handle = await this.open(file, legacyPrefix);
+    const tailKey = legacyPrefix ? file + '#legacy-prefix' : rebuild ? file + '#rebuild' : file;
     let position = start, lineStart = start, pending = [], pendingBytes = 0, replay = false, lastBuffer, oversized = false;
     try {
       const stat = await handle.stat();
@@ -1018,11 +1401,12 @@ export class QoderTranscriptCollector {
     // A Hook may observe progress written after the tool line. Finish this
     // bounded scan before selecting its snapshot; never borrow a later turn's.
     if (!complete && !Number.isFinite(context?.observedSize)) return;
-    const hostProduct = this.hostProductFor(context, value.rows.find(isRealUserPrompt));
+    const prompt = value.rows.find(isRealUserPrompt);
+    const hostProduct = this.hostProductFor(context, prompt);
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     for (const row of value.rows) {
       if (!Number.isFinite(Date.parse(row.timestamp))) continue;
-      for (const { link, block } of this.links.register(source, checkpoint, row)) {
+      for (const { link, block } of this.links.register(source, checkpoint, row, hostProduct ? undefined : prompt)) {
         const identity = context.userIdentity ?? source.userIdentity;
         const record = {
           'event.name': 'tool.call', 'gen_ai.agent.type': 'qoder-cli',
@@ -1124,10 +1508,24 @@ export class QoderTranscriptCollector {
       if (!checkpoint.traceContextLocked && this.links.hasPublishedWork(source, checkpoint.turnId)) checkpoint.traceContextLocked = true;
       if (checkpoint.incoming || checkpoint.traceContext.parentSpanId || checkpoint.traceContextLocked) return;
     }
-    const incoming = this.links.incoming(source, prompt);
+    const possibleLegacy = legacyDelegatedPrompt(source, prompt);
+    const first = possibleLegacy ? await this.firstLegacyPrompt(source) : undefined;
+    if (first === LEGACY_PROOF_DEFERRED) {
+      // A long record can exhaust this poll parsing the active turn. Resume
+      // its independent prefix proof before reopening the turn next time.
+      const probe = this.legacyFirstPrompts.get(source.key);
+      if (probe) probe.beforeScan = true;
+      throw new Error('legacy-first-prompt-pending');
+    }
+    const legacy = first?.start === checkpoint.activeStart && first?.uuid === prompt.uuid
+      && first.callId === prompt.parent_tool_use_id && first.inode === checkpoint.inode;
+    const legacyProof = legacy ? await this.verifyLegacySource(source, prompt.parent_tool_use_id) : undefined;
+    if (legacyProof === LEGACY_PROOF_DEFERRED) throw new Error('legacy-descriptor-budget');
+    const incoming = this.links.incoming(source, prompt)
+      ?? (legacyProof && this.links.bindLegacyPeer(legacyProof.link, source.subagentId));
     // Parent and child directory observations can arrive in either order.
     // Keep the original cursor replayable until the parent call is indexed.
-    if (source.subagentId && prompt.isDelegatedTask === true && prompt.parent_tool_use_id && !incoming
+    if (source.subagentId && (prompt.isDelegatedTask === true || legacy) && prompt.parent_tool_use_id && !incoming
       && (!checkpoint.parentPendingSince || this.now() - checkpoint.parentPendingSince < 60_000
         || !this.parentAttempted(source, checkpoint, prompt.parent_tool_use_id, prompt.parent_agent_id))) {
       const error = new Error('subagent-parent-pending');
@@ -1147,7 +1545,7 @@ export class QoderTranscriptCollector {
             : (prompt.message?.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('') }] }],
       };
       if (!source.subagentId) await this.resolveTraceContext?.([record]);
-      else if (prompt.isDelegatedTask) this.report(source.key, 'subagent-parent-unavailable-independent',
+      else if (prompt.isDelegatedTask || legacy) this.report(source.key, 'subagent-parent-unavailable-independent',
         { fallbackCount: ++this.subagentParentFallbacks });
       checkpoint.traceContext = { traceId: record.trace_id, ...(record.parent_span_id ? { parentSpanId: record.parent_span_id } : {}) };
       delete checkpoint.incoming;
@@ -1284,10 +1682,16 @@ export class QoderTranscriptCollector {
           } else { value.rows.push(row); value.bytes += line.bytes; }
         }
         if (prompt) checkpoint.hasUser = true;
-        if (row && this.links.calls(source, row).length) {
-          await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
-          this.links.register(source, checkpoint, row);
+        const activePrompt = row?.type === 'assistant' ? value.rows.find(isRealUserPrompt) : undefined;
+        const legacyPrompt = this.hostProductFor(this.contextFor(source, contexts, checkpoint, line.end), activePrompt)
+          ? undefined : activePrompt;
+        if (row?.type === 'assistant' && this.links.calls(source, row, legacyPrompt).length) {
+          await this.prepareWork(source, checkpoint, activePrompt);
+          this.links.register(source, checkpoint, row, legacyPrompt);
           checkpoint.traceContextLocked = true;
+        }
+        if (row?.type === 'user' && !source.subagentId && this.links.hasLegacyParent(source.key)) {
+          this.links.observeLegacyPeer(source, checkpoint, row);
         }
         if (eventOf(row) === 'Stop' || (row && hasQoderCnTerminalMarker([], [row]))) {
           if (!checkpoint.terminal) checkpoint.terminalAt = this.now();

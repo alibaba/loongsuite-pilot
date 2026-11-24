@@ -98,7 +98,620 @@ async function spansFor(entries: AgentActivityEntry[]) {
   finally { await flusher.shutdown(); }
 }
 
+const legacyFixtures = path.resolve('tests/fixtures/qoder/legacy-subagent');
+async function legacyRows(file: string, root: string, owner = session) {
+  const text = await fs.readFile(path.join(legacyFixtures, file), 'utf8');
+  return text.trim().split('\n').map(line => {
+    const row = JSON.parse(line);
+    return { ...row, sessionId: owner, cwd: root, ...(row.timestamp
+      ? { timestamp: new Date(Date.parse(row.timestamp) - Date.parse('2026-09-22T10:00:00Z') + epoch).toISOString() } : {}) };
+  });
+}
+
+async function legacyParent(root: string, owner: string) {
+  const parent = path.join(root, `${owner}.jsonl`);
+  const directory = path.join(root, owner, 'subagents');
+  const descriptor = JSON.parse(await fs.readFile(path.join(legacyFixtures, 'descriptor.json'), 'utf8'));
+  const child = path.join(directory, `agent-${descriptor.agentId}.jsonl`);
+  const task = { ...descriptor, sessionId: owner, transcriptPath: child };
+  const putTask = (entry: typeof task) => fs.writeFile(path.join(directory, `task-${entry.taskId}.json`), JSON.stringify(entry));
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(parent, jsonl(await legacyRows('parent.jsonl', root, owner)));
+  expect(publishQoderWakeup({ session_id: owner, transcript_path: parent,
+    hook_event_name: 'Stop', cwd: root }, { dataDir: root, agentId: 'qoder' })).toBe(true);
+  const createChild = async () => {
+    await fs.writeFile(child, jsonl(await legacyRows('child.jsonl', root, owner)));
+    await putTask(task);
+  };
+  return { directory, task, putTask, createChild, key: qoderSourceKey(owner, parent) };
+}
+
+async function childSpans(h: Awaited<ReturnType<typeof harness>>, childId: string) {
+  return (await spansFor(h.entries())).filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+    && span.attributes['gen_ai.agent.id'] === childId);
+}
+
 describe.each(['qoder'] as const)('%s independent native child work', agentId => {
+  it.each(['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
+    'descriptor after both wakeups', 'prefix budget', 'modern parent marker', 'modern child marker',
+    'missing descriptor', 'conflicting descriptor', 'conflicting native peer', 'conflicting peer in open parent',
+    'matching late native peer', 'conflicting late native peer',
+    'explicit independent prompt', 'non-CLI owner', 'desktop owner', 'outside transcript', 'aliased transcript',
+    'many unrelated filenames'])(
+    'uses only corroborated legacy CLI 1.1.61 delegation with %s', async mode => {
+      let prefixWasConstrained = false;
+      const constrainPrefix = mode === 'prefix budget' ? (collector: any) => {
+        const prepareWork = collector.prepareWork.bind(collector);
+        collector.prepareWork = async (source: any, checkpoint: any, prompt: any) => {
+          if (prefixWasConstrained || !source.subagentId) return prepareWork(source, checkpoint, prompt);
+          prefixWasConstrained = true;
+          const remaining = collector.remainingBytes;
+          collector.remainingBytes = 1;
+          try { return await prepareWork(source, checkpoint, prompt); }
+          finally { collector.remainingBytes = remaining - (1 - collector.remainingBytes); }
+        };
+      } : undefined;
+      const h = await harness(agentId, false, constrainPrefix, mode === 'desktop owner' ? 'app' : undefined);
+      const parent = await legacyRows('parent.jsonl', h.root);
+      const child = await legacyRows('child.jsonl', h.root);
+      const descriptor = JSON.parse(await fs.readFile(path.join(legacyFixtures, 'descriptor.json'), 'utf8'));
+      const childPath = h.child(descriptor.agentId);
+      await fs.mkdir(path.dirname(childPath), { recursive: true });
+      if (mode === 'explicit independent prompt') child[0].isDelegatedTask = false;
+      if (mode === 'modern child marker') child[0].isDelegatedTask = true;
+      if (mode === 'non-CLI owner') delete parent.find(row => row.type === 'user').entrypoint;
+      if (mode === 'modern parent marker') {
+        for (const row of parent) if (row.type === 'assistant') row.entrypoint = 'cli';
+      }
+      const nativePeerCases = ['conflicting native peer', 'conflicting peer in open parent', 'matching late native peer', 'conflicting late native peer'];
+      const lateNativePeer = mode === 'matching late native peer' || mode === 'conflicting late native peer';
+      const openParent = lateNativePeer || mode === 'conflicting peer in open parent';
+      const resultIndex = parent.findIndex(row => Array.isArray(row.message?.content)
+        && row.message.content.some(block => block.type === 'tool_result'));
+      if (nativePeerCases.includes(mode)) {
+        expect(resultIndex).toBeGreaterThan(0);
+        parent[resultIndex].toolUseResult = { kind: 'agent-result', state: 'completed',
+          agentId: mode === 'matching late native peer' ? descriptor.agentId : 'different-observed-peer' };
+      }
+      const initialParentRows = lateNativePeer ? resultIndex : resultIndex + 1;
+      if (openParent) {
+        await fs.writeFile(h.parent, '');
+        expect(publishQoderWakeup({ session_id: session, transcript_path: h.parent,
+          hook_event_name: 'UserPromptSubmit', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+        await fs.appendFile(h.parent, jsonl(parent.slice(0, initialParentRows)));
+      } else if (mode !== 'child wakeup first') {
+        await h.write(null, parent);
+      }
+      if (['both wakeups', 'child wakeup first', 'descriptor after both wakeups', 'prefix budget', 'modern child marker'].includes(mode)) {
+        await h.write(descriptor.agentId, child);
+      }
+      else if (mode === 'outside transcript' || mode === 'aliased transcript') {
+        descriptor.transcriptPath = path.join(h.root, 'other-session.jsonl');
+        await fs.writeFile(descriptor.transcriptPath, jsonl(child));
+        if (mode === 'aliased transcript') {
+          await fs.symlink(descriptor.transcriptPath, childPath);
+          descriptor.transcriptPath = childPath;
+        }
+      } else {
+        await fs.writeFile(childPath, jsonl(child));
+      }
+      const task = { ...descriptor, sessionId: session,
+        transcriptPath: ['outside transcript', 'aliased transcript'].includes(mode) ? descriptor.transcriptPath : childPath };
+      const putTask = (item: typeof task) => fs.writeFile(
+        path.join(path.dirname(childPath), `task-${item.taskId}.json`), JSON.stringify(item));
+      if (!['missing descriptor', 'descriptor after restart', 'descriptor after both wakeups', 'modern child marker'].includes(mode)) await putTask(task);
+      if (mode === 'conflicting descriptor') await putTask({ ...task, taskId: task.taskId + '-conflict' });
+      if (mode === 'many unrelated filenames') {
+        await Promise.all(Array.from({ length: 129 }, (_, i) =>
+          fs.writeFile(path.join(path.dirname(childPath), `.hidden-${i}`), '')));
+      }
+      await h.start(); await h.cycle();
+      if (openParent) {
+        expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(lateNativePeer);
+        await h.stop();
+        await h.write(null, parent.slice(initialParentRows), true);
+        await h.start(); await h.cycle();
+      }
+      if (mode === 'child wakeup first') {
+        expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(false);
+        await h.write(null, parent);
+        await h.cycle();
+      }
+      await h.stop();
+      if (mode === 'descriptor after restart' || mode === 'descriptor after both wakeups') {
+        expect(h.entries().some(row => row['gen_ai.tool.call.id'] === task.parentToolUseId)).toBe(true);
+        expect(h.entries().some(row => row['gen_ai.agent.id'] === task.agentId)).toBe(false);
+        await putTask(task);
+        await h.start(); await h.cycle(); await h.stop();
+      }
+      const spans = await spansFor(h.entries());
+      const parentTool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+        && span.attributes['gen_ai.tool.call.id'] === task.parentToolUseId);
+      const children = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+        && span.attributes['gen_ai.agent.id'] === task.agentId);
+      expect(parentTool).toBeDefined();
+      if (lateNativePeer || ['both wakeups', 'child wakeup first', 'parent only', 'descriptor after restart',
+        'descriptor after both wakeups', 'prefix budget', 'modern parent marker', 'modern child marker', 'many unrelated filenames'].includes(mode)) {
+        if (mode === 'prefix budget') expect(prefixWasConstrained).toBe(true);
+        expect(children).toHaveLength(1);
+        expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+        expect(children[0].spanContext().traceId).toBe(parentTool?.spanContext().traceId);
+        if (lateNativePeer) {
+          const related = h.entries().filter(row => row['gen_ai.tool.call.id'] === task.parentToolUseId);
+          expect(related.some(row => row['gen_ai.agent.peer.id'] === 'different-observed-peer')).toBe(false);
+          const audit = related.filter(row => row['event.name'] === 'gen_ai.agent.result');
+          expect(audit).toHaveLength(mode === 'matching late native peer' ? 1 : 0);
+          if (audit.length) expect(audit[0]['gen_ai.agent.peer.id']).toBe(task.agentId);
+        }
+        if (mode === 'parent only') {
+          // Reusing the file with the same historical call reference cannot
+          // extend its first delegated prompt to an independent turn.
+          const direct = prompt('reused-legacy-file', 10, task.parentToolUseId, task.agentId);
+          delete direct.isDelegatedTask;
+          await fs.appendFile(childPath, jsonl([direct, ...end('reused-answer', 14)]));
+          await h.start(); await h.cycle(); await h.stop();
+          const afterReuse = (await spansFor(h.entries())).filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+            && span.attributes['gen_ai.agent.id'] === task.agentId);
+          expect(afterReuse).toHaveLength(2);
+          expect(afterReuse.filter(span => span.parentSpanId === parentTool?.spanContext().spanId)).toHaveLength(1);
+          expect(new Set(afterReuse.map(span => span.spanContext().traceId)).size).toBe(2);
+        }
+      } else {
+        expect(children).toHaveLength(0);
+      }
+    });
+
+  it.each(['parent-only', 'both hooks', 'both hooks over the poll budget'] as const)(
+    'keeps a corroborated long first user message attached with %s', async mode => {
+      const h = await harness('qoder', false, mode === 'both hooks over the poll budget'
+        ? collector => { collector.scanBytes = 64 * 1024; } : undefined);
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      const parent = await legacyRows('parent.jsonl', h.root);
+      const child = await legacyRows('child.jsonl', h.root);
+      const body = 'Synthetic context segment. '.repeat(2800);
+      const dispatch = parent.flatMap(row => Array.isArray(row.message?.content) ? row.message.content : [])
+        .find(block => block.type === 'tool_use' && block.id === target.task.parentToolUseId);
+      expect(dispatch).toBeDefined();
+      dispatch.input.prompt = body;
+      child[0].message.content = body;
+      expect(Buffer.byteLength(JSON.stringify(child[0]))).toBeGreaterThan(64 * 1024);
+      await h.write(null, parent);
+      await fs.writeFile(target.task.transcriptPath, jsonl(child));
+      if (mode !== 'parent-only') await h.write(target.task.agentId, child);
+      await h.start();
+      for (let i = 0; i < 4; i++) await h.cycle();
+      await h.stop();
+      const parentTool = (await spansFor(h.entries())).find(span =>
+        span.attributes['gen_ai.span.kind'] === 'TOOL' && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+      expect(parentTool).toBeDefined();
+      const children = await childSpans(h, target.task.agentId);
+      expect(children).toHaveLength(1);
+      expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+      expect(children[0].spanContext().traceId).toBe(parentTool?.spanContext().traceId);
+    });
+
+  it.each(['unique', 'duplicate normalized path'] as const)(
+    'validates a %s current task after 140 retained descriptor/transcript pairs', async mode => {
+      const h = await harness('qoder');
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      const child = await legacyRows('child.jsonl', h.root);
+      for (let i = 0; i < 140; i++) {
+        const agentId = `historical-child-${i}`;
+        const task = { ...target.task, taskId: `prior-${i}`, agentId, parentToolUseId: `historical-call-${i}`,
+          transcriptPath: path.join(target.directory, `agent-${agentId}.jsonl`) };
+        const rows = child.map(row => ({ ...row, agentId, parent_tool_use_id: task.parentToolUseId }));
+        await target.putTask(mode === 'duplicate normalized path' && i === 139
+          ? { ...task, transcriptPath: target.directory + path.sep + '.' + path.sep + path.basename(target.task.transcriptPath) }
+          : task);
+        await fs.writeFile(task.transcriptPath, jsonl(rows));
+      }
+      expect((await fs.readdir(target.directory)).length).toBe(282);
+      await h.start();
+      for (let i = 0; i < 4; i++) await h.cycle();
+      await h.stop();
+      const parentTool = (await spansFor(h.entries())).find(span =>
+        span.attributes['gen_ai.span.kind'] === 'TOOL' && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+      expect(parentTool).toBeDefined();
+      const children = await childSpans(h, target.task.agentId);
+      expect(children).toHaveLength(mode === 'unique' ? 1 : 0);
+      if (mode === 'unique') expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+    });
+
+  it.each(['partial first row', 'row over the record limit'] as const)(
+    'waits for a provable first prompt on a child file with a %s', async mode => {
+      const h = await harness('qoder', false, collector => { collector.maxTurnBytes = 64 * 1024; });
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      const child = await legacyRows('child.jsonl', h.root);
+      const complete = jsonl(child);
+      const cut = Math.floor(complete.indexOf('\n') / 2);
+      if (mode === 'partial first row') {
+        await fs.writeFile(target.task.transcriptPath, complete.slice(0, cut));
+      } else {
+        child[0].message.content = 'x'.repeat(70 * 1024);
+        await fs.writeFile(target.task.transcriptPath, jsonl(child));
+      }
+      await h.start(); await h.cycle();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+      if (mode === 'partial first row') {
+        await fs.appendFile(target.task.transcriptPath, complete.slice(cut));
+      } else {
+        await fs.writeFile(target.task.transcriptPath, complete);
+      }
+      await h.cycle(); await h.cycle();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
+    });
+
+  it('continues once a history exceeds the in-memory descriptor revision limit', async () => {
+    const h = await harness(agentId);
+    const target = await legacyParent(h.root, session);
+    const child = await legacyRows('child.jsonl', h.root);
+    await h.write(target.task.agentId, child);
+    await target.putTask(target.task);
+    for (let i = 0; i < 1024; i++) {
+      const id = `historical-${i}`;
+      await target.putTask({ taskId: id, sessionId: session, agentId: id, parentToolUseId: id,
+        transcriptPath: path.join(target.directory, `agent-${id}.jsonl`) });
+    }
+    await h.start();
+    for (let i = 0; i < 8; i++) await h.cycle();
+    const children = await childSpans(h, target.task.agentId);
+    expect(children).toHaveLength(1);
+    const parentTool = (await spansFor(h.entries())).find(span =>
+      span.attributes['gen_ai.span.kind'] === 'TOOL' && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    expect(parentTool).toBeDefined();
+    expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+  });
+
+  it('revisits a legacy source behind eight unchanged parent directories', async () => {
+    const h = await harness(agentId);
+    const fixtures = new Map<string, Awaited<ReturnType<typeof legacyParent>>>();
+    for (let i = 0; i < 9; i++) {
+      const fixture = await legacyParent(h.root, `synthetic-scope-${i}`);
+      fixtures.set(fixture.key, fixture);
+    }
+    const inDiscoveryOrder = [];
+    for await (const entry of await fs.opendir(qoderWakeupRoot(h.root, agentId))) {
+      const fixture = fixtures.get(entry.name);
+      if (fixture) inDiscoveryOrder.push(fixture);
+    }
+    expect(inDiscoveryOrder).toHaveLength(9);
+    const target = inDiscoveryOrder[8];
+    await target.createChild();
+    await h.start(); await h.cycle(); await h.cycle();
+    expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
+  });
+
+  it('discovers a quiet legacy session beyond the first page while another task descriptor changes', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const owners = new Map<string, string>();
+    for (let i = 0; i < 70; i++) {
+      const owner = `synthetic-live-scope-${i}`;
+      const file = path.join(h.root, `${owner}.jsonl`);
+      await fs.writeFile(file, jsonl([prompt(`prompt-${i}`, 0), ...end(`end-${i}`, 1)].map(row => ({ ...row, sessionId: owner }))));
+      expect(publishQoderWakeup({ session_id: owner, transcript_path: file,
+        hook_event_name: 'Stop', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+      owners.set(qoderSourceKey(owner, file), owner);
+    }
+    const inDiscoveryOrder = [];
+    for await (const entry of await fs.opendir(qoderWakeupRoot(h.root, agentId))) {
+      const owner = owners.get(entry.name);
+      if (owner) inDiscoveryOrder.push(owner);
+    }
+    expect(inDiscoveryOrder).toHaveLength(70);
+    const busyOwner = inDiscoveryOrder[0];
+    const quietOwner = inDiscoveryOrder[69];
+    const busy = await legacyParent(h.root, busyOwner);
+    const quiet = await legacyParent(h.root, quietOwner);
+    await busy.createChild();
+    await quiet.createChild();
+    const longTask = { ...busy.task, taskId: 'historic-native-result', agentId: 'historical-child',
+      parentToolUseId: 'historical-call', transcriptPath: path.join(busy.directory, 'agent-historical-child.jsonl'),
+      result: 'synthetic result\n'.repeat(100_000), updatedAt: 0 };
+    await busy.putTask(longTask);
+    await h.start();
+    const collect = collector.collect.bind(collector);
+    const metadataFor = collector.metadataFor.bind(collector);
+    let sourcesVisited = 0;
+    let mostSourcesVisited = 0;
+    collector.metadataFor = (...args: any[]) => { sourcesVisited++; return metadataFor(...args); };
+    let revisions = 0;
+    collector.collect = async (...args: any[]) => {
+      longTask.updatedAt++;
+      await busy.putTask(longTask);
+      revisions++;
+      sourcesVisited = 0;
+      const result = await collect(...args);
+      mostSourcesVisited = Math.max(mostSourcesVisited, sourcesVisited);
+      return result;
+    };
+    for (let i = 0; i < 12; i++) await h.cycle();
+    const quietChildren = async () => (await childSpans(h, quiet.task.agentId)).filter(span =>
+      span.attributes['gen_ai.session.id'] === quietOwner);
+    expect(revisions).toBe(48);
+    expect(mostSourcesVisited).toBeLessThanOrEqual(72);
+    expect.soft(await quietChildren()).toHaveLength(1);
+    collector.collect = collect;
+    for (let i = 0; i < 12; i++) await h.cycle();
+    expect(await quietChildren()).toHaveLength(1);
+  }, 30_000);
+
+  it('eventually attaches every unchanged legacy child across discovery and metadata budgets', async () => {
+    const h = await harness(agentId);
+    for (let i = 0; i < 18; i++) {
+      const source = await legacyParent(h.root, `synthetic-stable-scope-${i}`);
+      await source.createChild();
+      const older = `older-scope-${i}`;
+      await source.putTask({ ...source.task, taskId: older, parentToolUseId: older, agentId: older,
+        transcriptPath: path.join(source.directory, `agent-${older}.jsonl`), result: 'historic\n'.repeat(14_000) });
+    }
+    await h.start();
+    for (let i = 0; i < 12; i++) await h.cycle();
+    const spans = await spansFor(h.entries());
+    const parentTools = new Set(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL')
+      .map(span => span.spanContext().spanId));
+    const children = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT' && parentTools.has(span.parentSpanId ?? ''));
+    expect(new Set(children.map(span => span.attributes['gen_ai.session.id'])).size).toBe(18);
+    expect(children).toHaveLength(18);
+  }, 30_000);
+
+  it.each(['bytes', 'records'] as const)('keeps ordinary parents moving while legacy retries exhaust %s', async pressure => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const busyOwner = 'synthetic-busy-stream';
+    const busy = await legacyParent(h.root, busyOwner);
+    await busy.createChild();
+    const longTask = { ...busy.task, taskId: 'old-large-native-result', agentId: 'old-child',
+      parentToolUseId: 'old-parent-call', transcriptPath: path.join(busy.directory, 'agent-old-child.jsonl'),
+      result: 'synthetic result\n'.repeat(100_000), updatedAt: 0 };
+    await busy.putTask(longTask);
+    await h.start();
+    expect(collector.legacyProofRetries.has(busy.key)).toBe(true);
+    await h.write(null, [prompt('quiet-ordinary', 0), ...end('quiet-ordinary', 1)]);
+    const collect = collector.collect.bind(collector);
+    const transcript = path.join(h.root, `${busyOwner}.jsonl`);
+    const bytePressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: busyOwner, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    const recordPressure = (turn: number) => {
+      const ids = Array.from({ length: 2_100 }, (_, i) => `tool-${turn}-${i}`);
+      return jsonl([prompt(`busy-${turn}`, turn), assistant(`busy-tools-${turn}`, turn,
+        ids.map(id => ({ type: 'tool_use', id, name: 'Read', input: {} })), 11, 'tool_use'),
+      { type: 'user', message: { role: 'user', content: ids.map(id => ({ type: 'tool_result', tool_use_id: id, content: 'x' })) } },
+      ...end(`busy-end-${turn}`, turn)].map(row => ({ ...row, sessionId: busyOwner })));
+    };
+    const budgetUse: Array<{ remainingBytes: number; records: number }> = [];
+    collector.collect = async (...args: any[]) => {
+      longTask.updatedAt++;
+      const content = pressure === 'bytes' ? bytePressure : recordPressure(longTask.updatedAt);
+      await Promise.all([busy.putTask(longTask), fs.appendFile(transcript, content)]);
+      const result = await collect(...args);
+      budgetUse.push({ remainingBytes: collector.remainingBytes, records: result.records.length });
+      return result;
+    };
+    await h.cycle();
+    expect(budgetUse.some(({ remainingBytes, records }) => pressure === 'bytes'
+      ? remainingBytes <= 0 && records < 4096 : remainingBytes > 0 && records >= 4096)).toBe(true);
+    expect((await spansFor(h.entries().filter(entry => entry['gen_ai.session.id'] === session)))
+      .filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+  }, 30_000);
+
+  it('finishes a paged legacy proof while ordinary sources exhaust the transcript budget', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    const target = await legacyParent(h.root, 'synthetic-paged-target');
+    await target.createChild();
+    await target.putTask({ ...target.task, taskId: 'historical-result', agentId: 'historical-child',
+      parentToolUseId: 'historical-call', transcriptPath: path.join(target.directory, 'agent-historical-child.jsonl'),
+      result: 'synthetic result\n'.repeat(62_000) });
+    await h.write(null, [prompt('busy-ordinary', 0), ...end('busy-ordinary', 1)]);
+    await h.start();
+    expect(collector.legacyProofRetries.has(target.key)).toBe(true);
+    const collect = collector.collect.bind(collector);
+    const pressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: session, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    let exhausted = 0;
+    collector.collect = async (...args: any[]) => {
+      await fs.appendFile(h.parent, pressure);
+      const result = await collect(...args);
+      if (collector.remainingBytes <= 0) exhausted++;
+      return result;
+    };
+    for (let i = 0; i < 7; i++) await h.cycle();
+    expect(exhausted).toBeGreaterThan(1);
+    const spans = await spansFor(h.entries());
+    const targetTool = spans.find(span => span.attributes['gen_ai.session.id'] === target.task.sessionId
+      && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    const children = await childSpans(h, target.task.agentId);
+    expect(targetTool).toBeDefined();
+    expect(children).toHaveLength(1);
+    expect(children[0].parentSpanId).toBe(targetTool?.spanContext().spanId);
+  }, 30_000);
+
+  it('keeps a quiet root moving while unresolved modern parents exhaust priority budget', async () => {
+    let collector: any;
+    const h = await harness(agentId, false, instance => { collector = instance; });
+    await h.write(null, [prompt('busy-priority', 0)]);
+    await h.write('pending-modern-child', [prompt('pending-modern-child', 1, 'pending-parent-tool', 'pending-modern-child'), ...end('child', 2)]);
+    await h.start();
+    await h.cycle();
+    expect(collector.legacyProofRetries.size).toBe(0);
+    expect(collector.prioritySources.size).toBeGreaterThan(0);
+
+    const quietSession = 'synthetic-quiet-ordinary-session';
+    const quietPath = path.join(h.root, `${quietSession}.jsonl`);
+    await fs.writeFile(quietPath, jsonl([prompt('quiet-root', 0), ...end('quiet-root', 1)]
+      .map(row => ({ ...row, sessionId: quietSession }))));
+    expect(publishQoderWakeup({ session_id: quietSession, transcript_path: quietPath,
+      hook_event_name: 'Stop', cwd: h.root }, { dataDir: h.root, agentId })).toBe(true);
+
+    const collect = collector.collect.bind(collector);
+    const bytePressure = jsonl(Array.from({ length: 100 }, () => ({
+      type: 'progress', sessionId: session, data: { detail: 'x'.repeat(48 * 1024) },
+    })));
+    const exhausted = [];
+    collector.collect = async (...args: any[]) => {
+      await fs.appendFile(h.parent, bytePressure);
+      const result = await collect(...args);
+      exhausted.push(collector.remainingBytes <= 0);
+      return result;
+    };
+    for (let i = 0; i < 4; i++) await h.cycle();
+    expect(exhausted.filter(Boolean).length).toBeGreaterThan(1);
+    const spans = await spansFor(h.entries());
+    expect(spans.filter(span => span.attributes['gen_ai.session.id'] === quietSession
+      && span.attributes['gen_ai.span.kind'] === 'AGENT')).toHaveLength(1);
+  }, 30_000);
+
+  it('reopens a committed synthetic legacy source when the native transcript grows', async () => {
+    const h = await harness(agentId);
+    const source = await legacyParent(h.root, session);
+    await source.createChild();
+    await h.start();
+    for (let i = 0; i < 4; i++) await h.cycle();
+    const before = await childSpans(h, source.task.agentId);
+    expect(before).toHaveLength(1);
+    const newWork = [prompt('direct-reuse', 10, undefined, source.task.agentId), ...end('direct-reuse', 11)];
+    await fs.appendFile(source.task.transcriptPath, jsonl(newWork));
+    for (let i = 0; i < 4; i++) await h.cycle();
+    const after = await childSpans(h, source.task.agentId);
+    expect(after).toHaveLength(2);
+    expect(new Set(after.map(span => span.spanContext().traceId)).size).toBe(2);
+  });
+
+  it.each(['unrelated result', 'transient incomplete write', 'conflicting call', 'duplicate ownership field'])(
+    'checks a large historical descriptor with %s before attaching the current child', async scenario => {
+      const h = await harness(agentId);
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      const prior = { ...target.task, taskId: 'prior-result', agentId: 'old-child',
+        parentToolUseId: scenario === 'conflicting call' ? target.task.parentToolUseId : 'old-call',
+        transcriptPath: path.join(target.directory, 'agent-old-child.jsonl'),
+        details: { parentToolUseId: target.task.parentToolUseId },
+        result: 'synthetic "final" \\ text 🔎\n'.repeat(41_000) };
+      let descriptor = JSON.stringify(prior);
+      expect(Buffer.byteLength(descriptor)).toBeGreaterThan(512 * 1024);
+      if (scenario === 'duplicate ownership field') {
+        descriptor = descriptor.slice(0, -1) + `,"\\u0070arentToolUseId":${JSON.stringify(target.task.parentToolUseId)}}`;
+      }
+      const file = path.join(target.directory, `task-${prior.taskId}.json`);
+      await fs.writeFile(file, scenario === 'transient incomplete write' ? descriptor.slice(0, -3) : descriptor);
+      await h.start();
+      if (scenario === 'transient incomplete write') {
+        await h.cycle();
+        expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+        await fs.writeFile(file, descriptor);
+      }
+      for (let i = 0; i < 6; i++) await h.cycle();
+      const spans = await spansFor(h.entries());
+      const parent = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+        && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+      expect(parent).toBeDefined();
+      const children = await childSpans(h, target.task.agentId);
+      if (scenario === 'conflicting call' || scenario === 'duplicate ownership field') {
+        expect(children).toHaveLength(0);
+      } else {
+        expect(children).toHaveLength(1);
+        expect(children[0].parentSpanId).toBe(parent?.spanContext().spanId);
+        expect(children[0].spanContext().traceId).toBe(parent?.spanContext().traceId);
+      }
+    });
+
+  it('does not attach a legacy child if an already-verified claim changes before a paged pass closes', async () => {
+    let rewritten: Awaited<ReturnType<typeof legacyParent>>['task'] | undefined;
+    let staleProof = false;
+    const h = await harness(agentId, false, collector => {
+      const descriptors = collector.legacyDescriptors.bind(collector);
+      collector.legacyDescriptors = async (...args: any[]) => {
+        const result = await descriptors(...args);
+        const scan = collector.legacyDescriptorContinuation;
+        if (!rewritten && scan?.verification && scan.count >= 2) {
+          const names = [];
+          for await (const entry of await fs.opendir(target.directory)) {
+            if (entry.name.startsWith('task-')) names.push(entry.name);
+          }
+          const confirmed = names.slice(0, scan.count).find(name => filler.has(name));
+          expect(confirmed).toBeDefined();
+          const before = await fs.lstat(target.directory);
+          rewritten = filler.get(confirmed!)!;
+          await target.putTask({ ...rewritten, parentToolUseId: target.task.parentToolUseId });
+          const after = await fs.lstat(target.directory);
+          expect([after.mtimeMs, after.ctimeMs]).toEqual([before.mtimeMs, before.ctimeMs]);
+        }
+        if (rewritten && Array.isArray(result) && result.some(claim => claim.subagentId === target.task.agentId)) staleProof = true;
+        return result;
+      };
+    });
+    const target = await legacyParent(h.root, session);
+    const child = await legacyRows('child.jsonl', h.root);
+    await h.write(target.task.agentId, child);
+    await target.putTask({ ...target.task, result: 'a'.repeat(120 * 1024) });
+    const filler = new Map<string, typeof target.task>();
+    for (let i = 0; i < 4; i++) {
+      const id = `ordinary-${i}`;
+      const task = { ...target.task, taskId: id, agentId: id, parentToolUseId: id,
+        transcriptPath: path.join(target.directory, `agent-${id}.jsonl`), result: 'a'.repeat(127 * 1024) };
+      filler.set(`task-${id}.json`, task);
+      await target.putTask(task);
+    }
+    await h.start(); await h.cycle(); await h.cycle();
+    expect(rewritten).toBeDefined();
+    const spans = await spansFor(h.entries());
+    const parentTool = spans.find(span => span.attributes['gen_ai.span.kind'] === 'TOOL'
+      && span.attributes['gen_ai.tool.call.id'] === target.task.parentToolUseId);
+    expect(parentTool).toBeDefined();
+    const attachedChildren = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'AGENT'
+      && span.attributes['gen_ai.agent.id'] === target.task.agentId && span.parentSpanId === parentTool?.spanContext().spanId);
+    expect({ staleProof, attachedChildren: attachedChildren.length }).toEqual({ staleProof: false, attachedChildren: 0 });
+    await target.putTask(rewritten!);
+    await h.cycle(); await h.cycle();
+    const children = await childSpans(h, target.task.agentId);
+    expect(children).toHaveLength(1);
+    expect(children[0].parentSpanId).toBe(parentTool?.spanContext().spanId);
+  });
+
+  it.each(['continuous polling', 'restart', 'conflicting in-place rewrite'])(
+    'checks all legacy descriptors beyond one cycle under %s', async mode => {
+      let collector: any;
+      const h = await harness(agentId, false, instance => { collector = instance; });
+      const target = await legacyParent(h.root, session);
+      await target.createChild();
+      await target.putTask({ ...target.task, result: 'a'.repeat(120 * 1024) });
+      const competing = new Map<string, typeof target.task>();
+      for (let i = 0; i < 4; i++) {
+        const id = `other-${i}`;
+        const task = { ...target.task, taskId: id, agentId: id, parentToolUseId: id,
+          transcriptPath: path.join(target.directory, `agent-${id}.jsonl`), result: 'a'.repeat(127 * 1024) };
+        competing.set(`task-${id}.json`, task);
+        await target.putTask(task);
+      }
+      await h.start();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+      if (mode === 'restart') {
+        await h.stop(); await h.start();
+      }
+      if (mode === 'conflicting in-place rewrite') {
+        const count = collector.legacyDescriptorContinuation.count;
+        const names = [];
+        for await (const entry of await fs.opendir(target.directory)) {
+          if (entry.name.startsWith('task-')) names.push(entry.name);
+        }
+        const previouslyRead = names.slice(0, count).find(name => competing.has(name));
+        expect(previouslyRead).toBeDefined();
+        const other = competing.get(previouslyRead!)!;
+        await target.putTask({ ...other, parentToolUseId: target.task.parentToolUseId });
+        await h.cycle(); await h.cycle();
+        expect(await childSpans(h, target.task.agentId)).toHaveLength(0);
+        await target.putTask(other);
+      }
+      await h.cycle(); await h.cycle();
+      expect(await childSpans(h, target.task.agentId)).toHaveLength(1);
+    });
+
   it('keeps App identity on early delegation, child work and final exported resources', async () => {
     const h = await harness(agentId, false, undefined, 'app');
     await h.write(null, [prompt('app-parent', 0), ...dispatch('app-call', 1, 'app-child')]);

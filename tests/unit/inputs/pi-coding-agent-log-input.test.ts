@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -182,20 +182,30 @@ describe('PiCodingAgentLogInput', () => {
       `${records.map(record => JSON.stringify(record)).join('\n')}\n`,
     );
 
-    // Keep the one-poll filtering and restart assertions independent of CPU time.
-    const historyReplay = { cpuNow: () => 0 };
+    let cpuTimeMs = 0;
+    const historyReplay = { cpuNow: () => cpuTimeMs };
     const input = new PiCodingAgentLogInput({
       stateStore: stateStore as never,
       logDir: tmpDir,
+      pollIntervalMs: 10,
       historyReplay,
-      agentEnabled: agentType => agentType !== 'disabled-code',
+      agentEnabled: agentType => {
+        if (agentType !== 'disabled-code') return true;
+        // A replay cycle can run out of processing time after this record.
+        cpuTimeMs += 1_000;
+        return false;
+      },
     });
     const entries: AgentActivityEntry[] = [];
     input.on('entries', batch => entries.push(...batch));
-    await input.start();
-    await input.stop();
-
-    expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['enabled-code']);
+    try {
+      await input.start();
+      await vi.waitFor(() => {
+        expect(entries.map(entry => entry['gen_ai.agent.type'])).toEqual(['enabled-code']);
+      }, { timeout: 2_000, interval: 10 });
+    } finally {
+      await input.stop();
+    }
 
     // The disabled record is intentionally discarded rather than retained for
     // replay if the Agent is re-enabled later.

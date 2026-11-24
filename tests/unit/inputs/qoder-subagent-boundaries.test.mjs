@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { QoderTranscriptCollector } from '../../../assets/hooks/qoder/transcript-collector.mjs';
+import { LegacyTaskDescriptor } from '../../../assets/hooks/qoder/legacy-task-descriptor.mjs';
 import { publishQoderWakeup, qoderWakeupRoot, qoderSourceKey } from '../../../assets/hooks/qoder/hook-wakeup.mjs';
 import { qoderTaskNotification, QoderSubagentLinks } from '../../../assets/hooks/qoder/subagent-links.mjs';
 
@@ -45,6 +46,31 @@ beforeEach(async () => {
 afterEach(async () => { collector.stop(); await fs.rm(root, { recursive: true, force: true }); });
 
 describe('Qoder native delegation boundaries', () => {
+  it('validates elided result escapes across read blocks and retains top-level ownership', () => {
+    const parser = new LegacyTaskDescriptor(128);
+    const descriptor = Buffer.from(String.raw`{"other":{"agentId":"nested"},"\u0072esult":"\u0022\n\\\"🔎\t","agentId":"child"}`);
+    for (const byte of descriptor) parser.write(Uint8Array.of(byte));
+    expect(parser.finish()).toMatchObject({ agentId: 'child' });
+  });
+
+  it.each([String.raw`\q`, String.raw`\u002x`, '\n'])('rejects a malformed elided result string (%j)', value => {
+    const parser = new LegacyTaskDescriptor(128);
+    expect(() => parser.write(Buffer.from(`{"result":"${value}","agentId":"child"}`))).toThrow();
+  });
+
+  it('charges malformed legacy task descriptors against the remaining metadata budget', async () => {
+    const directory = path.dirname(child);
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, 'task-malformed.json'), '{'.repeat(64));
+    collector.legacyTasks = new Map();
+    collector.legacyDirectoryBudget = 1;
+    collector.legacyEntryBudget = 1;
+    collector.legacyMetadataBudget = 65;
+
+    expect(await collector.legacyDescriptors(parent, session)).toEqual([]);
+    expect(collector.legacyMetadataBudget).toBe(1);
+  });
+
   it.each([[false, false], [false, true], [true, false], [true, true]])(
     'keeps nested work linked behind historical sources (restart=%s, omit parent agent=%s)', async (restart, omitParentAgent) => {
       const inner = path.join(root, session, 'subagents/agent-grandchild.jsonl');

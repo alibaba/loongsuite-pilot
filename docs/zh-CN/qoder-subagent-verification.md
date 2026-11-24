@@ -14,6 +14,10 @@ Qoder IDE 使用独立子 `sessionId`，其 transcript 没有 CLI sidechain 的 
 
 - `SubagentStart` / `SubagentStop` Hook 发布有界元数据，定位子 transcript；不读取消息正文，不启动额外重试进程。开始通知允许早于文件创建。
 - 子文件来自原生 `agent_transcript_path`，或标准 `<session>/subagents/agent-<agent_id>.jsonl` 布局。父文件和子文件使用独立来源键、偏移和缓存。
+- 旧版 CLI 缺少子 Agent Hook 或委派标记时，collector 按预算检查本会话 `subagents` 下的任务描述。只有父 CLI 输入、实际 `Agent` / `Task` 调用、唯一任务描述和子文件首条 sidechain 输入的身份一致，才恢复关联。后续独立输入沿用其自身的 turn。
+- 旧版任务目录按条目数和读取字节分轮处理，保留的历史任务会参与重名校验。大型历史 `result` 字符串按字节预算分轮读取，校验语法后丢弃正文；单份描述的其余元数据上限为 128 KiB。子文件的首条输入可跨读取块，发生追加、替换或读取失败时按源文件版本重试。
+- 暂缓的旧版描述校验使用有界重试队列。普通发现与旧版重试同时积压时，普通来源、重试来源和优先父来源轮流获得本轮完整的 transcript 读取与事件预算。已提交且内容未变化的旧版子会话跳过重复校验；原生文件追加后重新验证关联。
+- 输出前重新核对描述文件版本。历史描述超过内存上限时，改用两次清单校验和文件变更通知。通知不可用时保留待核验状态。原生写入可在采集期间继续，发现变更会重新核验。
 - collector 从父 transcript 的 `Agent` / `Task` tool use 建立委派。子输入的 `isDelegatedTask`、`parent_tool_use_id` 和可用的 `parent_agent_id` 提供匹配证据；不按名称、文本相似度或时间邻近匹配。
 - invocation 为父 session、父 Agent、父 turn 和 tool call ID 的确定性摘要；同一来源重放不改变 ID，新任务使用新 ID。关联状态只保存标识与上下文，不复制任务正文。
 - 原生 `sessionId` 相同不代表 turn 相同。父子独立收口；父先完成或 collector 重启不结束仍运行的子 turn。
