@@ -72,6 +72,7 @@ function reconcileOwnedEnv(
     stat = files.lstatSync(file, { bigint: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    files.accessSync('.', files.constants.W_OK);
     if (apply) files.writeFileSync(file, suffixFor('', parse), { flag: 'wx', mode: 0o600 });
     return true;
   }
@@ -81,8 +82,9 @@ function reconcileOwnedEnv(
   }
   if (!stat.isFile() || Number(stat.uid) !== owner.uid) return false;
 
-  const { O_RDONLY, O_RDWR, O_APPEND, O_NOFOLLOW, O_NONBLOCK } = files.constants;
-  const fd = files.openSync(file, O_NOFOLLOW | O_NONBLOCK | (apply ? O_RDWR | O_APPEND : O_RDONLY));
+  // A redeployment can only help if this same owner can append the defaults.
+  const { O_RDWR, O_APPEND, O_NOFOLLOW, O_NONBLOCK } = files.constants;
+  const fd = files.openSync(file, O_NOFOLLOW | O_NONBLOCK | O_RDWR | O_APPEND);
   try {
     const opened = files.fstatSync(fd, { bigint: true });
     if (!opened.isFile() || Number(opened.uid) !== owner.uid || opened.dev !== stat.dev || opened.ino !== stat.ino) {
@@ -103,10 +105,15 @@ function reconcileOwnedEnv(
 }
 
 const profileEnvProgram = `
-  const result = (${reconcileOwnedEnv.toString()})(require('node:fs'),
-    (${defaultsToAppend.toString()}), require('node:util').parseEnv,
-    JSON.parse(process.argv[1]), process.argv[2] === 'apply');
-  process.stdout.write(String(result));
+  try {
+    const result = (${reconcileOwnedEnv.toString()})(require('node:fs'),
+      (${defaultsToAppend.toString()}), require('node:util').parseEnv,
+      JSON.parse(process.argv[1]), process.argv[2] === 'apply');
+    process.stdout.write(String(result));
+  } catch (error) {
+    if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error;
+    process.stdout.write('false');
+  }
 `;
 
 async function reconcileAsProfileOwner(directory: string, apply: boolean): Promise<boolean> {

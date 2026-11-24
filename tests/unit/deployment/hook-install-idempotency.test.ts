@@ -177,4 +177,34 @@ describe('hook install idempotency', () => {
       if (kind === 'symlink') expect(await fs.readlink(envFile)).toBe(target);
     },
   );
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0).each(['file', 'profile'])(
+    'does not redeploy healthy Qoder Hooks for a read-only %s',
+    async kind => {
+      const profile = path.join(tmp, '.qoder');
+      await fs.chmod(tmp, 0o711);
+      await fs.mkdir(profile);
+      await fs.chown(profile, 12345, 12345);
+      await fs.copyFile(
+        new URL('../../../agents.d/qoder.json', import.meta.url),
+        path.join(pilotDir, 'agents.d', 'qoder.json'),
+      );
+      const envFile = path.join(profile, '.env');
+      const original = 'QODER_EXPOSE_TOKEN_USAGE=0\n';
+      if (kind === 'file') {
+        await fs.writeFile(envFile, original, { mode: 0o400 });
+        await fs.chown(envFile, 12345, 12345);
+      } else {
+        await fs.chmod(profile, 0o500);
+      }
+
+      expect((await install('qoder')).report.agents[0].status).toBe('ok');
+      expect((await install('qoder')).report.agents[0].status).toBe('up-to-date');
+      if (kind === 'file') {
+        expect(await fs.readFile(envFile, 'utf8')).toBe(original);
+      } else {
+        await expect(fs.access(envFile)).rejects.toMatchObject({ code: 'ENOENT' });
+      }
+    },
+  );
 });
