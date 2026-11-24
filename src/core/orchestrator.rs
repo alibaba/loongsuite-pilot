@@ -26,6 +26,7 @@ use crate::deployment::{
 use crate::flushers::{
     BaseFlusher, HttpFlusher, JsonlFlusher, MultiFlusher, OtlpTraceFlusher, SlsFlusher,
 };
+use crate::inputs::antigravity::AntigravityInput;
 use crate::inputs::base::InputRuntimeDelta;
 use crate::inputs::claude_code_log::ClaudeCodeLogInput;
 use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
@@ -2183,6 +2184,27 @@ impl Orchestrator {
             )
             .await;
         }
+        for client in [
+            crate::types::ClientType::Antigravity,
+            crate::types::ClientType::AntigravityCli,
+        ] {
+            let id = client.as_str();
+            self.add_hosted(
+                &mut entries,
+                HostedInputSpec::new(id, id, CollectionMethod::SqlitePolling.as_str(), 1),
+                AntigravityInput::new(client, Arc::clone(state_store), self.poll(id))
+                    .with_multimodal({
+                        let agent = self.config.agents.get(id).cloned().unwrap_or_default();
+                        self.inputs
+                            .multimodal_processor()
+                            .filter(|_| is_agent_multimodal_enabled(Some(id), &agent))
+                            .zip(agent.multimodal)
+                    }),
+                AntigravityInput::watch_paths(client),
+                move || AntigravityInput::available(client),
+            )
+            .await;
+        }
         self.register_remaining(&mut entries, state_store).await;
         entries
     }
@@ -3789,6 +3811,7 @@ hosted_surface!(CodexAbortedTurnInput);
 hosted_surface!(WukongInput);
 hosted_surface!(WorkBuddyInput);
 hosted_surface!(DoubaoWorkInput);
+hosted_surface!(AntigravityInput);
 
 trait HookSurface: Send + Sync {
     fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo;

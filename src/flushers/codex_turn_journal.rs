@@ -51,7 +51,13 @@ pub fn codex_turn_journal_group_key(entry: &AgentActivityEntry) -> String {
     hex::encode(Sha256::digest(bytes.expect("string tuple serializes")))
 }
 
-pub(super) const JOURNALED_AGENTS: &[&str] = &["codex", "hermes", "openclaw"];
+pub(super) const JOURNALED_AGENTS: &[&str] = &[
+    "codex",
+    "hermes",
+    "openclaw",
+    "antigravity",
+    "antigravity-cli",
+];
 
 fn has_journal_identity(entry: &AgentActivityEntry) -> bool {
     !entry.session_id.is_empty()

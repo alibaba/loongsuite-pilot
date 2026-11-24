@@ -137,7 +137,11 @@ pub fn convert_doubao_work_turn(
         .position(|s| s.attributes.get("gen_ai.span.kind").and_then(Value::as_str) == Some("AGENT"))
     {
         let mut owner = result.spans.remove(index);
-        let (rounds, placements) = add_assistant_rounds(&mut owner, &objects, lower, upper, start);
+        let (mut rounds, placements) =
+            add_assistant_rounds(&mut owner, &objects, lower, upper, start);
+        if let Some(chat) = chat_spans(&owner, start, end, lower, upper) {
+            rounds.extend(chat);
+        }
         let tools = add_local_tools(&mut owner, &objects, lower, upper, start, &placements);
         result.spans.insert(index, owner);
         result.spans.extend(rounds);
@@ -159,9 +163,108 @@ pub fn convert_doubao_work_turn(
     enrich_client_request(&objects, &mut result.spans);
     enrich_work_spans(&objects, &mut result.spans);
     label_doubao_client(&objects, &mut result.spans);
-    result.warnings.push("Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable".into());
+    let warning = if get_str(start, "loongsuite.doubao_work.mode") == Some("chat") {
+        "Doubao chat spans use observed client timing. Provider model and token usage remain unavailable."
+    } else {
+        "Doubao assistant rounds use visible transcript content and estimated client-side timing; actual provider requests, model usage and full delegated invocation coverage remain unavailable"
+    };
+    result.warnings.push(warning.into());
     result.span_count = result.spans.len();
     Ok(result)
+}
+
+fn chat_spans(
+    owner: &ReadableSpan,
+    start: &Record,
+    end: &Record,
+    lower: i128,
+    upper: i128,
+) -> Option<[ReadableSpan; 2]> {
+    if get_str(start, "loongsuite.doubao_work.mode") != Some("chat") {
+        return None;
+    }
+    let end_time = parse_time(start.get("agent.doubao_work.chat_response_end"))
+        .filter(|time| *time > lower && *time <= upper)?;
+    let mut fields = Map::new();
+    fields.insert("gen_ai.framework".into(), "doubao".into());
+    fields.insert("loongsuite.doubao_work.mode".into(), "chat".into());
+    let timing = if start.get("agent.doubao_work.chat_response_ended_with_session")
+        == Some(&Value::Bool(true))
+    {
+        "client_submit_to_session_end"
+    } else {
+        "client_submit_to_receive_end"
+    };
+    fields.insert("loongsuite.doubao_work.timing_basis".into(), timing.into());
+    for key in [
+        "gen_ai.agent.id",
+        "gen_ai.agent.name",
+        "gen_ai.session.id",
+        "gen_ai.turn.id",
+        "gen_ai.provider.name",
+        "loongsuite.doubao_work.native_model_id",
+    ] {
+        if let Some(value) = get_str(start, key) {
+            fields.insert(key.into(), value.into());
+        }
+    }
+    if let Some(user) = get_str(start, "user.id") {
+        fields.insert("gen_ai.user.id".into(), user.into());
+    }
+    let step_id = digest(&format!("{}:chat-step", owner.trace_id), 16);
+    let response = digest(&format!("{}:chat-llm", owner.trace_id), 16);
+    fields.insert("gen_ai.step.id".into(), step_id.clone().into());
+    let mut step = fixed_span(
+        "react step",
+        &owner.trace_id,
+        &step_id,
+        Some(&owner.span_id),
+        "STEP",
+        lower,
+        end_time,
+    );
+    step.attributes.extend(fields.clone());
+    step.attributes
+        .insert("gen_ai.react.round".into(), 1.into());
+    let mut llm = fixed_span(
+        "chat",
+        &owner.trace_id,
+        &response,
+        Some(&step_id),
+        "LLM",
+        lower,
+        end_time,
+    );
+    llm.attributes.extend(fields);
+    for (record, source, key) in [
+        (
+            start,
+            "gen_ai.input.messages_delta",
+            "gen_ai.input.messages",
+        ),
+        (end, "gen_ai.output.messages", "gen_ai.output.messages"),
+    ] {
+        if let Some(value) = record.get(source).filter(|value| value.is_array()) {
+            llm.attributes.insert(key.into(), value.to_string().into());
+        }
+    }
+    if let Some(id) = get_str(start, "agent.doubao_work.chat_response_id") {
+        llm.attributes
+            .insert("gen_ai.response.id".into(), id.into());
+    }
+    if let Some(error @ ("cancelled" | "error")) =
+        get_str(end, "loongsuite.doubao_work.client_outcome")
+    {
+        let kind = if error == "cancelled" {
+            "doubao.client_request_cancelled"
+        } else {
+            "doubao.client_request_failed"
+        };
+        llm.attributes.insert("error.type".into(), kind.into());
+        llm.status.insert("code".into(), 2.into());
+        step.status.insert("code".into(), 2.into());
+    }
+    Some([step, llm])
 }
 
 struct ToolPair<'a> {

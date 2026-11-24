@@ -2864,6 +2864,8 @@ fn route_convert(
         convert_qwen_subagents(records, &options, converter)
     } else if agent_type == "hermes" || agent_type == "openclaw" {
         convert_delegated_turn(records, &options, converter)
+    } else if matches!(agent_type, "antigravity" | "antigravity-cli") {
+        convert_antigravity(records, &options, converter)
     } else if agent_type == "copilot" {
         let mut result = converter.convert(records, &options)?;
         if let Some(error) = records
@@ -2886,6 +2888,89 @@ fn route_convert(
     } else {
         converter.convert(records, &options)
     }
+}
+
+fn convert_antigravity(
+    records: &[AgentActivityEntry],
+    options: &ConvertOptions,
+    converter: &dyn EventLogConverter,
+) -> Result<ConvertResult, String> {
+    let joined: std::collections::HashMap<_, _> = records
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("agent.antigravity.planner_joined")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|entry| Some((entry.response_id.as_deref()?, entry)))
+        .collect();
+    let mut prepared = Vec::with_capacity(records.len().saturating_sub(joined.len()));
+    for record in records {
+        if record
+            .get("agent.antigravity.planner_joined")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        let mut entry = record.clone();
+        if entry
+            .get("agent.antigravity.planner_pending")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            if let Some(join) = entry.response_id.as_deref().and_then(|id| joined.get(id)) {
+                entry.output_messages.clone_from(&join.output_messages);
+                entry.finish_reasons.clone_from(&join.finish_reasons);
+                entry.turn_end = join.turn_end;
+                if let Some(error) = join.get("error.type") {
+                    entry.extra.insert("error.type".into(), error.clone());
+                }
+                entry
+                    .extra
+                    .shift_remove("agent.antigravity.planner_pending");
+            }
+        }
+        prepared.push(entry);
+    }
+    let mut result = converter.convert(&prepared, options)?;
+    let cancelled: std::collections::HashSet<_> = prepared
+        .iter()
+        .filter(|entry| {
+            entry.get("error.type").and_then(Value::as_str) == Some("antigravity.model_cancelled")
+        })
+        .filter_map(|entry| entry.response_id.as_deref())
+        .collect();
+    for span in &mut result.spans {
+        match span
+            .attributes
+            .get("gen_ai.span.kind")
+            .and_then(Value::as_str)
+        {
+            Some("LLM")
+                if span
+                    .attributes
+                    .get("gen_ai.response.id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| cancelled.contains(id)) =>
+            {
+                span.status.insert("code".into(), 2.into());
+                span.attributes
+                    .insert("error.type".into(), "antigravity.model_cancelled".into());
+            }
+            Some("ENTRY")
+                if span.parent_span_id.as_deref() == Some("0000000000000001")
+                    && !prepared.iter().any(|entry| {
+                        entry.parent_span_id.as_deref() == Some("0000000000000001")
+                    }) =>
+            {
+                span.parent_span_id = None;
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
 }
 
 fn convert_qwen_collaboration(
@@ -3058,6 +3143,9 @@ fn resolve_group_key(entry: &AgentActivityEntry) -> (KeySource, String, String) 
 
 fn is_terminal_event(entry: &AgentActivityEntry) -> bool {
     let agent_type = normalize_agent_type(&entry.agent_type);
+    if matches!(agent_type.as_str(), "antigravity" | "antigravity-cli") {
+        return entry.turn_end == Some(true);
+    }
     if matches!(agent_type.as_str(), "doubao" | "doubao-work") {
         return entry_str(entry, "event.name").as_deref() == Some("other")
             && if entry_str(entry, "loongsuite.doubao_work.observation_scope").as_deref()

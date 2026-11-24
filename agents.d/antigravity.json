@@ -1,0 +1,14 @@
+{
+  "id": "antigravity",
+  "displayName": "Antigravity",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": [
+      "~/.gemini/antigravity"
+    ],
+    "commands": []
+  },
+  "input": {
+    "type": "antigravity-sqlite"
+  }
+}

@@ -50,6 +50,7 @@ str_enum!(ClientType {
     Kiro = "kiro",
     KiroCli = "kiro-cli",
     Antigravity = "antigravity",
+    AntigravityCli = "antigravity-cli",
     Lingma = "lingma",
     LingmaVscode = "lingma-vscode",
     Wukong = "wukong",

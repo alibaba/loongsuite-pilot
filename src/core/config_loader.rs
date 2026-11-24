@@ -1088,6 +1088,8 @@ fn build_listeners(
         "pi-coding-agent-log",
         "workbuddy",
         "doubao-work",
+        "antigravity",
+        "antigravity-cli",
         "hermes-agent-log",
     ] {
         result.insert(
@@ -1097,7 +1099,11 @@ fn build_listeners(
                 client: None,
                 log_dir: None,
                 enabled: true,
-                poll_interval: DEFAULT_POLL_INTERVAL_MS,
+                poll_interval: if matches!(key, "antigravity" | "antigravity-cli") {
+                    crate::utils::DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS
+                } else {
+                    DEFAULT_POLL_INTERVAL_MS
+                },
             },
         );
     }

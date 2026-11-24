@@ -28,6 +28,8 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("workbuddy", "workbuddy"),
     ("doubao-work", "doubao"),
     ("doubao", "doubao"),
+    ("antigravity", "antigravity"),
+    ("antigravity-cli", "antigravity"),
     ("dsh", "dsh"),
 ];
 

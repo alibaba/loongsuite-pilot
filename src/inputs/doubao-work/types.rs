@@ -49,6 +49,12 @@ pub struct DoubaoLogEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_outcome: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_skills: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_partners: Option<Vec<String>>,
@@ -64,6 +70,14 @@ pub struct DoubaoLogEvent {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DoubaoPendingTurn {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub send_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub receive_end_nano: Option<String>,
     pub turn_id: String,
     pub query_ms: i64,
     pub updated_ms: i64,

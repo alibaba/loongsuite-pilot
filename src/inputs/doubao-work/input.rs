@@ -112,6 +112,11 @@ impl DoubaoWorkInput {
             })),
             ..Default::default()
         });
+        let chat = defaults
+            .user_data_root
+            .as_deref()
+            .filter(|_| options.client == DoubaoClient::App)
+            .map(super::chat::ChatReader::new);
         let body = DoubaoWorkBody {
             recovery: super::source_ownership::SourceRecovery::new(
                 options.state_store.file_path(),
@@ -127,7 +132,7 @@ impl DoubaoWorkInput {
                 options.native_scan_interval_ms.unwrap_or(10_000),
             ),
             limits: options.work_budget.unwrap_or_default(),
-            state: tokio::sync::Mutex::new(Shared::new(reader)),
+            state: tokio::sync::Mutex::new(Shared::new(reader, chat)),
             host: Mutex::new(None),
             wakeup: Mutex::new(None),
             watcher: Mutex::new(None),
@@ -252,6 +257,7 @@ struct ReconstructionJob {
 }
 struct Shared {
     reader: DoubaoWorkNativeReader,
+    chat: Option<super::chat::ChatReader>,
     committed: Option<Checkpoint>,
     loaded: bool,
     revision: Option<u64>,
@@ -275,9 +281,10 @@ struct Shared {
     expire_log_read: Option<usize>,
 }
 impl Shared {
-    fn new(reader: DoubaoWorkNativeReader) -> Self {
+    fn new(reader: DoubaoWorkNativeReader, chat: Option<super::chat::ChatReader>) -> Self {
         Self {
             reader,
+            chat,
             committed: None,
             loaded: false,
             revision: None,
@@ -351,6 +358,9 @@ impl InputBody for DoubaoWorkBody {
         self.before_stop();
         let mut shared = self.state.lock().await;
         shared.reader.clear();
+        if let Some(chat) = &mut shared.chat {
+            chat.clear();
+        }
         shared.cycle_graphs.clear();
         shared.jobs.clear();
         shared.sweep = None;
@@ -1110,6 +1120,20 @@ fn consume(state: &mut Checkpoint, event: &DoubaoLogEvent, now: i64) {
     if event.selected_partners.is_some() {
         pending.selected_partners = event.selected_partners.clone();
     }
+    if event.mode_type.is_some() {
+        pending.mode_type.clone_from(&event.mode_type);
+    }
+    if event.send_message_id.is_some() {
+        pending.send_message_id.clone_from(&event.send_message_id);
+    }
+    if event.receive_message_id.is_some() {
+        pending
+            .receive_message_id
+            .clone_from(&event.receive_message_id);
+    }
+    if event.name == "on_message_receiving_end" {
+        pending.receive_end_nano = Some(event.time_nano.clone());
+    }
     state.pending.set(key, pending);
 }
 impl DoubaoWorkBody {
@@ -1370,7 +1394,85 @@ impl DoubaoWorkBody {
             .conversation_id
             .as_ref()
             .or(pending.conversation_id.as_ref());
-        if let Some(conversation) = conversation {
+        if let Some(chat) = shared.chat.as_mut().filter(|_| {
+            pending
+                .mode_type
+                .as_deref()
+                .is_some_and(|mode| mode != "work_task")
+        }) {
+            let failed = matches!(
+                terminal.client_outcome.as_deref(),
+                Some("cancelled" | "error")
+            );
+            let end = terminal.time_nano.parse::<i128>().unwrap_or_default();
+            let start = text(complete[0].get("time_unix_nano"))
+                .and_then(|time| time.parse::<i128>().ok())
+                .unwrap_or_default();
+            let receive = pending.receive_end_nano.as_deref().filter(|time| {
+                time.parse::<i128>()
+                    .is_ok_and(|time| time > start && time <= end)
+            });
+            let Some(response_end) =
+                receive.or_else(|| failed.then_some(terminal.time_nano.as_str()))
+            else {
+                return Ok(());
+            };
+            let content = match chat.find(&pending.turn_id, budget).await {
+                Ok(Some(content)) => content,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    if !self.defer(shared, rt, &error) {
+                        rt.logger.warn(
+                            "Doubao chat native content unavailable; preserving pending request",
+                            None,
+                        );
+                    }
+                    return Ok(());
+                }
+            };
+            if (!content.finished && !failed)
+                || Some(&content.conversation) != conversation
+                || Some(&content.local_id) != pending.local_message_id.as_ref()
+                || Some(&content.send_id) != pending.send_message_id.as_ref()
+                || Some(&content.receive_id) != pending.receive_message_id.as_ref()
+                || content.query_ms < pending.query_ms
+                || i128::from(content.query_ms) * 1_000_000 > end
+            {
+                return Ok(());
+            }
+            attach_io(
+                &mut complete,
+                &json!({"input":content.input,"output":content.output}),
+                false,
+            );
+            for event in &mut complete {
+                set(event, "loongsuite.doubao_work.mode", "chat");
+                if let Some(model) = &content.model_id {
+                    set(
+                        event,
+                        "loongsuite.doubao_work.native_model_id",
+                        model.as_str(),
+                    );
+                }
+            }
+            set(
+                &mut complete[0],
+                "agent.doubao_work.chat_response_end",
+                response_end,
+            );
+            set(
+                &mut complete[0],
+                "agent.doubao_work.chat_response_id",
+                content.receive_id,
+            );
+            if receive.is_none() {
+                set(
+                    &mut complete[0],
+                    "agent.doubao_work.chat_response_ended_with_session",
+                    true,
+                );
+            }
+        } else if let Some(conversation) = conversation {
             let result = async {
                 let job_key = format!("request:{key}");
                 let Some(graph) = self

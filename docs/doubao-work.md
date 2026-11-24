@@ -2,7 +2,7 @@
 
 The passive adapter reads the official macOS / Windows client's logs and native files for freshly identified conversations. It installs no hooks and changes neither authentication nor the app. Observed baselines are macOS 2.33.10 / 2.34.1 and Windows 2.25.18. Visible assistant messages reconstruct a content-first STEP / LLM / TOOL tree; provider metadata and complete cloud execution coverage remain unavailable.
 
-The Rust collector has independent `listeners.doubao-work` and `listeners.doubao` entries for Work and App. A legacy `listeners.doubao-work.client = "doubao"` selection retains its original input identity and owns that App source exclusively. The App adapter here reads work-style client evidence. Ordinary App chat depends on a separate data source.
+The Rust collector has independent `listeners.doubao-work` and `listeners.doubao` entries for Work and App. A legacy `listeners.doubao-work.client = "doubao"` selection retains its original input identity and owns that App source exclusively. The App adapter here reads work-style client evidence. Ordinary App chat joins the log boundaries with the current request in its dedicated Chromium IndexedDB store. The collector reads WAL and immutable table files without opening or writing the client database. It emits the model span only after matching the submit, message identities and receive boundary.
 
 ## Evidence and projection
 

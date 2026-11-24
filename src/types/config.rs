@@ -379,7 +379,13 @@ pub struct MultimodalRuntimeConfig {
     pub storage_base_path: String,
 }
 
-pub const MULTIMODAL_SUPPORTED_AGENT_IDS: &[&str] = &["codex", "qoder", "qwen-work-cn"];
+pub const MULTIMODAL_SUPPORTED_AGENT_IDS: &[&str] = &[
+    "codex",
+    "qoder",
+    "qwen-work-cn",
+    "antigravity",
+    "antigravity-cli",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

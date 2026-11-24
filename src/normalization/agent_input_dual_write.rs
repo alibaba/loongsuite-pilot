@@ -4,6 +4,10 @@ pub const AGENT_INPUT_EVENT_NAMESPACE: &str = "29afa46e-d5de-5c48-946b-90c1d0537
 
 pub fn is_input_other_event(entry: &AgentActivityEntry) -> bool {
     entry.event_name == Some(AgentEventName::Other)
+        && entry
+            .get("agent.antigravity.planner_joined")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
         && (entry.input_messages.is_some() || entry.input_messages_delta.is_some())
 }
 
