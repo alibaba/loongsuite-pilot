@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher, type TraceExporterLike } from '../../src/flushers/otlp-trace-flusher.js';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
@@ -64,6 +65,52 @@ describe('Strands Harness trace identity', () => {
       const span = spans.find(item => item.attributes['gen_ai.span.kind'] === 'ENTRY');
       expect(span?.spanContext().traceId).toBe(traceId);
       expect(span?.parentSpanId).toBe(parent);
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+
+  it('exports a positive sub-millisecond tool span at the source timestamps', async () => {
+    const spans: ReadableSpan[] = [];
+    const exporter: TraceExporterLike = {
+      export(batch, callback) {
+        spans.push(...batch);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'strands-timing-test',
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }],
+    }, undefined, () => exporter);
+    try {
+      const records = turn(ClientType.StrandsHarness, 'strands-timing', 0);
+      const entries = records.map(record => {
+        const event = record['event.name'];
+        return buildCanonicalHookEntry({
+          ...record,
+          'gen_ai.react.round': 1,
+          ...(event === 'tool.call' ? { time_unix_nano: '1700000000003100000' } : {}),
+          ...(event === 'tool.result' ? {
+            time_unix_nano: '1700000000003450000',
+            'tool.result.status': 'error',
+            'error.type': 'SyntheticToolError',
+          } : {}),
+        }, ClientType.StrandsHarness);
+      });
+      await flusher.sendBatch(entries.filter(entry => entry !== null));
+      await flusher.flush();
+
+      const tool = spans.find(span => span.attributes['gen_ai.tool.call.id'] === 'spawn');
+      const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+      expect(tool?.startTime).toEqual([1700000000, 3100000]);
+      expect(tool?.endTime).toEqual([1700000000, 3450000]);
+      expect(tool?.duration).toEqual([0, 350000]);
+      expect(tool?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(tool?.attributes['error.type']).toBe('SyntheticToolError');
+      expect(step?.endTime).toEqual(tool?.endTime);
     } finally {
       await flusher.shutdown();
     }
