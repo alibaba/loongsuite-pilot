@@ -17,6 +17,7 @@ import {
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
+import { readJsonDocument } from '../utils/json-document.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
@@ -170,6 +171,10 @@ export class HookStrategy implements DeployStrategy {
         return true;
       }
     }
+    if (def.id === 'zcode' && def.hook) {
+      const settings = await readJsonFile<{ hooks?: { enabled?: boolean } }>(resolveHome(def.hook.settingsPath));
+      if (settings?.hooks?.enabled !== true) return true;
+    }
     for (const retiredDef of this.buildRetiredHookDefinitions(def)) {
       if (await this.hookManager.isHookInstalled(retiredDef)) {
         return true;
@@ -227,6 +232,7 @@ export class HookStrategy implements DeployStrategy {
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
       else await ensureSettings();
+      if (def.id === 'zcode') await this.ensureZCodeHooksEnabled(hookConfig.settingsPath);
 
       // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
       // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
@@ -770,6 +776,30 @@ export class HookStrategy implements DeployStrategy {
       if (!found) return true;
     }
     return false;
+  }
+
+  private async ensureZCodeHooksEnabled(settingsPath: string): Promise<void> {
+    const resolvedPath = resolveHome(settingsPath);
+    const document = await readJsonDocument<Record<string, unknown>>(resolvedPath);
+    if (document.status === 'error') {
+      throw new Error('refusing to overwrite invalid settings: ' + document.error.message);
+    }
+    const settings = document.status === 'ok' ? document.data : {};
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      throw new Error('expected ZCode settings to be a JSON object');
+    }
+    const existing = settings.hooks;
+    const hooks = existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? existing as Record<string, unknown>
+      : {};
+    if (hooks.enabled === true) return;
+
+    await writeTextFileAtomic(resolvedPath, JSON.stringify({
+      ...settings,
+      hooks: { ...hooks, enabled: true },
+    }, null, 2) + '\n', {
+      expected: document.status === 'missing' ? { exists: false } : { exists: true, content: document.raw },
+    });
   }
 
   /**
