@@ -220,6 +220,11 @@ async fn reconcile_profile(directory: &Path, apply: bool) -> io::Result<bool> {
         let Some((uid, gid, device, inode)) = trusted_profile(directory)? else {
             return Ok(false);
         };
+        if uid == 0 {
+            // The selected directory and its ancestors are trusted and the
+            // profile already belongs to this process's effective user.
+            return reconcile_file(directory, apply);
+        }
         let mut command = tokio::process::Command::new(std::env::current_exe()?);
         command
             .uid(uid)
@@ -332,6 +337,15 @@ mod tests {
             "QODER_EXPOSE_TOKEN_USAGE=1\n"
         );
         assert!(missing_defaults("OTHER='open").is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_owner_can_write_without_a_privilege_helper() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().canonicalize().unwrap();
+        assert!(reconcile_profile(&path, true).await.unwrap());
+        assert!(!reconcile_profile(&path, true).await.unwrap());
     }
 
     #[test]
