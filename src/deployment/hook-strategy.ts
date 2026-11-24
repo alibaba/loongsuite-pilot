@@ -18,6 +18,7 @@ import {
   ensureDir,
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { planQoderTokenUsageDefaults } from './qoder-token-usage.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
@@ -178,7 +179,7 @@ export class HookStrategy implements DeployStrategy {
     if (await this.needsTrustRepairForCodex(def)) {
       return true;
     }
-    return false;
+    return (await planQoderTokenUsageDefaults(def)) !== undefined;
   }
 
   private async needsSettingsRepairForCodex(def: AgentDefinition): Promise<boolean> {
@@ -339,6 +340,15 @@ export class HookStrategy implements DeployStrategy {
           if (!removed) {
             return { success: false, agentId: def.id, deployMode: 'hook', error: 'failed to remove retired hook event' };
           }
+        }
+      }
+
+      const tokenUsage = await planQoderTokenUsageDefaults(def);
+      if (tokenUsage) {
+        try {
+          await writeTextFileAtomic(tokenUsage.file, tokenUsage.text, tokenUsage.options);
+        } catch (error) {
+          logger.warn('could not write Qoder token usage defaults', { agentId: def.id, error: String(error) });
         }
       }
 

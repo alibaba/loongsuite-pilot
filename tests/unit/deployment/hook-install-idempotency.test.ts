@@ -51,13 +51,14 @@ describe('hook install idempotency', () => {
     await fs.rm(tmp, { recursive: true, force: true });
   });
 
-  function install() {
+  function install(agent = 'sample-agent', homes?: Record<string, string>) {
     return runHookInstall({
       dataDir,
       pilotDir,
       builtinAgentsDir: path.join(pilotDir, 'agents.d'),
       writeResult: true,
-      agentsFlag: 'sample-agent',
+      agentsFlag: agent,
+      homes,
       identity: { identity: 'd'.repeat(64), source: 'cgroup' },
     });
   }
@@ -81,5 +82,31 @@ describe('hook install idempotency', () => {
     const restored = await fs.readFile(settingsPath, 'utf8');
     expect(restored).toBe(before);
     expect(restored).not.toBe('{}\n');
+  });
+
+  it.each(['qoder', 'qoder-cn'])('fills %s token usage defaults on initial and existing hook installs', async agent => {
+    const home = path.join(tmp, `${agent} profile`);
+    await fs.mkdir(home);
+    await fs.copyFile(
+      new URL(`../../../agents.d/${agent}.json`, import.meta.url),
+      path.join(pilotDir, 'agents.d', `${agent}.json`),
+    );
+    const installInHome = () => install(agent, { [agent]: home });
+    const envFile = path.join(home, '.env');
+    const settings = path.join(home, 'settings.json');
+    expect((await installInHome()).report.agents[0].status).toBe('ok');
+    expect(await fs.readFile(envFile, 'utf8')).toBe('QODER_EXPOSE_TOKEN_USAGE=1\nQODERCN_EXPOSE_TOKEN_USAGE=1\n');
+    const hookMtime = (await fs.stat(settings)).mtimeMs;
+
+    // Existing hooks and a private .env with a multiline secret and an explicit override.
+    const original = 'OTHER="first\r\nQODER_EXPOSE_TOKEN_USAGE=0\r\nlast"\r\nexport QODERCN_EXPOSE_TOKEN_USAGE="0"';
+    await fs.writeFile(envFile, original);
+    expect((await installInHome()).report.agents[0].status).toBe('ok');
+    expect(await fs.readFile(envFile, 'utf8')).toBe(original + '\r\nQODER_EXPOSE_TOKEN_USAGE=1\r\n');
+    expect((await fs.stat(settings)).mtimeMs).toBe(hookMtime);
+
+    const envMtime = (await fs.stat(envFile)).mtimeMs;
+    expect((await installInHome()).report.agents[0].status).toBe('up-to-date');
+    expect((await fs.stat(envFile)).mtimeMs).toBe(envMtime);
   });
 });
