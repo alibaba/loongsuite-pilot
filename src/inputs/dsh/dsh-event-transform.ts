@@ -332,6 +332,7 @@ function recordContext(
     'time_unix_nano': msToNano(time),
     'gen_ai.session.id': sid,
     'gen_ai.turn.id': turnId,
+    ...(sid && turn !== undefined ? { 'agent.pilot.correlation.native_turn_id': String(turn) } : {}),
     'gen_ai.step.id': stepId,
     'trace_id': traceId,
     'user.id': '',

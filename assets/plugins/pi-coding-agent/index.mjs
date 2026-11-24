@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 // Worker labels are optional. A missing helper during a partial update must not
 // turn telemetry into a Pi startup dependency or prevent ordinary collection.
 const resourceContext = await import('../shared/resource-context.mjs').catch(() => null);
+const upstreamIngress = await import(new URL('../../hooks/shared/upstream-ingress.mjs', import.meta.url).href).catch(() => null);
 const agentBaseFieldPatch = typeof resourceContext?.agentBaseFieldPatch === 'function'
   ? resourceContext.agentBaseFieldPatch : () => ({});
 const collectResourceAttributesFromEnv = typeof resourceContext?.collectResourceAttributesFromEnv === 'function'
@@ -398,6 +399,7 @@ function turnFields(ctx, state, runtime, timestamp = Date.now()) {
     'user.id': state.userId,
     'gen_ai.session.id': sessionId,
     'gen_ai.turn.id': state.turnId,
+    ...(state.upstreamTurnId === state.turnId ? { 'agent.pilot.correlation.native_turn_id': state.turnId } : {}),
     'gen_ai.agent.type': identity.agentType,
     'gen_ai.agent.id': identity.agentId,
     'gen_ai.agent.name': identity.agentName,
@@ -496,7 +498,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.toolStarts.clear();
   }));
 
-  pi.on('before_agent_start', safeHandler('before_agent_start', async (event) => {
+  pi.on('before_agent_start', safeHandler('before_agent_start', async (event, ctx) => {
     resetSessionConfig();
     state.traceId = traceId();
     state.turnId = crypto.randomUUID();
@@ -511,6 +513,19 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.previousRequestMessages = [];
     state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
+    if (!process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) return;
+    const binding = upstreamIngress?.bindProcessUpstreamTurn({
+      agentId: identity.agentType,
+      sessionId: ctx.sessionManager.getSessionId(),
+      nativeTurnId: state.turnId,
+      dataDir: resolveDataDir(),
+    });
+    if (binding?.recorded) {
+      state.upstreamTurnId = state.turnId;
+      if (state.pendingUserInput.length === 0) {
+        writeRecord({ ...turnFields(ctx, state, runtime), 'event.name': 'other' });
+      }
+    }
   }));
 
   pi.on('turn_start', safeHandler('turn_start', async (event) => {

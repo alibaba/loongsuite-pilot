@@ -34,6 +34,7 @@ import {
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
 import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { bindProcessUpstreamTurn } from './shared/upstream-ingress.mjs';
 import {
   sanitizeObject,
   toJsonValue,
@@ -635,7 +636,9 @@ async function cmdTerminal(eventKind) {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
   // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (!process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) {
+    recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  }
   if (toolPropagationEnabled(runtimeConfig)) {
     markToolPropagationConsumed(pilotDataDir(), sessionId);
   }
@@ -1257,6 +1260,7 @@ function buildTurnRecords(
     // win over caller-supplied attributes; aligns with qoder's Object.assign order.
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_ATTRIBUTE_FIELDS,
+    ...((turn.promptId || promptIdFallback) ? { 'agent.pilot.correlation.native_turn_id': turn.promptId || promptIdFallback } : {}),
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -1609,6 +1613,22 @@ function buildTurnRecords(
 // ─── dispatcher ───
 
 const DISPATCH = {
+  'user-prompt-submit': async () => {
+    const event = tryReadStdin();
+    if (isCursorCaller(event)) return;
+    const sessionId = requireSessionId(event, 'cmd');
+    if (!sessionId) return;
+    if (process.env.LOONGSUITE_PILOT_INGRESS_REQUEST_ID) {
+      bindProcessUpstreamTurn({
+        agentId: AGENT_ID,
+        sessionId,
+        nativeTurnId: event.prompt_id,
+        dataDir: pilotDataDir(),
+      });
+    } else {
+      recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+    }
+  },
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
   'stop-failure': cmdStopFailure,

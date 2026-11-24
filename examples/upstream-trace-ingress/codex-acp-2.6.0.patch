@@ -1,0 +1,44 @@
+diff --git a/src/CodexAcpClient.ts b/src/CodexAcpClient.ts
+index b727180..b338633 100644
+--- a/src/CodexAcpClient.ts
++++ b/src/CodexAcpClient.ts
+@@ -28,10 +28,15 @@ import type {JsonValue} from "./app-server/serde_json/JsonValue";
+ import {ModelId} from "./ModelId";
+ import {AgentMode} from "./AgentMode";
+ import path from "node:path";
++import {pathToFileURL} from "node:url";
+ import {isDeepStrictEqual} from "node:util";
+ import {logger} from "./Logger";
+ import {isAccountReadAuthFailureError, isAccountReadUnavailableError} from "./CodexThreadErrors";
+ import {listedSessionTitle, normalizeSessionTitle} from "./SessionTitle";
++const pilotIngressModule = process.env.LOONGSUITE_PILOT_INGRESS_MODULE;
++const pilotIngress = pilotIngressModule
++    ? await import(pathToFileURL(pilotIngressModule).href).catch(() => undefined)
++    : undefined;
+ import {type AcpMcpServer, type WithAcpMcpServers, normalizeMcpServers, toCodexMcpServerConfig} from "./McpServerConfig";
+ import type {
+     AccountUpdatedNotification,
+@@ -1401,6 +1406,11 @@ export class CodexAcpClient {
+         if (shouldCancel?.()) {
+             return null;
+         }
++        const bindPilotTurn = pilotIngress?.prepareUpstreamTurn({
++            agentId: "codex",
++            sessionId: request.sessionId,
++            carrier: request._meta,
++        });
+         const permissionProfileId = agentMode.permissionProfileId;
+         return await this.codexClient.runTurn({
+             threadId: request.sessionId,
+@@ -1418,7 +1428,10 @@ export class CodexAcpClient {
+             model: modelId.model,
+             serviceTier: serviceTier,
+             ...(clientUserMessageId !== undefined ? {clientUserMessageId} : {}),
+-        }, onTurnStarted);
++        }, (nativeTurnId) => {
++            bindPilotTurn?.(nativeTurnId);
++            onTurnStarted?.(nativeTurnId);
++        });
+     }
+
+     async setCollaborationMode(sessionId: string, mode: ModeKind, currentModelId: string): Promise<void> {

@@ -30,6 +30,7 @@ export const GROK_BUILD_HOOK_ASSETS = [
   'shared/qoder-db-utils.mjs',
   'shared/resource-context.mjs',
   'shared/stdin-reader.mjs',
+  'shared/upstream-ingress.mjs',
 ] as const;
 
 

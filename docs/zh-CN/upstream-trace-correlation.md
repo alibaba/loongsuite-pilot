@@ -8,7 +8,7 @@
 - **Hermes 插件**：更新 Hermes 实际加载的 Pilot 插件，并重启 Hermes 进程。只升级采集器或只替换磁盘文件，不会更新已运行进程中的插件。新插件从本轮用户消息生成输入事件，在截断正文前计算关联 hash。
 - **关联记录**：上游仍需在每轮请求前写入本文的 `turn` 记录，目录须对上游和 Pilot 均可访问。
 
-`TRACEPARENT` 环境变量是另一种首轮 session 关联方式，仅对调用 `recordUpstreamContextOnce` 写入 session 记录的 Hook 生效。OpenClaw / Hermes 的 Pilot 插件本身不直接读取该环境变量，设置变量不能代替逐轮关联文件。
+`TRACEPARENT` 的会话首轮模式适用于调用 `recordUpstreamContextOnce` 写入会话记录的 Hook。每次请求启动独立 Agent 进程时，也可以按原生轮次绑定上下文。适用的 CLI 入口和 SDK、ACP 接入方式见[上游 Trace 接入指南](upstream-trace-ingress.md)。
 
 已有有效父工具上下文的子代理保留原生 trace / parent 关系，不用子会话关联文件覆盖父工具链路。
 
@@ -114,7 +114,7 @@ writeTurnContext({
 
 Hermes 修复在首个 `llm.request` 前追加一次携带用户输入的 `other` 事件（`agent.hermes.hook=turn_start`），使用此时已确定的原生 turn/task ID。模型重试与后续 LLM 调用复用同一轮关联结果，不会重复写入该输入事件。这是逐轮关联文件的支持，不代表新增了 `TRACEPARENT` 环境变量接入。
 
-注意：当前逐轮关联使用 `traceparent` 中的 Trace ID 和 Parent Span ID，不完整透传采样标志和 `tracestate`；也不会自动把上下文注入 Agent 发出的网络请求。
+包含[通用入站能力](upstream-trace-ingress.md)的版本同时保留 `traceparent` 采样位和可选 `tracestate`，在创建 ENTRY 时恢复真实 remote parent Context；旧版只保留 Trace ID 和 Parent Span ID。本能力不会自动把上下文注入 Agent 发出的网络请求。存在可靠原生 turn ID 的 SDK/Plugin 推荐使用通用 API，避免重复输入并发时依赖文件顺序。
 
 ### Hermes 输入迟到与无输入兜底
 

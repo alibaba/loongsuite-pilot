@@ -53,6 +53,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_ENABLED` | Set `false` or `0` to disable the collector. |
 | `LOONGSUITE_PILOT_DATA_DIR` | Override the data directory. |
 | `LOONGSUITE_PILOT_HOOK_SCOPE` | Installation scope (`user` or Linux-only `system`) for hook CLI and container eager injection. Explicit `--scope` wins; unset preserves existing behavior and recorded targets. |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK` | Set `1` or `true` in the collector environment to enable upstream linking. This overrides `upstreamLink.enabled`. See [upstream trace setup](upstream-trace-ingress.md). |
 | `LOONGSUITE_PILOT_USER_ID` | Override `userId`. |
 | `LOONGSUITE_PILOT_HOST_IDENTITY_TAGS` | Set to `false` or `0` to omit `__mac__` and `__sn__`. When unset, `hostIdentityTags` is used. |
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
