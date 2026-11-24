@@ -26,13 +26,20 @@ export function promptRequestId(value: string): string {
 
 export function promptKeyFromRequest(request: HookRequest): PromptVerdictKey | null {
   if (!request.sessionId || typeof request.prompt !== 'string' || !request.prompt.length) return null;
+  const business = request.raw?.parent_business_info;
+  const product = business && typeof business === 'object' && !Array.isArray(business)
+    ? (business as Record<string, unknown>).product : undefined;
   const agentType = promptAgentType(resolveQoderEventAgentType(request,
     request.agent === 'qodercli' ? 'qoder-cli' : request.agent));
   if (!agentType) return null;
   const id = request.raw?.request_set_id;
+  const hasId = typeof id === 'string' && id.length > 0 && id.length <= 512;
   return { phase: 'UserPromptSubmit', sessionId: request.sessionId, agentType,
     promptHash: promptHash(request.prompt),
-    requestId: typeof id === 'string' && id.length > 0 && id.length <= 512 ? promptRequestId(id) : randomUUID() };
+    requestId: hasId ? promptRequestId(id) : randomUUID(),
+    ...((request.agent === 'qoder' || request.agent === 'qodercli') && id === undefined
+      ? { missingRequestId: true as const } : {}),
+    ...(request.agent === 'qoder' && product === undefined ? { missingAgentType: true as const } : {}) };
 }
 
 export interface PromptLookup {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorWorker, type InterceptorWorkerService, type InterceptorWorkerOptions } from '../../../src/interceptor/worker-service.js';
 import { unavailableInterceptorStatus } from '../../../src/interceptor/status.js';
+import { promptKeyFromRequest, promptHash, promptRequestId } from '../../../src/interceptor/prompt-verdict.js';
 
 const control = vi.hoisted(() => ({ workers: [] as any[], ready: true, reply: true,
   childCallbacks: [] as Array<(error: Error | null) => void> }));
@@ -56,6 +57,22 @@ afterEach(async () => {
 });
 
 describe('interceptor worker supervisor', () => {
+  it('forwards anonymous prompt ownership to the sole writer before a sync/stop command', async () => {
+    const service = await start();
+    const now = Date.now();
+    const key = promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 'session', prompt: 'probe', raw: {} })!;
+    service.verdictStore.put(key, { action: 'log', ruleId: 'policy' }, new Date(now));
+    const lookup = { sessionId: 'session', agentType: 'qoder-app', promptHash: promptHash('probe'),
+      requestId: promptRequestId('native'), at: now };
+    expect(service.verdictStore.getPromptSnapshot(lookup)?.action).toBe('log');
+    await service.syncVerdicts();
+    const commands = control.workers[0].commands;
+    expect(commands[0]).toMatchObject({ type: 'bind-prompt', record: { missingRequestId: true,
+      missingAgentType: true, binding: { requestId: lookup.requestId, agentType: 'qoder-app', at: now } } });
+    expect(commands[1].type).toBe('sync');
+    await service.stop();
+    expect(commands.at(-1).type).toBe('stop');
+  });
   it.each(['none', undefined, 'custom'] as const)('does not create a Worker for startup mode %s, even with cached rules', async mode => {
     const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-worker-disabled-'));
     dirs.push(dataDir);

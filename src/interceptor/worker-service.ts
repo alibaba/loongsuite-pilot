@@ -74,6 +74,9 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
   }
   if (!opts.verdictStore) mirror.restore();
   let worker: Worker | null = null;
+  mirror.onPromptBinding = record => {
+    worker?.postMessage({ type: 'bind-prompt', record } satisfies InterceptorWorkerCommand);
+  };
   let port: number | null = null;
   let managedActive = false;
   let stopped = false;
