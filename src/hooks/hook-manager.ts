@@ -423,9 +423,10 @@ export class HookManager {
 
   private buildHookEntry(def: HookDefinition): Record<string, unknown> {
     const timeout = typeof def.timeout === 'number' ? { timeout: def.timeout } : {};
+    const nestedMatcher = def.matcher ?? (def.agentId === 'zcode' ? undefined : '*');
     return def.useNestedFormat
       ? {
-          matcher: def.matcher ?? '*',
+          ...(nestedMatcher === undefined ? {} : { matcher: nestedMatcher }),
           hooks: [{
             command: def.hookCommand,
             type: 'command',

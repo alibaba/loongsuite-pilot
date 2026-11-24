@@ -129,6 +129,33 @@ export interface AgentHookConfig {
    */
   env?: Record<string, string>;
   /**
+   * Path prefix inserted before the event name when constructing hookJsonPath
+   * for HookManager. Default ['hooks'] (writes to settings.hooks.<event>).
+   * ZCode uses ['hooks', 'events'] because its config schema nests event
+   * arrays under settings.hooks.events.<event>.
+   */
+  hookContainerPath?: string[];
+  /**
+   * Top-level settings fields to deep-merge into the agent's config file on
+   * deploy (shallow per-level merge; leaf values overwrite). Used for agents
+   * like ZCode that require a sibling flag (e.g. settings.hooks.enabled=true)
+   * for the registered hook entries to fire.
+   */
+  extraSettings?: Record<string, unknown>;
+  /**
+   * Hook executor type as configured in the agent's settings file
+   * (e.g. "command" vs "process"). Informational; recorded here per
+   * architect CP2 hard-constraint to make the chosen hook type explicit
+   * and auditable. HookStrategy does not branch on this value — the
+   * command/hookCommand is what gets written.
+   */
+  hookType?: 'command' | 'process';
+  /**
+   * Free-form rationale documenting why hookType was chosen. Paired with
+   * hookType for traceability.
+   */
+  hookTypeRationale?: string;
+  /**
    * Kiro CLI 专用：settingsPath 指向的是一整个 Agent 定义 JSON
    * （~/.kiro/agents/<name>.json），需要顶层 name + tools 字段。
    * HookStrategy 在 ensureSettingsFile 时若文件缺失会用此模板 seed。
@@ -325,6 +352,16 @@ export interface AgentDefinition {
   /** Present only for `dsh-yaml-patch` agents. */
   dshYamlPatch?: DshYamlPatchConfig;
   input?: AgentInputConfig;
+  /**
+   * Per-agent flusher overrides (plan 2.1 + 2.2). Currently consumed by
+   * OtlpTraceFlusher to apply per-agentType turnIdleTimeoutMs /
+   * turnFlushDebounceMs without affecting other agents. Plumbed via
+   * orchestrator → OtlpTraceFlusherConfig.perAgentFlusherConfig.
+   */
+  flusher?: {
+    turnIdleTimeoutMs?: number;
+    turnFlushDebounceMs?: number;
+  };
   /** 运行时要求（如 node:sqlite）与无该依赖时的 fallback 声明 */
   runtime?: AgentRuntimeConfig;
 }

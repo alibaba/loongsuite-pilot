@@ -57,7 +57,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -93,7 +93,7 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
@@ -105,10 +105,10 @@ function legacyHookCommands(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -284,6 +284,17 @@ export class HookStrategy implements DeployStrategy {
           // env injection failure must not block hook deployment — pilot can still
           // collect the basic transcript-based events without preload.
           logger.warn('settings.env merge failed (non-blocking)', {
+            agentId: def.id,
+            error: String(err),
+          });
+        }
+      }
+
+      if (hookConfig.extraSettings) {
+        try {
+          await this.applyExtraSettings(hookConfig.settingsPath, hookConfig.extraSettings);
+        } catch (err) {
+          logger.warn('settings.extraSettings merge failed (non-blocking)', {
             agentId: def.id,
             error: String(err),
           });
@@ -569,11 +580,12 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) return [];
 
+    const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: [...containerPath, event],
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -593,13 +605,14 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
+    const containerPath = hookConfig.hookContainerPath ?? ['hooks'];
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: [...containerPath, event],
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
@@ -668,6 +681,51 @@ export class HookStrategy implements DeployStrategy {
     existing.env = envBlock;
     await writeJsonFile(settingsPath, existing);
     logger.info('settings.env merged', { settingsPath, keys: Object.keys(env) });
+  }
+
+  /**
+   * Deep-merge `extraSettings` into the agent's settings file. Used by agents
+   * like ZCode that require a sibling flag (e.g. `hooks.enabled = true`) for
+   * the registered hook entries to fire. Merge semantics: walk both trees,
+   * overwrite at leaf level, recurse into nested objects without blowing
+   * away sibling keys the user already configured (preserves `model` /
+   * `provider` etc.).
+   */
+  private async applyExtraSettings(
+    settingsPath: string,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    const existing =
+      (await readJsonFile<Record<string, unknown>>(settingsPath)) ?? {};
+
+    const mergeLeaf = (target: Record<string, unknown>, src: Record<string, unknown>): boolean => {
+      let changed = false;
+      for (const [key, value] of Object.entries(src)) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          const child = (target[key] as Record<string, unknown> | undefined) ?? {};
+          if (typeof child !== 'object' || Array.isArray(child)) {
+            target[key] = value;
+            changed = true;
+            continue;
+          }
+          if (mergeLeaf(child, value as Record<string, unknown>)) {
+            target[key] = child;
+            changed = true;
+          }
+        } else {
+          if (target[key] !== value) {
+            target[key] = value;
+            changed = true;
+          }
+        }
+      }
+      return changed;
+    };
+
+    const changed = mergeLeaf(existing, extra);
+    if (!changed) return;
+    await writeJsonFile(settingsPath, existing);
+    logger.info('settings.extraSettings merged', { settingsPath, keys: Object.keys(extra) });
   }
 
   /**

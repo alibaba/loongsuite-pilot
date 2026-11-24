@@ -52,6 +52,7 @@ export enum ClientType {
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
   Dsh = 'dsh',
+  ZcodeHook = 'zcode',
 
 }
 

@@ -1,0 +1,36 @@
+{
+  "id": "zcode",
+  "displayName": "ZCode",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.zcode/cli"],
+    "commands": ["zcode"]
+  },
+  "hook": {
+    "settingsPath": "~/.zcode/cli/config.json",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/zcode-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case",
+    "hookContainerPath": ["hooks", "events"],
+    "extraSettings": {
+      "hooks": { "enabled": true }
+    },
+    "hookType": "command",
+    "hookTypeRationale": "CP1 已实证 command 模式可成功抓取全部 7 类 hook 事件（见 fixtures/hook-events.jsonl）；与项目现有 claude-code/cursor/qoder 保持一致，复用 claude-code-hook-processor.mjs 无需特殊分支；payload 经 stdin 传递不存在 shell 转义问题。process 模式未在 ZCode 上实证，故不采用。"
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/zcode"
+  },
+  "flusher": {
+    "turnIdleTimeoutMs": 120000,
+    "turnFlushDebounceMs": 35000
+  }
+}

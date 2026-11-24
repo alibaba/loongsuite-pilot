@@ -49,6 +49,8 @@ export interface PluginCheckTarget {
   settingsPath: string;
   /** File syntax. Defaults to strict JSON. */
   settingsSyntax?: JsonSyntax;
+  /** Path to the event map in settings. Defaults to ['hooks']. */
+  hookContainerPath?: string[];
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
@@ -758,7 +760,11 @@ export class HookWatchdog {
     target: PluginCheckTarget,
   ): string[] {
     const missing: string[] = [];
-    const hooksRoot = settings?.hooks as Record<string, unknown> | undefined;
+    const container = (target.hookContainerPath ?? ['hooks']).reduce<unknown>((value, key) =>
+      value && typeof value === 'object' && !Array.isArray(value)
+        ? (value as Record<string, unknown>)[key]
+        : undefined, settings);
+    const hooksRoot = container as Record<string, unknown> | undefined;
 
     for (const event of target.expectedHooks) {
       const arr = hooksRoot?.[event];

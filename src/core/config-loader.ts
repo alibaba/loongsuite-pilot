@@ -207,6 +207,11 @@ export interface ConfigFile {
     debug?: boolean;
     captureMessageContent?: boolean;
     turnIdleTimeoutMs?: number;
+    turnFlushDebounceMs?: number;
+    perAgentFlusherConfig?: Record<string, {
+      turnIdleTimeoutMs?: number;
+      turnFlushDebounceMs?: number;
+    }>;
     resourceAttributeKeys?: string[];
     spanAttributePassthroughPrefixes?: string[];
   };
@@ -1112,6 +1117,8 @@ export function buildOtlpTraceConfig(config: AnalyticsConfig): OtlpTraceFlusherC
     captureMessageContent,
     debug: otlp?.debug ?? config.cms.debug ?? false,
     turnIdleTimeoutMs: otlp?.turnIdleTimeoutMs ?? 0,
+    turnFlushDebounceMs: otlp?.turnFlushDebounceMs ?? 0,
+    perAgentFlusherConfig: otlp?.perAgentFlusherConfig,
     resourceAttributeKeys: resolveResourceAttributeKeys(otlp),
     spanAttributePassthroughPrefixes: resolveSpanAttributePassthroughPrefixes(otlp),
     spanEnricherPaths: resolveSpanEnricherPaths(otlp?.spanEnrichers, config.dataDir),

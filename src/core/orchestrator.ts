@@ -78,6 +78,8 @@ import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, type DoubaoClient } from '../utils/doubao-work-paths.js';
 import { AntigravityInput, type AntigravityClientType } from '../inputs/antigravity/antigravity-input.js';
+import { ZcodeLogInput } from '../inputs/zcode-log/zcode-log-input.js';
+import { ZcodeRolloutInput } from '../inputs/zcode-rollout/zcode-rollout-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -169,6 +171,8 @@ export class Orchestrator extends EventEmitter {
     'dsh-log': 'dsh',
     'antigravity': 'antigravity',
     'antigravity-cli': 'antigravity-cli',
+    'zcode-log': 'zcode',
+    'zcode-rollout': 'zcode',
   };
 
   private readonly config: AnalyticsConfig;
@@ -861,11 +865,14 @@ export class Orchestrator extends EventEmitter {
       // Its exact config and asset checks run through a dedicated intercept target.
       if (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system') continue;
 
-      const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
+      const scriptName = def.id === 'zcode'
+        ? path.basename(def.hook.hookCommand)
+        : path.basename(def.hook.hookCommand.split(' ')[0]);
       targets.push({
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         settingsSyntax: def.hook.settingsSyntax,
+        hookContainerPath: def.hook.hookContainerPath,
         expectedHooks: def.hook.events,
         markers: [scriptName],
         // Runtime gate: a user who has turned this agent off (config.agents[id]
@@ -1096,8 +1103,12 @@ export class Orchestrator extends EventEmitter {
       if (otlpTraceCfg?.enabled && otlpTraceCfg.endpoints.length > 0) {
         const { OtlpTraceFlusher } = await import('../flushers/otlp-trace-flusher.js');
         const { CodexTurnJournal } = await import('../flushers/codex-turn-journal.js');
+        const perAgentFlusherConfig = await this.buildPerAgentFlusherConfig();
         const r = new OtlpTraceFlusher(
-          { ...otlpTraceCfg, dataDir: this.dataDir },
+          { ...otlpTraceCfg, dataDir: this.dataDir, perAgentFlusherConfig: {
+            ...perAgentFlusherConfig,
+            ...otlpTraceCfg.perAgentFlusherConfig,
+          } },
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
@@ -1120,6 +1131,43 @@ export class Orchestrator extends EventEmitter {
     }
 
     return flushers.length === 1 ? flushers[0] : new MultiFlusher(flushers);
+  }
+
+  /**
+   * Scan agents.d/*.json (builtin + local) and build a per-agentType flusher
+   * override map from each agent's `flusher` field (plan 2.1 + 2.2). Failures
+   * are non-blocking — the flusher falls back to global cfg for any agent
+   * not represented here.
+   */
+  private async buildPerAgentFlusherConfig(): Promise<Record<string, { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number }>> {
+    const out: Record<string, { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number }> = {};
+    try {
+      const pilotDir = this.resolvePilotDir();
+      const { AgentDefLoader } = await import('../deployment/agent-def-loader.js');
+      const loader = new AgentDefLoader({
+        builtinDir: path.join(pilotDir, 'agents.d'),
+        localDir: path.join(this.dataDir, 'agents.d.local'),
+        pilotDir,
+        dataDir: this.dataDir,
+      });
+      const defs = await loader.load();
+      for (const def of defs) {
+        if (!def.flusher) continue;
+        const entry: { turnIdleTimeoutMs?: number; turnFlushDebounceMs?: number } = {};
+        if (typeof def.flusher.turnIdleTimeoutMs === 'number') {
+          entry.turnIdleTimeoutMs = def.flusher.turnIdleTimeoutMs;
+        }
+        if (typeof def.flusher.turnFlushDebounceMs === 'number') {
+          entry.turnFlushDebounceMs = def.flusher.turnFlushDebounceMs;
+        }
+        if (Object.keys(entry).length > 0) {
+          out[def.id] = entry;
+        }
+      }
+    } catch (err) {
+      logger.warn('failed to load per-agent flusher config from agents.d', { error: String(err) });
+    }
+    return out;
   }
 
   /**
@@ -2044,6 +2092,53 @@ export class Orchestrator extends EventEmitter {
         }),
       );
     }
+
+    // --- ZCode Log (Shell Hook JSONL, main path) ---
+    // Hook-driven events from ZCode's built-in Claude-Code-compatible hook
+    // system (SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop).
+    // Payloads carry rich fields (tool inputs, prompts, response text);
+    // processor writes daily-rotated JSONL, this input tails it.
+    const zcodeLogDir = path.join(this.dataDir, 'logs', 'zcode');
+    await ensureDir(zcodeLogDir);
+    const zcodeLogInput = new ZcodeLogInput({
+      stateStore: this.stateStore,
+      logDir: zcodeLogDir,
+    });
+    this.inputManager.registerInput(zcodeLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeLogInput, {
+        watchPaths: [zcodeLogDir],
+        isAvailable: async () => directoryExists(zcodeLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-log',
+            listenerCfg['zcode-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-log']?.pollInterval,
+      }),
+    );
+
+    // --- ZCode Rollout (per-session JSONL tail, LLM payload supplement) ---
+    // Independent Input class per architect CP2 hard-constraint: ZCode writes
+    // one model-io-sess_<sid>.jsonl per session in ~/.zcode/cli/rollout/, each
+    // record carrying full LLM request (messages/tools/system) + response
+    // (text/toolCalls/usage). BaseSessionInput provides per-file inode-aware
+    // offset tracking; BaseHookInput's daily-rotated single-file model can't
+    // carry this per-session naming.
+    const zcodeRolloutInput = new ZcodeRolloutInput({ stateStore: this.stateStore });
+    this.inputManager.registerInput(zcodeRolloutInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(zcodeRolloutInput, {
+        watchPaths: ZcodeRolloutInput.getWatchPaths(),
+        isAvailable: ZcodeRolloutInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['zcode-rollout']) &&
+          this.agentControlManager.resolveEnabled(
+            'zcode-rollout',
+            listenerCfg['zcode-rollout']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['zcode-rollout']?.pollInterval,
+      }),
+    );
 
     return entries;
   }
