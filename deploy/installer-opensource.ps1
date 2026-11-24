@@ -1605,7 +1605,7 @@ if (opts.hookTamperProtection) {
   if (!config.hookWatchdog.tamperProtection || typeof config.hookWatchdog.tamperProtection !== 'object' || Array.isArray(config.hookWatchdog.tamperProtection)) {
     config.hookWatchdog.tamperProtection = {};
   }
-  config.hookWatchdog.tamperProtection.enabled = opts.hookTamperProtection === 'true';
+  config.hookWatchdog.tamperProtection.enabled = opts.hookTamperProtection.toLowerCase() === 'true';
 }
 if (opts.interceptorMode) {
   config.interceptor = config.interceptor || {};
