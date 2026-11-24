@@ -49,6 +49,16 @@ export function hasModelToolSpanForOutput(tools, expectedToolCall) {
   });
 }
 
+function isTraeObservation(span, observation) {
+  return span.attributes?.['gen_ai.agent.name'] === 'trae-cn'
+    && span.attributes?.['loongsuite.trae_cn.observation'] === observation;
+}
+
+function isTraeTurnSummary(step, childrenMap) {
+  return isTraeObservation(step, 'turn_summary') &&
+    (childrenMap.get(step.spanId) || []).some(span => span._kind === 'LLM' && isTraeObservation(span, 'turn_summary'));
+}
+
 // Check semantic.last_step_no_tool_call: the LAST assistant message in the
 // last STEP's LLM `gen_ai.output.messages` must not contain a tool_call part.
 // Earlier assistant messages may legitimately carry tool_call parts (e.g.
@@ -63,7 +73,10 @@ export function checkLastStepNoToolCall(spans, childrenMap) {
     return d < 0n ? -1 : d > 0n ? 1 : 0;
   });
   const lastStep = sorted[sorted.length - 1];
-  const children = childrenMap.get(lastStep.spanId) || [];
+  // A TRAE summary starts with the turn but contains its terminal answer.
+  const terminalStep = sorted.find(step => step.parentSpanId === lastStep.parentSpanId &&
+    isTraeTurnSummary(step, childrenMap)) || lastStep;
+  const children = childrenMap.get(terminalStep.spanId) || [];
   const llm = children.find(c => c._kind === 'LLM');
   if (!llm) return [];
   const raw = llm.attributes?.['gen_ai.output.messages'];
@@ -335,13 +348,15 @@ export function validateStructure(trace) {
   for (const s of steps) {
     const children = childrenMap.get(s.spanId) || [];
     const llmChildren = children.filter(c => c._kind === 'LLM');
-    if (llmChildren.length !== 1) {
+    const traeToolOnlyStep = llmChildren.length === 0 && children.some(c => c._kind === 'TOOL') &&
+      (isTraeObservation(s, 'response_recorded') || isTraeObservation(s, 'unattributed_tools'));
+    if (llmChildren.length !== 1 && !traeToolOnlyStep) {
       checks.push(error('structure.step_has_one_llm', `STEP has ${llmChildren.length} LLM children, expected 1`, s.spanId, s.name));
       allStepsOk = false;
     }
   }
   if (allStepsOk && steps.length > 0) {
-    checks.push(pass('structure.step_has_one_llm', `${steps.length} STEPs, each with 1 LLM`));
+    checks.push(pass('structure.step_has_one_llm'));
   }
 
   let llmOrderOk = true;
@@ -474,7 +489,9 @@ export function validateTime(trace, rules) {
   for (const s of spans) {
     const start = BigInt(s.startTimeUnixNano);
     const end = BigInt(s.endTimeUnixNano);
-    if (end <= start) {
+    const recordedResponse = s._kind === 'LLM' && isTraeObservation(s, 'response_recorded') &&
+      Boolean(s.attributes['gen_ai.response.id']);
+    if (end < start || (end === start && !recordedResponse)) {
       checks.push(error('time.non_zero_duration', `duration=${Number(end - start) / 1e6}ms`, s.spanId, s.name));
       allNonZero = false;
     }
@@ -485,7 +502,8 @@ export function validateTime(trace, rules) {
     (childrenMap.get(agent.spanId) || []).filter(s => s._kind === 'STEP'));
   let overlap = false;
   for (const agentSteps of stepGroups) {
-    const sorted = [...agentSteps].sort((a, b) => {
+    // A turn summary is a view of the entire turn, outside the sequence of concrete rounds.
+    const sorted = agentSteps.filter(step => !isTraeTurnSummary(step, childrenMap)).sort((a, b) => {
       const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
       return d < 0n ? -1 : d > 0n ? 1 : 0;
     });
@@ -875,26 +893,28 @@ export function validateSemantic(trace, rules) {
   // agent_token_sum
   for (const { agent: agentSpan, spans: executionSpans } of executions) {
     const llmSpans = executionSpans.filter(s => s._kind === 'LLM');
-    for (const tokenKey of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
+    let hasAnyToken = false;
+    let allMatch = true;
+    for (const counter of ['input_tokens', 'output_tokens', 'total_tokens']) {
+      const tokenKey = 'gen_ai.usage.' + counter;
       const agentVal = agentSpan.attributes?.[tokenKey];
       if (agentVal === undefined || agentVal === null) continue;
+      hasAnyToken = true;
       const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[tokenKey] || 0), 0);
-      if (agentVal !== llmSum) {
+      // TRAE can count a Hub receipt at turn scope without a model response
+      // to assign it to. Reconcile with the receipt aggregate and reject double counting.
+      const receiptCount = agentSpan.attributes?.['agent.trae-cn.hub.usage_received'];
+      const partialTraeAttribution = agentSpan.attributes?.['gen_ai.agent.name'] === 'trae-cn' &&
+        Number.isSafeInteger(receiptCount) &&
+        agentSpan.attributes['agent.trae-cn.hub.' + counter + '_observed'] === agentVal &&
+        llmSpans.filter(span => typeof span.attributes?.[tokenKey] === 'number').length < receiptCount;
+      if (agentVal !== llmSum && !(partialTraeAttribution && llmSum < agentVal)) {
         checks.push(error('semantic.agent_token_sum',
           `AGENT ${tokenKey}=${agentVal}, sum of LLM=${llmSum}`, agentSpan.spanId, agentSpan.name));
+        allMatch = false;
       }
     }
-    const hasAnyToken = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']
-      .some(k => agentSpan.attributes?.[k] !== undefined);
-    if (hasAnyToken) {
-      const allMatch = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens'].every(k => {
-        const av = agentSpan.attributes?.[k];
-        if (av === undefined || av === null) return true;
-        const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[k] || 0), 0);
-        return av === llmSum;
-      });
-      if (allMatch) checks.push(pass('semantic.agent_token_sum'));
-    }
+    if (hasAnyToken && allMatch) checks.push(pass('semantic.agent_token_sum'));
   }
 
   // tool_matches_llm_output
