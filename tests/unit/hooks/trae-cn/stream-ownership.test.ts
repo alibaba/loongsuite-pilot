@@ -15,7 +15,7 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('re
   const chunks: Buffer[] = [];
   function add(message: string, fields: Record<string, string | number | boolean>) {
     const data = { trace_id: 'a'.repeat(32), message, ...fields };
-    chunks.push(cbor.encode({ span: 42, time: [2026, 320, 8, 3, 2, 0, 0, 0, 0], fields:
+    chunks.push(cbor.encode({ span: 42, time: [2026, 320, 8, 3, 2, chunks.length, 0, 0, 0], fields:
       Object.fromEntries(Object.entries(data).map(([k,v]) => [k, typeof v === 'string' ? Buffer.from(v) : v])) }));
   }
   const open = (request: string) => add('cloud stream response headers',
@@ -58,12 +58,13 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('re
       expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
       expect(index.ownsTool(trace, session, unrelatedReply, calls)).toBe(false);
     }
-    if (mode === 'valid' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', reply, seq: 5, toolIds: ['one','two'] });
+    if (mode === 'valid' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', headersAt: String(BigInt(Date.UTC(2026, 0, 320, 8, 3, 2)) * 1000000n + 1n), reply, seq: 5, toolIds: ['one','two'] });
     else if (mode === 'two histories') {
       expect(rounds).toHaveLength(2);
       for (const round of rounds!) {
         expect(round).toMatchObject({ shared: true, initial: true, request: 'request1', streamReports: [{ reply, seq: 5 }] });
         expect(round).not.toHaveProperty('seq');
+        expect(round).not.toHaveProperty('headersAt');
       }
     } else expect(rounds?.[0]).not.toHaveProperty('request');
   } finally {

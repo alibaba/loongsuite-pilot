@@ -19,7 +19,7 @@ it('keeps response identities distinct and turn-level data on the agent', () => 
     { type: 'tool_call', id: 'call_a' }, { type: 'text', content: 'final answer' },
   ] }]);
   tool.attributes['gen_ai.tool.call.result'] = 'tool result';
-  const rounds = ['a', 'b', 'c'].map((c, i) => ({ id: c.repeat(24), initial: i === 0, terminal: i === 2, request: c, continuation: i === 2 ? 'b' : undefined, ...(i === 1 ? { toolIds: ['call_a'], input: 30, output: 2, cached: 10 } : {}), at: String(1700000000000000100n + BigInt(i) * 10000000000n) }));
+  const rounds = ['a', 'b', 'c'].map((c, i) => ({ id: c.repeat(24), initial: i === 0, terminal: i === 2, request: c, continuation: i === 2 ? 'b' : undefined, ...(i === 1 ? { headersAt: '1700000009000000000', toolIds: ['call_a'], input: 30, output: 2, cached: 10 } : {}), at: String(1700000000000000100n + BigInt(i) * 10000000000n) }));
   const records = [{ 'event.name': 'llm.response', span_id: '3', 'loongsuite.trae_cn.model_responses': rounds }] as unknown as AgentActivityEntry[];
   const result = expandTraeHistory(records, [agent, step, llm, tool]);
   const models = result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
@@ -28,11 +28,13 @@ it('keeps response identities distinct and turn-level data on the agent', () => 
   expect(models.map(s => s.attributes['gen_ai.usage.total_tokens'])).toEqual([undefined, 32, undefined]);
   expect(agent.attributes['gen_ai.usage.total_tokens']).toBe(51);
   expect(tool.parentSpanId).toBe(models[1].parentSpanId);
-  expect(models[1].startTime).toEqual([1700000010, 100]);
+  expect(models[1].startTime).toEqual([1700000009, 0]);
+  expect(models[1].endTime).toEqual([1700000010, 100]);
+  expect(tool.startTime).toEqual([1700000010, 0]);
   const owner = result.find(s => s.spanContext().spanId === tool.parentSpanId);
-  expect(owner?.startTime).toEqual(tool.startTime);
+  expect(owner?.startTime).toEqual(models[1].startTime);
   expect(owner?.endTime).toEqual(tool.endTime);
-  expect(owner?.duration).toEqual([1, 5]);
+  expect(owner?.duration).toEqual([2, 5]);
   expect(models.map(s => s.attributes['gen_ai.input.messages'])).toEqual(['user prompt', undefined,
     JSON.stringify([{ role: 'tool', parts: [{ type: 'tool_call_response', id: 'call_a', response: 'tool result' }] }])]);
   expect(models.map(s => s.attributes['gen_ai.output.messages'])).toEqual([undefined,

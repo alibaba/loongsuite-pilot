@@ -110,13 +110,22 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         attributes['gen_ai.react.round'] = seen.size;
       }
       let startTime = instant;
+      // A uniquely owned stream gives us a client-side interval. The server
+      // can dispatch tools before the client records the model history.
+      if (!shared && typeof r.request === 'string' && typeof r.headersAt === 'string' &&
+          /^\d{1,19}$/.test(r.headersAt) && BigInt(r.headersAt) < ns) {
+        const headers = BigInt(r.headersAt);
+        startTime = [Number(headers / 1000000000n), Number(headers % 1000000000n)];
+        attributes['loongsuite.trae_cn.timing_source'] = 'response_headers_to_history_recorded';
+      }
       if (r.initial === true && typeof r.requestStartMs === 'number' && typeof r.firstTokenMs === 'number' &&
           Number.isSafeInteger(r.requestStartMs) && Number.isSafeInteger(r.firstTokenMs) &&
           r.requestStartMs > 0 && r.firstTokenMs >= r.requestStartMs && BigInt(r.firstTokenMs) * 1000000n <= ns &&
           (isStream || !shared)) {
         // The history timestamp records persistence, not the end of inference.
-        // Extend the STEP to the measured request start; keep the LLM observation instantaneous.
-        if (!isModel) startTime = [Math.floor(r.requestStartMs / 1000), (r.requestStartMs % 1000) * 1000000];
+        // Include the measured request start in the STEP if it extends the interval.
+        const requestStart: [number, number] = [Math.floor(r.requestStartMs / 1000), (r.requestStartMs % 1000) * 1000000];
+        if (!isModel && earlier(requestStart, startTime)) startTime = requestStart;
         attributes['loongsuite.trae_cn.request_to_first_token_ns'] = (r.firstTokenMs - r.requestStartMs) * 1000000;
         const agentStart = BigInt(agent.startTime[0]) * 1000000000n + BigInt(agent.startTime[1]);
         const elapsed = BigInt(r.firstTokenMs) * 1000000n - agentStart;

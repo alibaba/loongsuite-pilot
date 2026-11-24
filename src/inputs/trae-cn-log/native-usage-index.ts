@@ -6,12 +6,20 @@ import cbor from 'cbor';
 
 type ReplyUsage = { reply: string; seq: number };
 type ResponseStream = {
-  request: string; owner: unknown; histories: Set<string>; tools: Set<string>; reports: Map<string, ReplyUsage>;
+  request: string; headersAt?: string; owner: unknown; histories: Set<string>; tools: Set<string>; reports: Map<string, ReplyUsage>;
   initial: boolean; terminal?: boolean; continuation?: string; resultCount?: number; closed: boolean;
 };
 type Receipt = { session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
 const id24 = /^[a-f0-9]{24}$/;
+function nativeTimestamp(record: unknown): string | undefined {
+  const parts = (record as { time?: number[] }).time;
+  if (!Array.isArray(parts) || parts.length !== 9 || !parts.every(Number.isInteger)) return;
+  const [year, day, hour, minute, second, ns, oh, om, os] = parts;
+  const ms = Date.UTC(year, 0, day, hour - oh, minute - om, second - os);
+  if (Number.isFinite(ms) && ns >= 0 && ns < 1e9) return String(BigInt(ms) * 1000000n + BigInt(ns));
+}
+
 class NativeStream {
   readonly receipts = new Map<string, Receipt>();
   readonly inflater = createInflateRaw();
@@ -73,7 +81,7 @@ export class NativeUsageIndex {
         const previous = r.streams.at(-1);
         const continuation = !initial && previous?.closed && !previous.terminal && previous.owner === owner
           ? previous.request : undefined;
-        r.active = { owner, request, initial, continuation, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
+        r.active = { owner, request, headersAt: nativeTimestamp(record), initial, continuation, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
         r.streams.push(r.active);
       }
     }
@@ -100,12 +108,8 @@ export class NativeUsageIndex {
     if (message === 'recording history entry' && text(f.history_source) === 'Server' && text(f.source) === 'llm_default') {
       const id = text(f.history_id);
       if (id24.test(id)) active?.histories.add(id);
-      const parts = (record as { time?: number[] }).time;
-      if (id24.test(id) && !r.history.has(id) && Array.isArray(parts) && parts.length === 9 && parts.every(Number.isInteger)) {
-        const [year, day, hour, minute, second, ns, oh, om, os] = parts;
-        const ms = Date.UTC(year, 0, day, hour - oh, minute - om, second - os);
-        if (Number.isFinite(ms) && ns >= 0 && ns < 1e9) r.history.set(id, String(BigInt(ms) * 1000000n + BigInt(ns)));
-      }
+      const at = nativeTimestamp(record);
+      if (id24.test(id) && at && !r.history.has(id)) r.history.set(id, at);
     }
     if (message === '[Hub] task event contract' && text(f.event_type) === 'token_usage' &&
         text(f.conversation_id) === r.session && id24.test(text(f.task_id)) &&
@@ -137,6 +141,7 @@ export class NativeUsageIndex {
       const shared = s.histories.size > 1;
       const usage = !shared && uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
       return { id, at, request: s.request, toolIds,
+        ...(!shared && s.headersAt && BigInt(s.headersAt) < BigInt(at) ? { headersAt: s.headersAt } : {}),
         ...(shared ? { shared: true, streamReports: uniqueReports.map(([, usage]) => usage) } : {}),
         ...(s.initial && s === receipt.streams[0] ? { initial: true } : {}),
         ...(s.terminal && s === receipt.streams.at(-1) ? { terminal: true } : {}),
