@@ -14,6 +14,8 @@ Pilot resolves configuration in this order:
 
 Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 
+For caller → Agent → downstream tracing, see the opt-in [shared W3C context runtime](trace-context-propagation.md), configured by `upstreamLink.sharedContext` and `LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT`.
+
 ## Common Global Settings
 
 ```jsonc

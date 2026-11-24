@@ -1,5 +1,7 @@
 # Pilot 逐轮 Trace 上下文关联接入
 
+需要在 Agent 发起下游请求**之前**预留并透传上下文时，使用 [统一双向 W3C 透传](trace-context-propagation.md)。本文旧关联文件是事后入站关联，不替代出站 Hook。
+
 上游应用在发送每轮用户请求前，写入一条关联记录。Pilot 采集到该轮数据后，根据会话 ID 和用户输入找到记录，让该轮调用链沿用上游 Trace ID，并挂到指定的上游 Span 下。
 
 在 OpenClaw / Hermes 上使用本文方案，需要同时满足以下部署条件：

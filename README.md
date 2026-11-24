@@ -171,6 +171,7 @@ Link collected agent spans to an **upstream** trace so each turn's span tree rep
 | Setting | Values | Default |
 | ------- | ------ | ------- |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK` (env) · `upstreamLink.enabled` (config.json) | `true` / `1` to enable; unset, `false`, or `0` to disable | disabled |
+| `LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT` (env) · `upstreamLink.sharedContext` (config.json) | bind turns and reserve identities before dispatch using the shared W3C runtime | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS` (env) · `upstreamLink.propagateToTools` (config.json) | propagate trace context and optional resource attributes to supported CLI tool calls | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_LLM` (env) · `upstreamLink.propagateToLlm` (config.json) | forward trace context to the LLM gateway as a `traceparent` request header (Claude Code) | disabled |
 | `LOONGSUITE_PILOT_UPSTREAM_LINK_GENERATE_TRACE_WHEN_MISSING` (env) · `upstreamLink.generateTraceWhenMissing` (config.json) | generate and propagate a per-turn local trace context when no valid upstream context is available | disabled |
@@ -187,6 +188,8 @@ Enabling both `upstreamLink.enabled` and `propagateToLlm` extends the same trace
 
 
 ## Output Data
+
+For pre-dispatch caller → Agent → downstream propagation, enable the opt-in [shared trace-context runtime](docs/trace-context-propagation.md) ([中文](docs/zh-CN/trace-context-propagation.md)). Claude Code adapts prompt hooks, Bash and LLM fetch; other frameworks can reuse the HTTP, metadata and child-environment carriers through a thin adapter.
 
 
 | Backend    | Use Case                                                                |

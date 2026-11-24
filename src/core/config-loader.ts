@@ -159,6 +159,7 @@ export interface ConfigFile {
   serviceNamePrefix?: string;
 
   upstreamLink?: {
+    sharedContext?: boolean;
     enabled?: boolean;
     propagateToTools?: boolean;
     propagateToLlm?: boolean;
@@ -356,8 +357,12 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
 
 function buildUpstreamLinkConfig(file: ConfigFile | null): UpstreamLinkConfig {
   const ttlMs = envInt('LOONGSUITE_PILOT_UPSTREAM_LINK_TTL_MS', file?.upstreamLink?.ttlMs ?? 86_400_000); // 24h
+  const sharedContextOverride = process.env.LOONGSUITE_PILOT_UPSTREAM_LINK_SHARED_CONTEXT;
   return {
     enabled: envBool('LOONGSUITE_PILOT_UPSTREAM_LINK', file?.upstreamLink?.enabled ?? false),
+    sharedContext: sharedContextOverride
+      ? sharedContextOverride === '1' || sharedContextOverride.toLowerCase() === 'true'
+      : file?.upstreamLink?.sharedContext === true,
     propagateToTools: envBool(
       'LOONGSUITE_PILOT_UPSTREAM_LINK_PROPAGATE_TO_TOOLS',
       file?.upstreamLink?.propagateToTools ?? false,

@@ -33,7 +33,8 @@ import {
   writeJsonlRecords,
 } from './shared/event-emitter.mjs';
 import { logHookError } from './shared/error-logger.mjs';
-import { recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { claimUpstreamContextForTurn, recordUpstreamContextOnce } from './shared/upstream-context.mjs';
+import { sharedTraceRuntime } from './shared/trace-context-adapter.mjs';
 import {
   sanitizeObject,
   toJsonValue,
@@ -54,6 +55,7 @@ import {
   markToolPropagationConsumed,
   readTurnContext,
   reserveToolContext,
+  isToolPropagationConsumed,
 } from './claude-code/tool-context.mjs';
 import {
   parseClaudeTranscript,
@@ -408,6 +410,26 @@ function toolPropagationEnabled(runtimeConfig) {
     && runtimeConfig?.upstreamLink?.propagateToTools === true;
 }
 
+function cmdUserPromptSubmit() {
+  const event = tryReadStdin();
+  if (isCursorCaller(event) || event.agent_id || event.agent_type) return;
+  const sessionId = requireSessionId(event, 'user_prompt_submit');
+  if (!sessionId || typeof event.prompt !== 'string' || !event.prompt) return;
+  const config = loadHookRuntimeConfig(pilotDataDir()).upstreamLink;
+  if (!config.enabled || !config.sharedContext) return;
+  const shared = sharedTraceRuntime(pilotDataDir());
+  if (!shared) return;
+  const identity = { agentType: AGENT_ID, sessionId,
+    ...(typeof event.prompt_id === 'string' && event.prompt_id ? { turnId: event.prompt_id } : {}),
+    inputHash: shared.api.inputHash(event.prompt) };
+  const dataDir = pilotDataDir();
+  const inheritsEnvironment = !isToolPropagationConsumed(dataDir, sessionId)
+    && claimUpstreamContextForTurn({ dataDir, ...identity });
+  if (shared.store.findTurn(identity)) return;
+  const inherited = inheritsEnvironment ? { traceparent: process.env.TRACEPARENT, tracestate: process.env.TRACESTATE } : {};
+  shared.store.bindTurn(identity, inherited, { generate: config.generateTraceWhenMissing, ttlMs: config.ttlMs });
+}
+
 function cmdPreToolUse() {
   const event = tryReadStdin();
   if (isCursorCaller(event)) return;
@@ -423,7 +445,12 @@ function cmdPreToolUse() {
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
   if (!toolPropagationEnabled(runtimeConfig)) return;
 
-  const context = reserveToolContext({
+  const shared = runtimeConfig.upstreamLink.sharedContext ? sharedTraceRuntime(pilotDataDir()) : null;
+  const binding = shared?.store.findTurn({ agentType: AGENT_ID, sessionId,
+    ...(typeof event.prompt_id === 'string' && event.prompt_id ? { turnId: event.prompt_id } : {}) });
+  const context = runtimeConfig.upstreamLink.sharedContext
+    ? binding && shared.store.reserveOperation(binding, 'tool', toolUseId)
+    : reserveToolContext({
     dataDir: pilotDataDir(),
     sessionId,
     promptId: typeof event.prompt_id === 'string' ? event.prompt_id : '',
@@ -634,9 +661,10 @@ async function cmdTerminal(eventKind) {
 
   const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
 
-  // 方案1(env):首个 turn 读 TRACEPARENT 写 session 级关联记录(fail-open, 每 session 一次)
-  recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
-  if (toolPropagationEnabled(runtimeConfig)) {
+  const usesSharedContext = runtimeConfig.upstreamLink.enabled && runtimeConfig.upstreamLink.sharedContext;
+  // Shared mode claims the inherited context at UserPromptSubmit, before Stop ordering can vary.
+  if (!usesSharedContext) recordUpstreamContextOnce({ agentId: AGENT_ID, sessionId, dataDir: pilotDataDir() });
+  if (toolPropagationEnabled(runtimeConfig) || usesSharedContext) {
     markToolPropagationConsumed(pilotDataDir(), sessionId);
   }
 
@@ -1094,7 +1122,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
 
-function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
+function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n, bindingId) {
   const attempts = attemptContext?.records;
   const consumed = attemptContext?.consumed;
   if (!Array.isArray(attempts) || attempts.length === 0 || !(consumed instanceof Set)) return [];
@@ -1105,6 +1133,7 @@ function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
 
   const matches = [];
   for (let i = 0; i < attempts.length; i++) {
+    if (attempts[i].pilot_binding_id && attempts[i].pilot_binding_id !== bindingId) continue;
     const matchesId = llmCall.api_error?.request_id
       ? attempts[i].request_id === llmCall.api_error.request_id
       : llmCall.message_id && attempts[i].response_id === llmCall.message_id;
@@ -1121,6 +1150,7 @@ function consumeAttemptsForCall(attemptContext, llmCall, turnStartNs = 0n) {
   if (anchor.request_hash) {
     for (let i = matchIndex - 1; i >= 0; i--) {
       const prev = attempts[i];
+      if (prev.pilot_binding_id && prev.pilot_binding_id !== bindingId) continue;
       if (prev.request_hash !== anchor.request_hash) continue;
       if (consumed.has(i) || prev.outcome === 'success' || !withinTurn(prev)) break;
       if (BigInt(prev.end_time_unix_nano) > BigInt(next.start_time_unix_nano)) {
@@ -1240,7 +1270,12 @@ function buildTurnRecords(
     sessionId,
     turn.promptId || promptIdFallback,
   );
-  const traceId = turnContext?.traceId || generateTraceId();
+  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
+  const shared = runtimeConfig.upstreamLink.enabled && runtimeConfig.upstreamLink.sharedContext ? sharedTraceRuntime(pilotDataDir()) : null;
+  const sharedBinding = shared?.store.resolveTurn({ agentType: AGENT_ID, sessionId,
+    ...(turn.promptId || promptIdFallback ? { turnId: turn.promptId || promptIdFallback } : {}),
+    ...(turn.prompt ? { inputHash: shared.api.inputHash(turn.prompt) } : {}) }, turnId);
+  const traceId = sharedBinding?.traceId || turnContext?.traceId || generateTraceId();
   const entrySpanId = generateSpanId();
   const agentSpanId = generateSpanId();
 
@@ -1257,6 +1292,7 @@ function buildTurnRecords(
     // win over caller-supplied attributes; aligns with qoder's Object.assign order.
     ...SPAN_ATTRIBUTES,
     ...RESOURCE_ATTRIBUTE_FIELDS,
+    ...(sharedBinding ? shared.api.bindingFields(sharedBinding) : {}),
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -1323,7 +1359,7 @@ function buildTurnRecords(
       firstStepOwner = { stepId: currentStepId, stepSpanId: currentStepSpanId };
     }
 
-    const callAttempts = consumeAttemptsForCall(attemptContext, ev, turnStartNs);
+    const callAttempts = consumeAttemptsForCall(attemptContext, ev, turnStartNs, sharedBinding?.bindingId);
     for (const attempt of callAttempts) {
       if (attempt._file) consumedAttemptFiles.add(attempt._file);
     }
@@ -1332,9 +1368,11 @@ function buildTurnRecords(
 
     // Look up preload-captured data once per LLM call. ev.message_id matches
     // the SSE message_start `message.id` the preload script extracted.
-    const interceptData = intercept && ev.message_id
+    const captured = intercept && ev.message_id
       ? intercept.get(ev.message_id)
       : undefined;
+    const interceptData = captured?.pilot_binding_id && captured.pilot_binding_id !== sharedBinding?.bindingId
+      ? undefined : captured;
     if (interceptData) mergedResponseIds.add(ev.message_id);
 
     // The preload already advertised its minted span id to the LLM gateway as
@@ -1498,7 +1536,9 @@ function buildTurnRecords(
 
       const toolName = toolBlock.name || 'unknown';
 
-      const reservedContext = consumeToolContext(pilotDataDir(), sessionId, toolId);
+      const reservedContext = sharedBinding
+        ? shared.store.reserveOperation(sharedBinding, 'tool', toolId)
+        : consumeToolContext(pilotDataDir(), sessionId, toolId);
       const toolSpanId = reservedContext?.spanId || generateSpanId();
       const skillLoad = toolName === 'Skill' ? skillLoadsByToolId.get(toolId) : null;
       const skillFields = toolName === 'Skill'
@@ -1593,6 +1633,7 @@ function buildTurnRecords(
   }
 
   // 按 time_unix_nano 排序，确保 tool 事件交错在 LLM 事件之间。
+  if (sharedBinding) shared.store.completeTurn(sharedBinding);
   // OTLP flusher 在收到 finish_reasons=stop 时立即 flush turn buffer，
   // 如果 tool 事件全部堆在末尾（在 stop 之后），会被丢弃。
   records.sort((a, b) => {
@@ -1609,6 +1650,7 @@ function buildTurnRecords(
 // ─── dispatcher ───
 
 const DISPATCH = {
+  'user-prompt-submit': cmdUserPromptSubmit,
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
   'stop-failure': cmdStopFailure,

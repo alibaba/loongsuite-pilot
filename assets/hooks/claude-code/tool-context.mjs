@@ -14,6 +14,7 @@
  * and are removed by the existing upstream-link retention job.
  */
 
+import { hasSharedUpstreamContextClaim } from '../shared/upstream-context.mjs';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -266,7 +267,8 @@ function reserveTurnContext({
     if (existing) {
       // Environment upstream context is first-turn-only. Do not let a delayed
       // duplicate hook resurrect it after Stop marked the session consumed.
-      if (existing.source === 'upstream-env' && isToolPropagationConsumed(dataDir, sessionId)) {
+      if (existing.source === 'upstream-env'
+          && (isToolPropagationConsumed(dataDir, sessionId) || hasSharedUpstreamContextClaim(dataDir, sessionId))) {
         return null;
       }
       return existing;
@@ -318,6 +320,10 @@ export function reserveToolContext({
   generateTraceWhenMissing = false,
 }) {
   if (!dataDir || !sessionId || !toolUseId) return null;
+
+  // A shared prompt can own the inherited context before its Stop has run.
+  // Keep the legacy Bash path from choosing a different parent for that session.
+  if (hasSharedUpstreamContextClaim(dataDir, sessionId)) traceparent = undefined;
 
   // ACP owns trace selection for the whole session. Without a reliable
   // PreToolUse prompt-to-turn key, injecting either the process upstream or a

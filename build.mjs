@@ -41,6 +41,15 @@ const hookAssetManifestPlugin = {
 
 const commonPlugins = [internalStubPlugin, hookAssetManifestPlugin];
 
+await build({
+  entryPoints: ['src/core/trace-context/runtime.ts'],
+  outfile: 'assets/hooks/shared/trace-context.cjs',
+  platform: 'node', target: 'es2022', format: 'cjs', bundle: true,
+  mainFields: ['module', 'main'], minifySyntax: true,
+});
+await mkdir('dist', { recursive: true });
+await copyFile('assets/hooks/shared/trace-context.cjs', 'dist/trace-context.cjs');
+
 // Loaded by the collector banner, before the daemon graph. Must keep
 // `packages: 'external'`: require('node:sqlite') has to hit the runtime Node,
 // not a bundler rewrite.
