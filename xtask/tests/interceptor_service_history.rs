@@ -102,10 +102,17 @@ fn source_interceptor_l58_qwen_hook_assets_use_the_exact_surface_in_both_shells(
 }
 
 #[test]
-fn source_interceptor_l67_qwen_declaration_separates_stop_collection_and_head_interception() {
+fn qwen_declaration_separates_passive_collection_and_head_interception() {
     let definition: serde_json::Value =
         serde_json::from_str(include_str!("../../agents.d/qwen-work-cn.json")).unwrap();
-    assert_eq!(definition["hook"]["events"], serde_json::json!(["Stop"]));
+    assert_eq!(
+        definition["hook"]["events"],
+        serde_json::json!(["Stop", "UserPromptSubmit"])
+    );
+    assert_eq!(
+        definition["hook"]["hookCommand"],
+        "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh"
+    );
     assert_eq!(
         definition["hook"]["interceptor"]["events"],
         serde_json::json!(["UserPromptSubmit", "PreToolUse", "PostToolUse"])

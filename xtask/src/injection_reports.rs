@@ -200,7 +200,14 @@ impl Matrix {
             );
             if agent.deploy_mode == "detection-only" {
                 ensure!(
-                    matches!(agent.id.as_str(), "qoder-jetbrains" | "doubao-work"),
+                    matches!(
+                        agent.id.as_str(),
+                        "antigravity"
+                            | "antigravity-cli"
+                            | "doubao"
+                            | "doubao-work"
+                            | "qoder-jetbrains"
+                    ),
                     "不可新增检测豁免而不审查门禁"
                 );
             }
@@ -481,46 +488,54 @@ mod tests {
     }
 
     #[test]
-    fn fixed_six_platform_matrix_has_132_baselines_plus_required_scenarios() {
+    fn fixed_six_platform_matrix_has_150_baselines_plus_required_scenarios() {
         let matrix = Matrix::load(root()).unwrap();
         let (index, reports) = fixtures(&matrix);
         let summary = matrix.validate(&index, &reports, &index.commit).unwrap();
-        assert_eq!(summary["baselineResults"], 132);
-        assert!(summary["scenarioResults"].as_u64().unwrap() > 132);
+        assert_eq!(summary["baselineResults"], 150);
+        assert!(summary["scenarioResults"].as_u64().unwrap() > 150);
         assert_eq!(summary["noInjection"][0]["id"], "wukong");
     }
 
     #[test]
-    fn doubao_detection_still_requires_each_platform_baseline_and_readonly_report() {
+    fn detection_requires_each_platform_baseline_and_readonly_report() {
         let matrix = Matrix::load(root()).unwrap();
-        let cases: Vec<_> = matrix
-            .cases
-            .iter()
-            .filter(|case| case.agent_id == "doubao-work")
-            .collect();
-        assert_eq!(cases.len(), 2);
-        assert!(cases
-            .iter()
-            .all(|case| case.deploy_mode == "detection-only"));
-        assert_eq!(
-            cases
-                .iter()
-                .map(|case| case.scenario.as_str())
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["baseline", "status-read-only"])
-        );
         let (index, complete) = fixtures(&matrix);
-        for target in 0..complete.len() {
-            for scenario in ["baseline", "status-read-only"] {
-                let mut reports = complete.clone();
-                reports[target]
-                    .records
-                    .retain(|row| !(row.agent_id == "doubao-work" && row.scenario == scenario));
-                assert!(
-                    matrix.validate(&index, &reports, &index.commit).is_err(),
-                    "missing Doubao {scenario} must fail for target {}",
-                    reports[target].target
-                );
+        for agent_id in [
+            "antigravity",
+            "antigravity-cli",
+            "doubao",
+            "doubao-work",
+            "qoder-jetbrains",
+        ] {
+            let cases: Vec<_> = matrix
+                .cases
+                .iter()
+                .filter(|case| case.agent_id == agent_id)
+                .collect();
+            assert_eq!(cases.len(), 2);
+            assert!(cases
+                .iter()
+                .all(|case| case.deploy_mode == "detection-only"));
+            assert_eq!(
+                cases
+                    .iter()
+                    .map(|case| case.scenario.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from(["baseline", "status-read-only"])
+            );
+            for target in 0..complete.len() {
+                for scenario in ["baseline", "status-read-only"] {
+                    let mut reports = complete.clone();
+                    reports[target]
+                        .records
+                        .retain(|row| !(row.agent_id == agent_id && row.scenario == scenario));
+                    assert!(
+                        matrix.validate(&index, &reports, &index.commit).is_err(),
+                        "missing {agent_id} {scenario} must fail for target {}",
+                        reports[target].target
+                    );
+                }
             }
         }
     }
