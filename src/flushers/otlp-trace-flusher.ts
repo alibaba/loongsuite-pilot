@@ -1971,6 +1971,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       && !/^0+$/.test(record.parent_span_id));
     for (const span of spans) {
       if (client) span.attributes['loongsuite.doubao_work.client'] = client;
+      if (terminal?.['loongsuite.doubao_work.mode'] === 'chat') span.attributes['loongsuite.doubao_work.mode'] = 'chat';
       span.attributes['gen_ai.framework'] = agentType;
       const kind = span.attributes['gen_ai.span.kind'];
       if (kind !== 'ENTRY' && kind !== 'AGENT') continue;
