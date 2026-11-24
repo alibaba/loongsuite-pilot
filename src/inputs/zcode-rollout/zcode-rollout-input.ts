@@ -7,7 +7,8 @@ import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
-import { classifyZCodeRolloutFailure } from '../../normalization/zcode-rollout-outcome.js';
+import { classifyZCodeRolloutFailure, ZCODE_NATIVE_OUTPUT_UNAVAILABLE } from '../../normalization/zcode-rollout-outcome.js';
+import { readZCodeMessageWindow, ZCODE_MESSAGE_WINDOW } from '../../normalization/zcode-message-window.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 // Import the shared helpers from the .mjs file so the AGENT span_id (derived
@@ -438,6 +439,7 @@ export class ZCodeRolloutInput extends BaseInput {
       ? request.messages_sample_truncated
       : Array.isArray(request.messages) ? request.messages : [];
     const inputMessages = rawInputMessages.map(normalizeInputMessage).filter(message => message !== null);
+    const messageWindow = rawInputMessages === request.messages ? readZCodeMessageWindow(request) : undefined;
 
     // P1 fix: extract system_instructions (role=="system" messages) and
     // tool_definitions (request.toolNames — names only, no
@@ -583,6 +585,7 @@ export class ZCodeRolloutInput extends BaseInput {
       ...(toolDefinitions.length > 0
         ? { 'gen_ai.tool.definitions': toolDefinitions }
         : {}),
+      ...(messageWindow ? { attributes: { [ZCODE_MESSAGE_WINDOW]: messageWindow } } : {}),
       trace_id: traceId,
       span_id: llmSpanId,
       parent_span_id: stepSpanId,
@@ -632,6 +635,7 @@ export class ZCodeRolloutInput extends BaseInput {
       ...(cacheReadTokens !== undefined ? { 'gen_ai.usage.cache_read.input_tokens': cacheReadTokens } : {}),
       ...(totalTokens !== undefined ? { 'gen_ai.usage.total_tokens': totalTokens } : {}),
       'gen_ai.output.messages': outputMessages,
+      ...(failure && outputParts.length === 0 ? { attributes: { [ZCODE_NATIVE_OUTPUT_UNAVAILABLE]: true } } : {}),
       ...(durationMs !== undefined ? { 'gen_ai.response.duration_ms': durationMs } : {}),
       'gen_ai.response.attempt_index': num(record.attempt) ?? 1,
       ...(systemInstructions.length > 0

@@ -155,6 +155,28 @@ function checkTrace(spans) {
   return [...validateStructure(trace), ...validateTime(trace, traceRules), ...validateSemantic(trace, traceRules)];
 }
 
+describe('ZCode trace output availability', () => {
+  test.each([
+    ['ZCode', true, 'zcode.model_error', 'error', false],
+    ['zcode', true, 'zcode.model_cancelled', 'cancelled', false],
+    ['ZCode', false, 'zcode.model_error', 'error', true],
+    ['ZCode', true, 'zcode.model_error', 'stop', true],
+    ['other-agent', true, 'zcode.model_error', 'error', true],
+  ])('checks output for agent=%s, unavailable=%s, type=%s, finish=%s', (agent, unavailable, errorType, finish, fails) => {
+    const fixture = delegatedTrace();
+    const llm = fixture.parentLlm;
+    const attrs = llm.attributes;
+    delete attrs['gen_ai.output.messages'];
+    attrs['gen_ai.agent.name'] = agent;
+    attrs['agent.zcode.rollout.output_unavailable'] = unavailable;
+    attrs['error.type'] = errorType;
+    attrs['gen_ai.response.finish_reasons'] = [finish];
+    const errors = checkTrace(fixture.spans).filter(check =>
+      check.id === 'semantic.llm_has_input_output' && check.status === 'error' && check.spanId === llm.spanId);
+    expect(errors).toHaveLength(fails ? 1 : 0);
+  });
+});
+
 describe('delegated trace validation scopes', () => {
   test('regenerating rules retains delegated topology, identity and execution scopes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pilot-trace-rules-'));
