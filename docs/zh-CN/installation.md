@@ -13,6 +13,10 @@ Claude Agent SDK 使用自定义 `CLAUDE_CONFIG_DIR` 时，可在启动会话前
 - 仅源码开发需要 `rust-toolchain.toml` 固定的 Rust 1.99.1、C/C++ 编译器（SQLite bundled）及 macOS UI 的 Swift 工具链。
 - Agent 进程内的 JS 插件、preload、runtime wrapper 和 Hermes Python 插件仍由各 Agent 宿主执行。
 
+## Hook 文件完整性
+
+安装时可用 Unix 的 `--hook-tamper-protection true` 或 Windows 的 `-HookTamperProtection true` 启用托管 Hook 脚本完整性检查，对应 `hookWatchdog.tamperProtection.enabled`。Collector 报告已修改或缺失的托管脚本，由 updater 校验并恢复当前安装版本的文件。关闭 `hookWatchdog.enabled` 会同时停用该检查与恢复。
+
 ## Rust 发行包与平台
 
 当前固定支持以下六个平台。Linux 仅支持 GNU libc；musl（包括 Alpine）不受支持，Unix 安装器在下载或修改安装态前拒绝 musl 和无法确认的 libc。历史八平台运行、Node 支持声明或 Linux 单测不能替代当前六平台代码的验收。

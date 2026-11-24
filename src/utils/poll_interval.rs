@@ -4,6 +4,7 @@
 pub const POLL_INTERVAL_ENV: &str = "LOONGSUITE_PILOT_POLL_INTERVAL_MS";
 
 /// Built-in collector poll interval when no env var or listener override is set.
+pub const DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS: u64 = 30_000;
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 10_000;
 
 const MIN_POLL_INTERVAL_MS: u64 = 1_000;

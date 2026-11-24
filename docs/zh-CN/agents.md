@@ -82,6 +82,7 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 | 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |
+| Antigravity IDE / CLI | `antigravity` / `antigravity-cli` | 只读会话 SQLite 和 transcript。两个产品独立续采，无需安装 Hook。 |
 
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。

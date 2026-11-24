@@ -84,6 +84,10 @@ pub struct InterceptCheckTarget {
 
 pub struct HookWatchdog {
     config: HookWatchdogConfig,
+    asset_roots: Option<(
+        std::path::PathBuf,
+        Arc<crate::deployment::DeploymentManager>,
+    )>,
     targets: Vec<PluginCheckTarget>,
     intercept_targets: Vec<InterceptCheckTarget>,
     last_repair_at: Mutex<HashMap<String, i64>>,
@@ -105,6 +109,7 @@ impl HookWatchdog {
     ) -> Self {
         let watchdog = Self {
             config,
+            asset_roots: None,
             targets,
             intercept_targets,
             last_repair_at: Mutex::new(HashMap::new()),
@@ -119,6 +124,15 @@ impl HookWatchdog {
         };
         watchdog.capture_initial_signatures();
         watchdog
+    }
+
+    pub(crate) fn with_asset_roots(
+        mut self,
+        data: &str,
+        deployment: Arc<crate::deployment::DeploymentManager>,
+    ) -> Self {
+        self.asset_roots = Some((data.into(), deployment));
+        self
     }
 
     pub fn set_now_ms(&mut self, now_ms: impl Fn() -> i64 + Send + Sync + 'static) {
@@ -175,6 +189,25 @@ impl HookWatchdog {
 
     pub async fn run_check(&self) -> CheckResult {
         let mut summary = CheckResult::default();
+        if self.config.enabled && self.config.tamper_protection {
+            if let Some((data, deployment)) = &self.asset_roots {
+                let managed = deployment
+                    .get_definitions()
+                    .into_iter()
+                    .filter(|def| deployment.has_record(&def.id))
+                    .filter_map(|def| {
+                        crate::deployment::hook_assets::managed_assets(&def, data).ok()
+                    })
+                    .flatten()
+                    .collect();
+                let pilot = std::path::Path::new(deployment.pilot_dir());
+                match crate::updater::hook_asset_repair::report(pilot, data, &managed).await {
+                    Ok(true) => return summary, // Updater owns the pending asset write.
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(%error, "Hook asset integrity check deferred"),
+                }
+            }
+        }
         for target in &self.targets {
             match self.check_target(target).await {
                 Ok(result) => match result.status {
@@ -984,6 +1017,7 @@ mod tests {
         let mut watchdog = HookWatchdog::new(
             HookWatchdogConfig {
                 enabled: true,
+                tamper_protection: false,
                 interval_ms: 60_000,
                 repair_cooldown_ms: 10_000,
             },

@@ -643,9 +643,12 @@ impl OtlpTraceFlusher {
             // Keep Doubao's existing ownership gate. Codex preparation must
             // overlap other batches/single sends, with durable append preceding
             // the serialized admission step and batch_depth deferring terminals.
-            let has_doubao = entries
-                .iter()
-                .any(|entry| normalize_agent_type(&entry.agent_type) == "doubao-work");
+            let has_doubao = entries.iter().any(|entry| {
+                matches!(
+                    normalize_agent_type(&entry.agent_type).as_str(),
+                    "doubao" | "doubao-work"
+                )
+            });
             let _doubao_acceptance = if has_doubao {
                 Some(self.inner.acceptance.lock().await)
             } else {
@@ -771,7 +774,7 @@ impl BaseFlusher for OtlpTraceFlusher {
                 if !buffer.completed
                     && (buffer.journal_key.is_some()
                         || (self.inner.doubao_context().is_some()
-                            && buffer.agent_type == "doubao-work"))
+                            && matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work")))
                 {
                     continue;
                 }
@@ -1159,8 +1162,10 @@ impl OtlpInner {
         let doubao: Vec<_> = entries
             .iter()
             .filter(|entry| {
-                normalize_agent_type(&entry.agent_type) == "doubao-work"
-                    && !super::trace_event_compat::is_agent_audit_event(entry)
+                matches!(
+                    normalize_agent_type(&entry.agent_type).as_str(),
+                    "doubao" | "doubao-work"
+                ) && !super::trace_event_compat::is_agent_audit_event(entry)
                     && entry_str(entry, "loongsuite.doubao_work.trace_role").as_deref()
                         != Some("log_only")
             })
@@ -1251,7 +1256,8 @@ impl OtlpInner {
         };
         for mut buffer in evicted {
             if buffer.journal_key.is_some()
-                || (buffer.agent_type == "doubao-work" && self.doubao_context().is_some())
+                || (matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work")
+                    && self.doubao_context().is_some())
             {
                 self.record_removal(&buffer);
                 if buffer.journal_key.is_some() && buffer.hermes_owner.owner().is_some() {
@@ -1276,7 +1282,7 @@ impl OtlpInner {
         if super::trace_event_compat::is_agent_audit_event(&entry)
             || (normalize_agent_type(&entry.agent_type) == "copilot"
                 && entry.get("gen_ai.copilot.session_summary") == Some(&Value::Bool(true)))
-            || (entry.agent_type == "doubao-work"
+            || (matches!(entry.agent_type.as_str(), "doubao" | "doubao-work")
                 && entry_str(&entry, "loongsuite.doubao_work.trace_role").as_deref()
                     == Some("log_only"))
         {
@@ -1342,7 +1348,10 @@ impl OtlpInner {
             }
             let mut preempt = Vec::new();
             for (buf_key, buffer) in &state.buffers {
-                if journaled_agent || agent_type == "codex" || agent_type == "doubao-work" {
+                if journaled_agent
+                    || agent_type == "codex"
+                    || matches!(agent_type.as_str(), "doubao" | "doubao-work")
+                {
                     break;
                 }
                 if buffer.agent_type != agent_type || buf_key == &key || buffer.completed {
@@ -1446,7 +1455,7 @@ impl OtlpInner {
                 } else if journaled_agent {
                     buffer.spillable = false;
                 }
-                let keyed = matches!(agent_type.as_str(), "copilot" | "doubao-work")
+                let keyed = matches!(agent_type.as_str(), "copilot" | "doubao" | "doubao-work")
                     || (durable && matches!(agent_type.as_str(), "hermes" | "openclaw"));
                 let mut new_event = true;
                 if buffer.spilled_records > 0 && durable {
@@ -1538,7 +1547,10 @@ impl OtlpInner {
         mark_flushed: bool,
     ) -> Result<(), FlushError> {
         if buffer.journal_key.is_some()
-            || matches!(buffer.agent_type.as_str(), "codex" | "doubao-work")
+            || matches!(
+                buffer.agent_type.as_str(),
+                "codex" | "doubao" | "doubao-work"
+            )
         {
             return self.finish_buffer(buffer, mark_flushed).await;
         }
@@ -1580,7 +1592,7 @@ impl OtlpInner {
     }
 
     fn prepare_buffer_export(&self, mut buffer: TurnBuffer, mark_flushed: bool) -> TurnBuffer {
-        let doubao = buffer.agent_type == "doubao-work";
+        let doubao = matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work");
         if mark_flushed && !doubao {
             self.state
                 .lock()
@@ -1628,7 +1640,7 @@ impl OtlpInner {
     }
 
     async fn export_buffer(self: &Arc<Self>, mut buffer: TurnBuffer) -> Result<(), FlushError> {
-        let doubao = buffer.agent_type == "doubao-work";
+        let doubao = matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work");
         if buffer.hermes_abandoned {
             if let Some(first) = buffer.records.first_mut() {
                 first.extra.insert(
@@ -1728,7 +1740,7 @@ impl OtlpInner {
             let mut completed = Vec::new();
             for key in keys {
                 if let Some(buffer) = state.buffers.shift_remove(&key) {
-                    if buffer.agent_type != "doubao-work" {
+                    if !matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work") {
                         state.flushed.insert(key);
                     }
                     completed.push(buffer);
@@ -1744,7 +1756,10 @@ impl OtlpInner {
         // completion signals describe task lifetime only, never transport ACK.
         for buffer in completed {
             if buffer.journal_key.is_none()
-                && !matches!(buffer.agent_type.as_str(), "codex" | "doubao-work")
+                && !matches!(
+                    buffer.agent_type.as_str(),
+                    "codex" | "doubao" | "doubao-work"
+                )
             {
                 if let Some(scope) = &scope {
                     if let Some(done) = self.start_ordinary_export(scope, buffer, false).await {
@@ -1836,7 +1851,8 @@ impl OtlpInner {
             };
             if let Some(mut buffer) = buffer {
                 if (buffer.journal_key.is_some() && buffer.agent_type != "hermes")
-                    || (buffer.agent_type == "doubao-work" && self.doubao_context().is_some())
+                    || (matches!(buffer.agent_type.as_str(), "doubao" | "doubao-work")
+                        && self.doubao_context().is_some())
                 {
                     self.record_removal(&buffer);
                     continue;
@@ -1954,7 +1970,7 @@ impl OtlpInner {
         let trace_records = super::trace_event_compat::prepare_trace_events(&prepared.records);
         // Doubao validates native pairs itself; retain incomplete/ambiguous facts so
         // transcript tools cannot bypass a rejected native observation.
-        let mut sanitized = if agent_type == "doubao-work" {
+        let mut sanitized = if matches!(agent_type, "doubao" | "doubao-work") {
             trace_records
         } else {
             drop_orphan_pairs(trace_records)
@@ -1965,7 +1981,7 @@ impl OtlpInner {
             }
         }
         if converter.supports_streaming()
-            && agent_type != "doubao-work"
+            && !matches!(agent_type, "doubao" | "doubao-work")
             && !(agent_type == "qwen-code-cli"
                 && sanitized.iter().any(|record| {
                     record.get("gen_ai.agent.scope").and_then(Value::as_str) == Some("subagent")
@@ -2837,7 +2853,7 @@ fn route_convert(
         super::convert_codex_turn(records, &options, converter)
     } else if super::qoder_turn_converter::is_qoder_transcript_agent(agent_type) {
         super::convert_qoder_turn(records, &options, converter)
-    } else if agent_type == "doubao-work" {
+    } else if matches!(agent_type, "doubao" | "doubao-work") {
         super::convert_doubao_work_turn(records, &options, converter)
     } else if records
         .iter()
@@ -2848,6 +2864,8 @@ fn route_convert(
         convert_qwen_subagents(records, &options, converter)
     } else if agent_type == "hermes" || agent_type == "openclaw" {
         convert_delegated_turn(records, &options, converter)
+    } else if matches!(agent_type, "antigravity" | "antigravity-cli") {
+        convert_antigravity(records, &options, converter)
     } else if agent_type == "copilot" {
         let mut result = converter.convert(records, &options)?;
         if let Some(error) = records
@@ -2870,6 +2888,89 @@ fn route_convert(
     } else {
         converter.convert(records, &options)
     }
+}
+
+fn convert_antigravity(
+    records: &[AgentActivityEntry],
+    options: &ConvertOptions,
+    converter: &dyn EventLogConverter,
+) -> Result<ConvertResult, String> {
+    let joined: std::collections::HashMap<_, _> = records
+        .iter()
+        .filter(|entry| {
+            entry
+                .get("agent.antigravity.planner_joined")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .filter_map(|entry| Some((entry.response_id.as_deref()?, entry)))
+        .collect();
+    let mut prepared = Vec::with_capacity(records.len().saturating_sub(joined.len()));
+    for record in records {
+        if record
+            .get("agent.antigravity.planner_joined")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            continue;
+        }
+        let mut entry = record.clone();
+        if entry
+            .get("agent.antigravity.planner_pending")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            if let Some(join) = entry.response_id.as_deref().and_then(|id| joined.get(id)) {
+                entry.output_messages.clone_from(&join.output_messages);
+                entry.finish_reasons.clone_from(&join.finish_reasons);
+                entry.turn_end = join.turn_end;
+                if let Some(error) = join.get("error.type") {
+                    entry.extra.insert("error.type".into(), error.clone());
+                }
+                entry
+                    .extra
+                    .shift_remove("agent.antigravity.planner_pending");
+            }
+        }
+        prepared.push(entry);
+    }
+    let mut result = converter.convert(&prepared, options)?;
+    let cancelled: std::collections::HashSet<_> = prepared
+        .iter()
+        .filter(|entry| {
+            entry.get("error.type").and_then(Value::as_str) == Some("antigravity.model_cancelled")
+        })
+        .filter_map(|entry| entry.response_id.as_deref())
+        .collect();
+    for span in &mut result.spans {
+        match span
+            .attributes
+            .get("gen_ai.span.kind")
+            .and_then(Value::as_str)
+        {
+            Some("LLM")
+                if span
+                    .attributes
+                    .get("gen_ai.response.id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| cancelled.contains(id)) =>
+            {
+                span.status.insert("code".into(), 2.into());
+                span.attributes
+                    .insert("error.type".into(), "antigravity.model_cancelled".into());
+            }
+            Some("ENTRY")
+                if span.parent_span_id.as_deref() == Some("0000000000000001")
+                    && !prepared.iter().any(|entry| {
+                        entry.parent_span_id.as_deref() == Some("0000000000000001")
+                    }) =>
+            {
+                span.parent_span_id = None;
+            }
+            _ => {}
+        }
+    }
+    Ok(result)
 }
 
 fn convert_qwen_collaboration(
@@ -2961,7 +3062,7 @@ fn convert_state_key(
 }
 
 fn resolve_group_key(entry: &AgentActivityEntry) -> (KeySource, String, String) {
-    if entry.agent_type == "doubao-work" {
+    if matches!(entry.agent_type.as_str(), "doubao" | "doubao-work") {
         if entry_str(entry, "loongsuite.doubao_work.observation_scope").as_deref()
             == Some("native_sandbox_execution")
         {
@@ -3042,7 +3143,10 @@ fn resolve_group_key(entry: &AgentActivityEntry) -> (KeySource, String, String) 
 
 fn is_terminal_event(entry: &AgentActivityEntry) -> bool {
     let agent_type = normalize_agent_type(&entry.agent_type);
-    if agent_type == "doubao-work" {
+    if matches!(agent_type.as_str(), "antigravity" | "antigravity-cli") {
+        return entry.turn_end == Some(true);
+    }
+    if matches!(agent_type.as_str(), "doubao" | "doubao-work") {
         return entry_str(entry, "event.name").as_deref() == Some("other")
             && if entry_str(entry, "loongsuite.doubao_work.observation_scope").as_deref()
                 == Some("native_sandbox_execution")

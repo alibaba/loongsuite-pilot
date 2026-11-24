@@ -1,0 +1,17 @@
+{
+  "id": "antigravity-cli",
+  "displayName": "Antigravity CLI (agy)",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": [
+      "~/.gemini/antigravity-cli"
+    ],
+    "commands": [
+      "agy",
+      "antigravity-cli"
+    ]
+  },
+  "input": {
+    "type": "antigravity-sqlite"
+  }
+}

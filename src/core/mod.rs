@@ -8,7 +8,7 @@ mod agent_control_manager;
 mod agent_discovery_service;
 mod build_constants;
 mod config_loader;
-pub(crate) use config_loader::check_config_at;
+pub(crate) use config_loader::{check_config_at, hook_asset_protection};
 mod hook_watchdog;
 mod input_manager;
 mod intercept_result_linker;
@@ -26,10 +26,10 @@ mod workspace_policy;
 pub use agent_control_manager::AgentControlManager;
 pub use agent_discovery_service::{AgentDiscoveryEvent, AgentDiscoveryService};
 pub use build_constants::PROPRIETARY_BUILD;
-pub(crate) use config_loader::doubao_listener;
 pub use config_loader::{
     assemble_config, build_otlp_trace_config, check_config, load_config, ConfigSources,
 };
+pub(crate) use config_loader::{doubao_app_listener, doubao_listener};
 pub use hook_watchdog::{
     extract_marker_block, parse_windows_user_env, strip_marker_block, CheckResult, HookWatchdog,
     InterceptCheckTarget, MarkerBlock, PluginCheckTarget, TargetResult, TargetStatus,

@@ -40,6 +40,7 @@ pub(super) const ENV_OPTIONS: &[(&str, &str)] = &[
     ("maskTypes", "LP_MASK_TYPES"),
     ("maskReplacementMode", "LP_MASK_REPLACEMENT_MODE"),
     ("interceptorMode", "LP_INTERCEPTOR_MODE"),
+    ("hookTamperProtection", "LP_HOOK_TAMPER_PROTECTION"),
 ];
 const INTERCEPTOR_TYPES: &[&str] = &["cloudAccessKey", "apiKey", "privateKey", "databaseUrl"];
 
@@ -424,6 +425,11 @@ fn merge_mask(config: &mut Map<String, Value>, options: &Options) -> Result<()> 
         } else {
             target.remove("types");
         }
+    }
+    let protection = mode(options, "hookTamperProtection", &["true", "false"])?;
+    if !protection.is_empty() {
+        let watchdog = object(config, "hookWatchdog")?;
+        object(watchdog, "tamperProtection")?.insert("enabled".into(), json!(protection == "true"));
     }
     let interceptor_mode = mode(options, "interceptorMode", &["all", "none"])?;
     if !interceptor_mode.is_empty() {

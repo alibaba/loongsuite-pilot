@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn config() -> HookWatchdogConfig {
     HookWatchdogConfig {
         enabled: true,
+        tamper_protection: false,
         interval_ms: 60_000,
         repair_cooldown_ms: 600_000,
     }

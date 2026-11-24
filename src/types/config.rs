@@ -379,7 +379,13 @@ pub struct MultimodalRuntimeConfig {
     pub storage_base_path: String,
 }
 
-pub const MULTIMODAL_SUPPORTED_AGENT_IDS: &[&str] = &["codex", "qoder", "qwen-work-cn"];
+pub const MULTIMODAL_SUPPORTED_AGENT_IDS: &[&str] = &[
+    "codex",
+    "qoder",
+    "qwen-work-cn",
+    "antigravity",
+    "antigravity-cli",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -659,6 +665,8 @@ pub struct LogRetentionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct HookWatchdogConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub tamper_protection: bool,
     pub interval_ms: u64,
     pub repair_cooldown_ms: u64,
 }

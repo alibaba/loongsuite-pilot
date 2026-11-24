@@ -78,7 +78,7 @@ async fn read_bounded(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
 /// The same request/execution identities used by the native Doubao converter.
 /// They deliberately do not use Codex user/session/turn grouping.
 pub(crate) fn trace_identity(entry: &AgentActivityEntry) -> Option<String> {
-    if entry.agent_type != "doubao-work"
+    if !matches!(entry.agent_type.as_str(), "doubao" | "doubao-work")
         || entry
             .get("loongsuite.doubao_work.trace_role")
             .and_then(serde_json::Value::as_str)

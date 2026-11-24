@@ -3,6 +3,7 @@
 //! Only the modules listed in `MODS.txt` are declared here. Another agent merges
 //! additional `pub mod` lines into this file.
 
+pub(crate) mod antigravity;
 #[path = "base/mod.rs"]
 pub mod base;
 pub mod qoder;

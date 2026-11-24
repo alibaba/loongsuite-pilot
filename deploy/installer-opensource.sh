@@ -79,6 +79,8 @@ MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
+HOOK_TAMPER_PROTECTION=""
+HOOK_TAMPER_PROTECTION_SET=0
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -194,6 +196,8 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   require_option_value "$@"; INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
+        --hook-tamper-protection) require_option_value "$@"; HOOK_TAMPER_PROTECTION="$2"; HOOK_TAMPER_PROTECTION_SET=1; shift 2 ;;
+        --hook-tamper-protection=*) HOOK_TAMPER_PROTECTION="${1#*=}"; HOOK_TAMPER_PROTECTION_SET=1; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -260,6 +264,17 @@ if [ -n "$MASK_REPLACEMENT_MODE" ] && [ "$MASK_REPLACEMENT_MODE" != "placeholder
     echo "❌ Unknown mask replacement mode: $MASK_REPLACEMENT_MODE (use 'placeholder' or 'preview')" >&2
     exit 1
 fi
+if [ "$HOOK_TAMPER_PROTECTION_SET" -eq 1 ]; then
+    case "$HOOK_TAMPER_PROTECTION" in
+        true|false) ;;
+        *) echo "--hook-tamper-protection requires true or false" >&2; exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "--hook-tamper-protection is only supported with install" >&2
+        exit 1
+    fi
+fi
+
 if [ -n "$INTERCEPTOR_MODE" ]; then
     case "$INTERCEPTOR_MODE" in
         all|none) ;;
@@ -639,7 +654,7 @@ installer_config_operation() {
         LP_MULTIMODAL_MODE="$MULTIMODAL_MODE" LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
         LP_MASK_MODE="$MASK_MODE" LP_MASK_TYPES="$MASK_TYPES" LP_MASK_REPLACEMENT_MODE="$MASK_REPLACEMENT_MODE" \
-        LP_INTERCEPTOR_MODE="$INTERCEPTOR_MODE" \
+        LP_INTERCEPTOR_MODE="$INTERCEPTOR_MODE" LP_HOOK_TAMPER_PROTECTION="${HOOK_TAMPER_PROTECTION:-}" \
         native_installer_helper "$operation" --from-env "$@"
 }
 

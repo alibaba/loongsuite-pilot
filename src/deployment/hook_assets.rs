@@ -24,7 +24,7 @@ pub(super) fn is_sdk_codex(def: &AgentDefinition) -> bool {
         })
 }
 
-fn managed_assets(def: &AgentDefinition, data: &Path) -> Result<Vec<String>> {
+pub(crate) fn managed_assets(def: &AgentDefinition, data: &Path) -> Result<Vec<String>> {
     let Some(hook) = &def.hook else {
         return Ok(Vec::new());
     };
@@ -70,7 +70,7 @@ fn managed_assets(def: &AgentDefinition, data: &Path) -> Result<Vec<String>> {
     Ok(assets)
 }
 
-fn safe_destination(root: &Path, relative: &str) -> Result<PathBuf> {
+pub(crate) fn safe_destination(root: &Path, relative: &str) -> Result<PathBuf> {
     let validate = |path: &Path, directory: bool| -> Result<()> {
         match std::fs::symlink_metadata(path) {
             Ok(_) => {
@@ -109,6 +109,27 @@ fn safe_destination(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub(crate) fn read_hook_manifest(pilot: &Path) -> Result<RuntimeManifest> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(resource_file(pilot, "runtime-manifest.json")?)?
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 4 * 1024 * 1024, "Hook 运行清单大小超限");
+    let manifest: RuntimeManifest =
+        serde_json::from_slice(&bytes).context("Hook 运行清单格式错误")?;
+    ensure!(
+        manifest.schema == 1 && manifest.runtime == "rust",
+        "Hook 运行清单版本或运行时无效"
+    );
+    ensure!(
+        manifest.version == env!("CARGO_PKG_VERSION")
+            && manifest.target == build_target()
+            && manifest.edition == build_edition(),
+        "Hook 运行清单与当前二进制不匹配"
+    );
+    Ok(manifest)
+}
+
 fn load_assets(def: &AgentDefinition, pilot: &Path, data: &Path) -> Result<Vec<(String, String)>> {
     let assets = managed_assets(def, data)?;
     if assets.is_empty() {
@@ -116,23 +137,7 @@ fn load_assets(def: &AgentDefinition, pilot: &Path, data: &Path) -> Result<Vec<(
     }
     let manifest = match std::fs::symlink_metadata(pilot.join("runtime-manifest.json")) {
         Ok(_) => {
-            let mut bytes = Vec::new();
-            std::fs::File::open(resource_file(pilot, "runtime-manifest.json")?)?
-                .take(4 * 1024 * 1024 + 1)
-                .read_to_end(&mut bytes)?;
-            ensure!(bytes.len() <= 4 * 1024 * 1024, "Hook 运行清单大小超限");
-            let manifest: RuntimeManifest =
-                serde_json::from_slice(&bytes).context("Hook 运行清单格式错误")?;
-            ensure!(
-                manifest.schema == 1 && manifest.runtime == "rust",
-                "Hook 运行清单版本或运行时无效"
-            );
-            ensure!(
-                manifest.version == env!("CARGO_PKG_VERSION")
-                    && manifest.target == build_target()
-                    && manifest.edition == build_edition(),
-                "Hook 运行清单与当前二进制不匹配"
-            );
+            let manifest = read_hook_manifest(pilot)?;
             Some(manifest)
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {

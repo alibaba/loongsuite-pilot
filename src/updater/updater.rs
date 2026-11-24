@@ -317,6 +317,7 @@ pub struct Updater {
     net: Arc<dyn UpdaterNet>,
     metrics: Mutex<Option<Arc<UpdaterMetrics>>>,
     checking: AtomicBool,
+    hook_repair: AtomicBool,
     scheduled: AtomicBool,
     stopping: tokio::sync::watch::Sender<bool>,
     consecutive_failures: Mutex<u32>,
@@ -369,6 +370,7 @@ impl Updater {
             net,
             metrics: Mutex::new(None),
             checking: AtomicBool::new(false),
+            hook_repair: AtomicBool::new(false),
             scheduled: AtomicBool::new(false),
             stopping: tokio::sync::watch::channel(false).0,
             consecutive_failures: Mutex::new(0),
@@ -446,12 +448,17 @@ impl Updater {
             .unwrap_or_else(|err| err.into_inner())
     }
 
+    pub(super) fn set_hook_repair(&self, enabled: bool) {
+        self.hook_repair.store(enabled, Ordering::SeqCst);
+    }
+
     pub fn start(&self) {
         if !self
             .config
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .enabled
+            && !self.hook_repair.load(Ordering::SeqCst)
         {
             return;
         }
@@ -555,11 +562,18 @@ impl Updater {
             });
             let enabled = config.enabled;
             *self.config.lock().unwrap_or_else(|err| err.into_inner()) = config;
-            if !enabled {
-                self.stop();
-                return Ok(());
+            let (_, repair_hooks) = crate::core::hook_asset_protection(Some(&file), |key| {
+                self.process_env.get(key).cloned()
+            });
+            self.set_hook_repair(repair_hooks);
+            if enabled {
+                self.check().await
+            } else {
+                if !repair_hooks {
+                    self.stop();
+                }
+                Ok(())
             }
-            self.check().await
         }
         .await;
         if let Err(err) = result {
@@ -590,6 +604,7 @@ impl Updater {
         let mut heartbeat = timer(heartbeat_ms);
         let mut flush = timer(flush_ms);
         let mut health = timer(health_ms);
+        let mut hook_repair_tick = timer(30_000);
         loop {
             let metrics = self
                 .metrics
@@ -606,6 +621,11 @@ impl Updater {
                 }
                 _ = flush.tick() => { if let Some(metrics) = metrics { metrics.flush().await; } }
                 _ = health.tick() => { if let Some(metrics) = metrics { metrics.check_collector_health(); } }
+                _ = hook_repair_tick.tick(), if self.hook_repair.load(Ordering::SeqCst) => {
+                    if let Err(error) = self.repair_hook_assets().await {
+                        tracing::warn!(%error, "Hook asset repair deferred");
+                    }
+                }
             }
         }
     }
@@ -1126,6 +1146,14 @@ impl Updater {
         &self,
         manifest: &VersionManifest,
     ) -> Result<ActivationTransaction, String> {
+        let unpacked = self.unpack_verified_release(manifest).await?;
+        self.activate_staged(&unpacked.root, manifest).await
+    }
+
+    async fn unpack_verified_release(
+        &self,
+        manifest: &VersionManifest,
+    ) -> Result<super::UnpackedPackage, String> {
         use sha2::{Digest, Sha256};
         let asset = manifest
             .asset(build_target())
@@ -1160,13 +1188,94 @@ impl Updater {
         let parent = PathBuf::from(&self.paths.versions_dir);
         let format = asset.format;
         // 解包是纯文件操作；任务被取消后临时目录由返回值/闭包拥有者回收。
-        let unpacked = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             super::package_archive::unpack(&response.body, format, &parent, &package_name)
         })
         .await
         .map_err(|err| err.to_string())?
-        .map_err(|err| format!("安全解包失败：{err:#}"))?;
-        self.activate_staged(&unpacked.root, manifest).await
+        .map_err(|err| format!("安全解包失败：{err:#}"))
+    }
+
+    async fn repair_hook_assets(&self) -> anyhow::Result<()> {
+        use super::hook_asset_repair as repair;
+        let cache = Path::new(&self.paths.cache_dir);
+        if repair::request(cache)?.is_none() {
+            return Ok(());
+        }
+        let data = Path::new(&self.paths.data_dir);
+        crate::deployment::with_deployed_state_lock(
+            &cache.join("update.lock").to_string_lossy(),
+            || async {
+                let Some(request) = repair::request(cache)? else {
+                    return Ok(());
+                };
+                let file = read_config_for_update(&self.config_path)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                let (_, enabled) = crate::core::hook_asset_protection(Some(&file), |name| {
+                    self.process_env.get(name).cloned()
+                });
+                if !enabled {
+                    return Ok(());
+                }
+                let Some(active) = self
+                    .current_version_dir_checked()
+                    .await
+                    .map_err(anyhow::Error::msg)?
+                else {
+                    return Ok(());
+                };
+                if Path::new(&active) != request.pilot_dir {
+                    return repair::settle(cache);
+                }
+                let executable = std::env::current_exe()?;
+                if let Some(running) = executable.ancestors().find(|dir| {
+                    dir.parent()
+                        .is_some_and(|parent| parent.ends_with("versions"))
+                }) {
+                    if std::fs::canonicalize(running)? != std::fs::canonicalize(&active)? {
+                        return Ok(());
+                    }
+                }
+                if repair::restore(&request, data, None).await? {
+                    return repair::settle(cache);
+                }
+                let version = read_version_file(&Path::new(&active).join("VERSION"))
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("invalid current VERSION"))?;
+                let latest = self
+                    .fetch_manifest()
+                    .await
+                    .map_err(anyhow::Error::msg)?
+                    .ok_or_else(|| anyhow::anyhow!("release manifest unavailable"))?;
+                let release = std::iter::once(latest.stable)
+                    .chain(latest.canary)
+                    .find(|item| {
+                        item.version == version.version && item.git_commit == version.git_commit
+                    })
+                    .ok_or_else(|| anyhow::anyhow!("running Hook asset release is unavailable"))?;
+                let unpacked = self
+                    .unpack_verified_release(&release)
+                    .await
+                    .map_err(anyhow::Error::msg)?;
+                let checked = validate_runtime(
+                    &unpacked.root,
+                    &version.version,
+                    build_target(),
+                    build_edition(),
+                )?;
+                anyhow::ensure!(
+                    checked.git_commit == version.git_commit,
+                    "recovered Hook asset release differs"
+                );
+                if repair::restore(&request, data, Some(&unpacked.root)).await? {
+                    repair::settle(cache)?;
+                }
+                Ok(())
+            },
+            5000,
+        )
+        .await
     }
 
     async fn activate_staged(

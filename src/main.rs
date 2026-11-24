@@ -11,6 +11,14 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args
         .first()
+        .is_some_and(|arg| arg == "internal-qoder-token-usage")
+    {
+        std::process::exit(
+            loongsuite_pilot::deployment::qoder_token_usage::profile_helper(&args[1..]),
+        );
+    }
+    if args
+        .first()
         .is_some_and(|arg| arg == "internal-agent-config-directory")
     {
         std::process::exit(loongsuite_pilot::cli_main::create_agent_config_directory(

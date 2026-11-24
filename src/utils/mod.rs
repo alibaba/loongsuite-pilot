@@ -103,6 +103,7 @@ pub use pid_utils::{
 };
 pub type ProcessLivenessProbe = std::sync::Arc<dyn Fn(&str) -> ProcessLiveness + Send + Sync>;
 
+pub use poll_interval::DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS;
 pub use poll_interval::{
     global_poll_interval_ms, resolve_poll_interval_ms, DEFAULT_POLL_INTERVAL_MS, POLL_INTERVAL_ENV,
 };

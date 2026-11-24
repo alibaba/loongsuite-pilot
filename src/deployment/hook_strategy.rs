@@ -1161,7 +1161,7 @@ impl HookStrategy {
         if self.needs_trust_repair_for_codex(def).await {
             return true;
         }
-        false
+        super::qoder_token_usage::reconcile(def, false).await
     }
 
     async fn needs_settings_repair(&self, def: &AgentDefinition) -> bool {
@@ -1418,7 +1418,11 @@ impl HookStrategy {
                 },
             )
             .await
-            .map_err(|err| format!("Hook 事务失败：{err:#}"))
+            .map_err(|err| format!("Hook 事务失败：{err:#}"))?;
+        if !uninstall {
+            super::qoder_token_usage::reconcile(def, true).await;
+        }
+        Ok(())
     }
 
     fn plan_config_edits(

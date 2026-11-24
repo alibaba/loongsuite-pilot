@@ -64,6 +64,8 @@ param(
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
     [string]$InterceptorMode,
+    [ValidateSet("true", "false")]
+    [string]$HookTamperProtection,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -158,6 +160,10 @@ if ($MaskTypes -and $MaskMode -ne "custom") {
 }
 if ($MaskReplacementMode -and $MaskReplacementMode -notin @("placeholder", "preview")) {
     Write-Error "Unknown mask replacement mode: $MaskReplacementMode (use 'placeholder' or 'preview')"
+    exit 1
+}
+if ($PSBoundParameters.Keys -contains 'HookTamperProtection' -and $Command -ne 'install') {
+    Write-Error "-HookTamperProtection is only supported with install"
     exit 1
 }
 if ($InterceptorMode) {
@@ -1086,6 +1092,7 @@ function Get-InstallConfigJson {
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
         interceptorMode   = "$InterceptorMode"
+        hookTamperProtection = "$HookTamperProtection".ToLowerInvariant()
         probeResult       = "$($script:PROBE_RESULT)"
     }
     if ($ExcludeWorkspace) { $cfgArgs.excludeWorkspaces = @($ExcludeWorkspace | Where-Object { $null -ne $_ }) }

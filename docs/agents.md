@@ -98,6 +98,7 @@ type differences are called out in the notes.
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
 | Doubao Work | `doubao-work` | Experimental macOS/Windows client-message metadata and task traces; paired local TOOL spans and selected-skill context. Native execution and first-output coverage depend on client evidence; model identities, tokens and full cloud inference remain unavailable. See [scope and configuration](doubao-work.md). |
+| Antigravity IDE / CLI | `antigravity` / `antigravity-cli` | Read-only conversation SQLite and transcript. Separate cursors per product, no hook installation. |
 
 The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL

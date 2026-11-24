@@ -223,7 +223,7 @@ pub fn parse_doubao_log_line(line: &str, file_name: &str) -> Option<DoubaoLogEve
         });
     }
     static PREFILTER: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r#""eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time)""#).unwrap()
+        Regex::new(r#""eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time|on_message_receiving_end)""#).unwrap()
     });
     if !line.contains("[office-api-logger]") || !PREFILTER.is_match(line) {
         return None;
@@ -242,6 +242,7 @@ pub fn parse_doubao_log_line(line: &str, file_name: &str) -> Option<DoubaoLogEve
         "on_message_session_start",
         "on_message_sending_start",
         "on_message_sending_end",
+        "on_message_receiving_end",
         "general_agent_message_id_mapping",
         "on_message_session_end",
         "flow_message_time",
@@ -327,6 +328,9 @@ pub fn parse_doubao_log_line(line: &str, file_name: &str) -> Option<DoubaoLogEve
         turn_id,
         query_ms,
         client_outcome,
+        mode_type: identifier(meta.get("mode_type")),
+        send_message_id: identifier(meta.get("send_message_id")),
+        receive_message_id: identifier(meta.get("receive_message_id")),
         conversation_id: identifier(
             meta.get("conversation_id")
                 .filter(|v| !v.is_null())

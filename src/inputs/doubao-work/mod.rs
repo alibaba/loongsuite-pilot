@@ -1,5 +1,7 @@
 //! Native Doubao Work adapter. All checkpoint branches are content-free.
 mod budget;
+mod chat;
+mod chat_format;
 mod content;
 mod execution;
 mod input;
