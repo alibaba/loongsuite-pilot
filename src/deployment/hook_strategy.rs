@@ -914,6 +914,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     data_dir: &Path,
     resource_dir: &Path,
     channel: Option<&'static str>,
+    before_commit: impl FnOnce() -> anyhow::Result<()>,
 ) -> anyhow::Result<Value> {
     use crate::utils::source_access::private_path;
 
@@ -925,6 +926,7 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     private_path(&scratch)?;
     // Let policy wait for Codex to create its own config directory.
     if !home.is_dir() {
+        before_commit()?;
         return Ok(
             serde_json::json!({"state": if channel.is_some() {"waiting"} else {"disabled"}}),
         );
@@ -946,6 +948,44 @@ pub(crate) fn reconcile_embedded_codex_hooks(
             "invalid Codex Hook command"
         );
     }
+    let (strategy, def) = embedded_codex_definition(
+        &settings,
+        &config,
+        data_dir,
+        &binary,
+        channel.unwrap_or("cloud"),
+    )?;
+    let targets = strategy.config_targets(&def).map_err(anyhow::Error::msg)?;
+    std::fs::create_dir_all(&scratch)?;
+    let mut tx = ActivationTransaction::begin(&scratch, targets)?;
+    let result = (|| {
+        let edits = strategy
+            .plan_config_edits(&def, &tx, channel.is_none(), None)
+            .map_err(anyhow::Error::msg)?;
+        for (key, value) in edits {
+            tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
+        }
+        before_commit()?;
+        tx.commit()
+    })();
+    if let Err(error) = result {
+        return match tx.rollback() {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(error.context(format!(
+                "Codex Hook configuration recovery failed: {rollback:#}"
+            ))),
+        };
+    }
+    Ok(serde_json::json!({"state":if channel.is_some() {"deployed"} else {"disabled"}}))
+}
+
+fn embedded_codex_definition(
+    settings: &Path,
+    config: &Path,
+    data_dir: &Path,
+    binary: &Path,
+    channel: &'static str,
+) -> anyhow::Result<(HookStrategy, AgentDefinition)> {
     let mut def: AgentDefinition = serde_json::from_str(include_str!("../../agents.d/codex.json"))?;
     let hook = def.hook.as_mut().expect("Codex Hook definition");
     hook.settings_path = settings
@@ -965,31 +1005,136 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     let mut strategy =
         HookStrategy::new(HookManager::new(Some(String::new()), Some(String::new())));
     strategy.embedded_codex = Some(EmbeddedCodexHooks {
-        binary,
+        binary: binary.to_owned(),
         data_dir: data_dir.to_owned(),
-        channel: channel.unwrap_or("cloud"),
+        channel,
     });
-    let targets = strategy.config_targets(&def).map_err(anyhow::Error::msg)?;
-    std::fs::create_dir_all(&scratch)?;
-    let mut tx = ActivationTransaction::begin(&scratch, targets)?;
-    let result = (|| {
-        let edits = strategy
-            .plan_config_edits(&def, &tx, channel.is_none(), None)
-            .map_err(anyhow::Error::msg)?;
-        for (key, value) in edits {
-            tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
+    Ok((strategy, def))
+}
+
+// Handler indices can be reused by a different owner after manual edits.
+fn embedded_codex_trust_keys(
+    settings: &Value,
+    path: &str,
+    trust: &str,
+    marker: &str,
+    locations: &[InstalledCodexHookLocation],
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let parsed: toml::Table = toml::from_str(trust)?;
+    let states = parsed.get("hooks").and_then(|h| h.get("state"));
+    let hashes = locations
+        .iter()
+        .map(|location| {
+            super::codex_trust_writer::compute_installed_hook_trust_hash(
+                location,
+                super::codex_trust_writer::TrustPlatform::current(),
+            )
+            .map_err(anyhow::Error::msg)
+        })
+        .collect::<anyhow::Result<HashSet<_>>>()?;
+    let executable = |handler: &Value| {
+        ["command", "commandWindows", "command_windows"]
+            .iter()
+            .any(|key| handler[key].as_str().is_some_and(|s| !s.trim().is_empty()))
+            || handler["type"].as_str().is_some_and(|t| t != "command")
+    };
+    let mut occupied = HashSet::new();
+    if let Some(events) = settings["hooks"].as_object() {
+        for (event, groups) in events {
+            let Some(event_key) = event_key(event) else {
+                continue;
+            };
+            for (group_index, group) in groups.as_array().into_iter().flatten().enumerate() {
+                if let Some(handlers) = group["hooks"].as_array() {
+                    for (handler_index, _) in
+                        handlers.iter().enumerate().filter(|(_, h)| executable(h))
+                    {
+                        occupied
+                            .insert(format!("{path}:{event_key}:{group_index}:{handler_index}"));
+                    }
+                } else if executable(group) {
+                    occupied.insert(format!("{path}:{event_key}:{group_index}:0"));
+                }
+            }
         }
-        tx.commit()
-    })();
-    if let Err(error) = result {
-        return match tx.rollback() {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(error.context(format!(
-                "Codex Hook configuration recovery failed: {rollback:#}"
-            ))),
-        };
     }
-    Ok(serde_json::json!({"state":if channel.is_some() {"deployed"} else {"disabled"}}))
+    Ok(super::codex_trust_writer::marked_trust_keys(trust, marker)?
+        .into_iter()
+        .filter(|key| {
+            key.rsplitn(4, ':').nth(3) == Some(path)
+                && (!occupied.contains(key)
+                    || states
+                        .and_then(|s| s.get(key))
+                        .and_then(|t| t.get("trusted_hash"))
+                        .and_then(toml::Value::as_str)
+                        .is_some_and(|h| hashes.contains(h)))
+        })
+        .collect())
+}
+
+pub(crate) fn inspect_embedded_codex_hooks(
+    home: Option<&Path>,
+    data: &Path,
+    resources: &Path,
+) -> anyhow::Result<Value> {
+    let Some(home) = home else {
+        return Ok(
+            serde_json::json!({"agent":"codex","settings_path":null,"trust_path":null,"hooks":[],"trust_records":[]}),
+        );
+    };
+    let settings = home.join("hooks.json");
+    let config = home.join("config.toml");
+    let binary = resources.join("bin").join(sdk_hook_binary_name());
+    let (strategy, def) = embedded_codex_definition(&settings, &config, data, &binary, "cloud")?;
+    let hook = def.hook.as_ref().expect("embedded hook");
+    let trust = hook.trust_toml.as_ref().expect("embedded trust");
+    for path in [&settings, &config] {
+        crate::utils::source_access::private_path(path)?;
+    }
+    let raw = super::codex_trust_writer::read_config_snapshot(&hook.settings_path)?;
+    let doc = SettingsDocument::from_snapshot(raw.as_deref(), JsonSyntax::Json)
+        .map_err(anyhow::Error::msg)?;
+    let locations = strategy
+        .resolve_codex_hook_locations_from_data(&def, &hook.events, true, &doc.data, false, false)
+        .map_err(anyhow::Error::msg)?;
+    let path = node_resolve(&hook.settings_path);
+    let raw =
+        super::codex_trust_writer::read_config_snapshot(&trust.config_path)?.unwrap_or_default();
+    let keys = embedded_codex_trust_keys(&doc.data, &path, &raw, &trust.marker, &locations)?;
+    let parsed: toml::Table = toml::from_str(&raw)?;
+    let states = parsed.get("hooks").and_then(|hooks| hooks.get("state"));
+    let mut hooks = Vec::new();
+    for location in locations {
+        let key = installed_hook_state_key(&path, &location);
+        let hash = super::codex_trust_writer::compute_installed_hook_trust_hash(
+            &location,
+            super::codex_trust_writer::TrustPlatform::current(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let key = keys.get(&key).filter(|key| {
+            states
+                .and_then(|s| s.get(*key))
+                .and_then(|e| e.get("trusted_hash"))
+                .and_then(toml::Value::as_str)
+                == Some(&hash)
+        });
+        hooks.push(serde_json::json!({
+            "event":location.event_name, "matcher":location.matcher, "command":location.handler.command,
+            "group_index":location.group_index, "handler_index":location.handler_index, "trust_key":key,
+        }));
+    }
+    let mut records = Vec::new();
+    for key in keys {
+        if let Some(entry) = states.and_then(|state| state.get(&key)) {
+            records.push(serde_json::json!({
+                "key":key, "trusted_hash":entry.get("trusted_hash").and_then(toml::Value::as_str),
+                "enabled":entry.get("enabled").and_then(toml::Value::as_bool)
+            }));
+        }
+    }
+    Ok(
+        serde_json::json!({"agent":"codex","settings_path":settings,"trust_path":config,"hooks":hooks,"trust_records":records}),
+    )
 }
 
 pub struct HookStrategy {
@@ -1562,6 +1707,21 @@ impl HookStrategy {
         } else {
             Vec::new()
         };
+        let embedded_removal_keys = if uninstall && self.embedded_codex.is_some() {
+            let trust = hook.trust_toml.as_ref().expect("embedded trust");
+            Some(
+                embedded_codex_trust_keys(
+                    &document.data,
+                    &hooks_json,
+                    &snapshot("trust")?.unwrap_or_default(),
+                    &trust.marker,
+                    &old_locations,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+        } else {
+            None
+        };
         if self.codex_legacy_cache.is_some()
             && !old_locations.iter().any(|location| {
                 self.owns_codex_sdk_command(def, &location.event_name, &location.handler.command)
@@ -1657,9 +1817,20 @@ impl HookStrategy {
                 .collect();
             if uninstall {
                 if let Some(raw) = original.as_deref() {
-                    if let Some(content) = plan_remove_trust(raw, &cfg.marker, &owned_keys)
-                        .map_err(|err| err.to_string())?
-                    {
+                    let removal = if self.embedded_codex.is_some() {
+                        let keys: Vec<_> = embedded_removal_keys
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        super::codex_trust_writer::plan_remove_embedded_trust(
+                            raw,
+                            &cfg.marker,
+                            &keys,
+                        )
+                    } else {
+                        plan_remove_trust(raw, &cfg.marker, &owned_keys)
+                    };
+                    if let Some(content) = removal.map_err(|err| err.to_string())? {
                         edits.insert("trust".into(), content);
                     }
                 }
@@ -2681,6 +2852,88 @@ impl DeployStrategy for HookStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_codex_clear_preserves_marked_trust_for_other_settings_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("codex");
+        let state = root.join("sdk");
+        let resources = root.join("package");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("hooks.json"), r#"{"hooks": {}}"#).unwrap();
+        let ours = format!("{}:stop:0:0", home.join("hooks.json").display());
+        let other = format!("{}:stop:0:0", root.join("other-hooks.json").display());
+        let config = home.join("config.toml");
+        let binary = resources.join("bin").join(sdk_hook_binary_name());
+        let (_, def) =
+            embedded_codex_definition(&home.join("hooks.json"), &config, &state, &binary, "cloud")
+                .unwrap();
+        let marker = def.hook.unwrap().trust_toml.unwrap().marker;
+        let entry = |key: &str, hash: &str| {
+            format!(
+                "[hooks.state.{}]\nenabled = true\ntrusted_hash = '{hash}'\n",
+                serde_json::to_string(key).unwrap(),
+            )
+        };
+        std::fs::write(
+            &config,
+            format!(
+                "# BEGIN {marker} trust\n{}{}# END {marker} trust\n",
+                entry(&ours, "own"),
+                entry(&other, "foreign"),
+            ),
+        )
+        .unwrap();
+        let before = inspect_embedded_codex_hooks(Some(&home), &state, &resources).unwrap();
+        reconcile_embedded_codex_hooks(&home, &state, &resources, None, || Ok(())).unwrap();
+        let remaining = std::fs::read_to_string(&config).unwrap();
+        let parsed: toml::Table = toml::from_str(&remaining).unwrap();
+        assert_eq!(
+            parsed["hooks"]["state"][&other]["trusted_hash"].as_str(),
+            Some("foreign")
+        );
+        assert!(
+            super::super::codex_trust_writer::marked_trust_keys(&remaining, &marker)
+                .unwrap()
+                .contains(&other)
+        );
+        assert!(parsed["hooks"]["state"].get(&ours).is_none());
+        assert_eq!(before["trust_records"].as_array().unwrap().len(), 1);
+        assert_eq!(before["trust_records"][0]["key"], ours);
+    }
+
+    #[test]
+    fn codex_hook_transaction_restores_files_when_precommit_check_fails() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        let home = root.join("codex");
+        let state = root.join("sdk");
+        let resources = root.join("package");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(resources.join("bin")).unwrap();
+        let binary = resources.join("bin").join(sdk_hook_binary_name());
+        std::fs::copy(std::env::current_exe().unwrap(), binary).unwrap();
+        let settings = home.join("hooks.json");
+        let trust = home.join("config.toml");
+        let original_hooks =
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"user"}]}]}}"#;
+        let original_trust = "model = 'user'\n";
+        std::fs::write(&settings, original_hooks).unwrap();
+        std::fs::write(&trust, original_trust).unwrap();
+        let result =
+            reconcile_embedded_codex_hooks(&home, &state, &resources, Some("cloud"), || {
+                assert!(std::fs::read_to_string(&settings)?.contains("sdk-hook"));
+                assert!(std::fs::read_to_string(&trust)?.contains("trusted_hash"));
+                anyhow::bail!("precommit check failed")
+            });
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("precommit check failed"));
+        assert_eq!(std::fs::read_to_string(settings).unwrap(), original_hooks);
+        assert_eq!(std::fs::read_to_string(trust).unwrap(), original_trust);
+    }
 
     #[test]
     fn verified_qoder_exec_range_keeps_older_and_unknown_cli_on_legacy_hooks() {

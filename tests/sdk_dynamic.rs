@@ -583,6 +583,75 @@ fn start_failure_releases_its_workers_and_preserves_the_original_owner() {
 }
 
 #[test]
+fn sdk_rejects_policy_when_its_legacy_checkpoint_cannot_be_imported() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    let sessions = root.join("codex/sessions");
+    let pilot = root.join("pilot");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::create_dir_all(pilot.join("logs")).unwrap();
+    std::fs::write(pilot.join("logs/input-state.json"), "{").unwrap();
+
+    let mut host = Host::start_with_home(
+        &root.join("sdk"),
+        Some(&root),
+        empty_policy(),
+        Box::default(),
+    );
+    host.ready();
+    let policy = json!({"version":"invalid-checkpoint","agents":["codex"],"hcd":{"agent_configs":{"codex":{"collection":{
+        "enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions,pilot],
+        "sources":[{"id":"rollout","type":"transcript","path":sessions}],
+        "pilot_host":{"data_dir":pilot}
+    }}}}});
+    let (code, result) = host.apply(policy.clone());
+    assert_eq!(code, FAILURE, "invalid checkpoint result: {result}");
+    assert!(
+        result["reason"].as_str().unwrap().contains("EOF"),
+        "{result}"
+    );
+    assert_eq!(host.snapshot()["effective_version"], "original");
+
+    std::fs::write(pilot.join("logs/input-state.json"), "{}").unwrap();
+    let (code, result) = host.apply(policy.clone());
+    assert_eq!(code, OK, "repaired checkpoint result: {result}");
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    let namespace = host.snapshot()["agents"][0]["status"]["source_namespace"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sdk = root.join("sdk");
+    let db = rusqlite::Connection::open(sdk.join("outbox/delivery.sqlite")).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO checkpoint(source,json) VALUES(?1,'{}')",
+        [&namespace],
+    )
+    .unwrap();
+    let mirror = sdk
+        .join("sources")
+        .join(&namespace)
+        .join("input-state.json");
+    if mirror.exists() {
+        std::fs::remove_file(&mirror).unwrap();
+    }
+    std::fs::create_dir(&mirror).unwrap();
+    let mut replacement = policy.clone();
+    replacement["version"] = json!("replacement");
+    replacement["hcd"]["agent_configs"]["codex"]["collection"]["limits"] =
+        json!({"poll_interval_ms":2000});
+    let (code, result) = host.apply(replacement.clone());
+    assert_eq!(code, FAILURE, "{result}");
+    let snapshot = host.snapshot();
+    assert_eq!(snapshot["effective_version"], policy["version"]);
+    assert_eq!(snapshot["agents"][0]["status"]["state"], "running");
+    assert!(mirror.is_dir());
+    std::fs::remove_dir(&mirror).unwrap();
+
+    assert_eq!(host.apply(replacement).0, OK);
+    host.stop();
+}
+
+#[test]
 fn sdk_crash_child() {
     let Some(root) = std::env::var_os("PILOT_SDK_CRASH_STATE").map(PathBuf::from) else {
         return;
@@ -1933,6 +2002,128 @@ fn codex_sdk_embedded_recovery_uses_one_owner_and_resumes() {
 }
 
 #[test]
+fn codex_management_lists_live_hooks_and_trust_and_clears_after_stop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    let sessions = home.join("sessions");
+    let settings = home.join("hooks.json");
+    let trust = home.join("config.toml");
+    let resources = root.join("package");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::create_dir_all(resources.join("bin")).unwrap();
+    let binary = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    std::fs::copy(
+        binary,
+        resources.join("bin").join(binary.file_name().unwrap()),
+    )
+    .unwrap();
+    let init = json!({"data_dir":root.join("sdk"),"resource_dir":resources,"codex_home":home});
+    let plan = json!({"version":"v1","agents":["codex"],"hcd":{"agent_configs":{"codex":{
+        "collection":{"enabled":true,"profile":"codex_rollout_v1","allowed_roots":[sessions],
+        "sources":[{"id":"rollout","type":"transcript","path":sessions}]},
+        "hook_deployment":{"settings_path":settings,"channel":"cloud"}
+    }}}});
+    let foreign = json!({"type":"command","command":"third-party-hook"});
+    std::fs::write(
+        &settings,
+        json!({"hooks":{"Stop":[{"hooks":[foreign]}]}}).to_string(),
+    )
+    .unwrap();
+    let foreign_key = format!("{}:stop:0:0", settings.display());
+    let foreign_trust = format!(
+        "[hooks.state.{}]\nenabled = false\ntrusted_hash = 'keep'\n",
+        serde_json::to_string(&foreign_key).unwrap()
+    );
+    std::fs::write(&trust, &foreign_trust).unwrap();
+    let mut host = Host::start_with_init(init.clone(), plan.clone(), Box::default());
+    host.ready();
+    assert_ne!(host.api().capabilities & CAP_CODEX_HOOK_CONTROL, 0);
+    let saved_settings = std::fs::read(&settings).unwrap();
+    let saved_trust = std::fs::read(&trust).unwrap();
+    std::fs::write(&settings, "{invalid").unwrap();
+    assert_eq!(host.apply(empty_policy()).0, FAILURE);
+    assert_eq!(host.snapshot()["effective_version"], "v1");
+    assert_eq!(std::fs::read(&trust).unwrap(), saved_trust);
+    std::fs::write(&settings, saved_settings).unwrap();
+    assert_eq!(host.apply(plan.clone()).0, OK);
+    let request = |op| json!({"hook_management":{"agent":"codex","operation":op}});
+    let (code, list) = host.apply(request("list"));
+    assert_eq!(code, OK, "{list}");
+    let entries = list["hooks"].as_array().unwrap();
+    let records = list["trust_records"].as_array().unwrap();
+    assert_eq!(entries.len(), 7);
+    assert_eq!(records.len(), 7);
+    for hook in entries {
+        assert!(records
+            .iter()
+            .any(|r| r["key"] == hook["trust_key"] && r["trusted_hash"].is_string()));
+    }
+    assert_eq!(host.apply(request("clear")).0, BUSY);
+    assert_eq!(unsafe { (host.api().stop)(host.handle, 0) }, OK);
+    until(|| {
+        host.pump();
+        host.ctx.stopped.load(Ordering::SeqCst) == 1
+    });
+    assert_eq!(host.apply(request("list")).1, list);
+    let mut replacement = Host::start_with_init(init, plan, Box::default());
+    replacement.ready();
+    assert_eq!(host.apply(request("clear")).0, BUSY);
+    replacement.stop();
+    let mut altered: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    altered["hooks"]["Stop"].as_array_mut().unwrap().swap(0, 1);
+    // Another event has a group and handler index but no executable.
+    altered["hooks"]["PreToolUse"][0]["hooks"][0] = json!({});
+    std::fs::write(&settings, altered.to_string()).unwrap();
+    let (code, reordered) = host.apply(request("list"));
+    assert_eq!(code, OK);
+    let stop = reordered["hooks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["event"] == "Stop")
+        .unwrap();
+    assert_eq!(stop["group_index"], 0);
+    assert!(stop["trust_key"].is_null());
+    assert!(reordered["trust_records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|r| r["key"] != foreign_key));
+    let before = std::fs::read_to_string(&trust).unwrap();
+    let owned_stop = records
+        .iter()
+        .find(|r| r["key"].as_str().unwrap().ends_with(":stop:1:0"))
+        .unwrap();
+    let key = owned_stop["key"].as_str().unwrap();
+    let quoted = serde_json::to_string(key).unwrap();
+    let hash = &owned_stop["trusted_hash"];
+    let inline = before.replace(
+        &format!("[hooks.state.{quoted}]\ntrusted_hash = {hash}"),
+        &format!("[hooks.state]\n{quoted} = {{ trusted_hash = {hash} }}"),
+    );
+    assert_ne!(inline, before);
+    std::fs::write(&trust, &inline).unwrap();
+    assert_eq!(host.apply(request("list")).1, reordered);
+    let updated = host.apply(request("list")).1;
+    assert_eq!(updated["hooks"].as_array().unwrap().len(), 6);
+    assert_eq!(updated["trust_records"].as_array().unwrap().len(), 7);
+    for _ in 0..2 {
+        assert_eq!(host.apply(request("clear")).0, OK);
+        let report = host.apply(request("list")).1;
+        assert_eq!(report["hooks"], json!([]));
+        assert_eq!(report["trust_records"], json!([]));
+        assert!(std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("third-party-hook"));
+        assert!(std::fs::read_to_string(&trust)
+            .unwrap()
+            .contains(foreign_trust.trim()));
+    }
+    host.stop();
+}
+
+#[test]
 fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
@@ -2020,6 +2211,59 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
         }
     }
     assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
+    let managed_hook = || {
+        let mut child = Command::new(binary)
+            .args([
+                "sdk-hook",
+                "--data-dir",
+                data.to_str().unwrap(),
+                "--agent",
+                "codex",
+                "--channel",
+                "cloud",
+                "--event",
+                "PreToolUse",
+                "--pilot-sdk-managed",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(br#"{"tool_name":"Bash","tool_input":{"command":"echo blocked"}}"#)
+            .ok();
+        child.wait_with_output().unwrap()
+    };
+    let assert_managed_deny = || {
+        let result = managed_hook();
+        assert!(result.status.success());
+        let output: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+    };
+    let mut same = policy.clone();
+    same["version"] = json!("same-channel");
+    same["hcd"]["agent_configs"]["codex"]["collection"]["limits"] =
+        json!({"poll_interval_ms":2000});
+    assert_eq!(host.apply(same).0, OK);
+    let journal = data.join("codex-hook-deployment/update-recovery.json");
+    std::fs::write(&journal, "{}").unwrap();
+    assert_managed_deny();
+    let mut local = policy.clone();
+    local["version"] = json!("new-channel");
+    local["hcd"]["agent_configs"]["codex"]["hook_deployment"]["channel"] = json!("local");
+    assert_eq!(host.apply(local.clone()).0, FAILURE);
+    assert_eq!(host.snapshot()["effective_version"], "same-channel");
+    assert!(journal.exists());
+    assert_managed_deny();
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 5);
+    std::fs::remove_file(journal).unwrap();
+    assert_eq!(host.apply(local).0, OK);
+    let stale = managed_hook();
+    assert!(stale.status.success() && stale.stdout.is_empty());
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 5);
     host.stop();
 
     let mut cleanup = Host::start_with_init(init, empty_policy(), Box::default());

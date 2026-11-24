@@ -40,6 +40,8 @@ pub struct Datagram {
     pub remaining_ms: u32,
     pub t0_unix_ms: u64,
     pub length: usize,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub managed: bool,
     pub agent: String,
     pub event: String,
     #[serde(default)]
