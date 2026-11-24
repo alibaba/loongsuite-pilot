@@ -409,7 +409,7 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog.start();
     this.startHookInstallSignalWatch();
 
-    // 11. The process stays up when either version checks or hook tamper repair is on.
+    // 11. The process stays up when version checks or hook tamper repair is on.
     // Both off means it exits, and a missing pid is the expected state.
     const updaterExpected = (this.config.autoUpdate?.enabled ?? false) || this.config.hookWatchdog.tamperProtection;
     if (updaterExpected) {

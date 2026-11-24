@@ -413,7 +413,6 @@ export interface HookWatchdogConfig {
   enabled: boolean;
   intervalMs: number;
   repairCooldownMs: number;
-  /** Report tampered hook scripts for the updater to rewrite. Default off. */
   tamperProtection: boolean;
 }
 

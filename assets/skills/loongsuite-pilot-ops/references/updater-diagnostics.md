@@ -262,13 +262,36 @@ git_commit=abc1234
 
 ---
 
+防篡改写在 `hookWatchdog` 下面。`enabled` 是总开关，默认开；`tamperProtection.enabled` 是子开关，默认关。父开关关掉后子开关不生效。
+
+```json
+{
+  "hookWatchdog": {
+    "enabled": true,
+    "tamperProtection": {
+      "enabled": true
+    }
+  }
+}
+```
+
+安装时可以指定，不传则保留已有值：
+
+```bash
+installer.sh install --hook-tamper-protection true
+```
+
+```powershell
+.\installer.ps1 install -HookTamperProtection true
+```
+
 ## 常见问题速查
 
 | 现象 | 解决方法 |
 |------|---------|
 | `loongsuite-pilot status` 显示 updater 未运行 | 查看 updater 日志。防篡改开着且只关版本检查时，进程仍应在（`auto-update disabled, repairing hook assets only`）。两个都关时日志是 `auto-update and hook repair disabled, exiting`，pid 不在是预期状态。其余情况进程不在就重启服务 |
 | `auto-update disabled, repairing hook assets only` | `autoUpdate.enabled` 为 `false` 或 `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false`，同时 hook 修复还开着。版本检查停了，hook 修复还在 |
-| `auto-update and hook repair disabled, exiting` | 上面的自动更新开关，再加上 hook 防篡改关闭。防篡改默认关，打开用 `hookWatchdog.tamperProtection.enabled: true` 或 `LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED=true`。两个都关，进程退出 |
+| `auto-update and hook repair disabled, exiting` | 自动更新关着，并且防篡改没生效。防篡改要 `hookWatchdog.enabled` 与 `hookWatchdog.tamperProtection.enabled` 同时为 true，子开关默认关。环境变量 `LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED` 只覆盖子开关，父开关关着时进程仍退出。安装可用 `--hook-tamper-protection true` 或 `-HookTamperProtection true` |
 | manifest 拉取失败（`manifest fetch failed`） | 检查网络连通性：`curl -I <manifestUrl>`。常见原因：代理未配置、OSS 域名不可达、DNS 解析失败 |
 | `SHA-256 mismatch` | tarball 下载不完整或 CDN 缓存与 manifest 不一致。等待下一次自动重试（通常 CDN 缓存刷新后恢复） |
 | `npm install` 失败 | 检查 Node.js 和 npm 是否可用：`node --version && npm --version`。常见：PATH 中无 node、npm registry 不可达 |

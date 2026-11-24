@@ -40,10 +40,6 @@ export async function writeHookRestoreRequest(controlDir: string, request: HookR
   );
 }
 
-/**
- * Move the live request aside before repair. The collector keeps writing
- * hook-restore-request.json, so a later report is a different file.
- */
 export async function claimHookRestoreRequest(
   controlDir: string,
 ): Promise<{ claimedPath: string; request: HookRestoreRequest } | null> {
@@ -63,7 +59,6 @@ export async function claimHookRestoreRequest(
   return { claimedPath, request };
 }
 
-/** Drop the claimed copy, or put it back when the live path is still free. */
 export async function settleHookRestoreClaim(controlDir: string, claimedPath: string, discard: boolean): Promise<void> {
   if (discard) {
     await fs.rm(claimedPath, { force: true });
