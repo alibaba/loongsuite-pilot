@@ -7,6 +7,7 @@ import { expandTraeHistory, omitEmptyTraeModelSpans } from '../../../../src/flus
 it('keeps response identities distinct and turn-level data on the agent', () => {
   const span = (kind: string, id: string, parent?: string): ReadableSpan => ({
     spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId: parent,
+    startTime: [1700000000, 0], endTime: [1700000021, 0],
     attributes: { 'gen_ai.span.kind': kind }, name: kind,
   }) as ReadableSpan;
   const agent = span('AGENT', '1'), step = span('STEP', '2', '1');
@@ -126,9 +127,10 @@ it('retains one complete turn when shared history cannot supply a complete model
 });
 
 it.each([
-  ['shared', true],
-  ['uniquely matched', false],
-])('exports the final answer once when an attributable tool round precedes a %s terminal stream', (_label, shared) => {
+  { scenario: 'a shared terminal stream', shared: true },
+  { scenario: 'a uniquely matched terminal stream', shared: false },
+  { scenario: 'a terminal stream with an early header', shared: false, headersAt: '500000000' },
+])('exports the final answer once when an attributable tool round precedes $scenario', ({ shared, headersAt }) => {
   const span = (kind: string, id: string, parentSpanId?: string) => ({
     name: kind, spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId,
     startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind, 'gen_ai.agent.name': 'trae-cn' },
@@ -151,7 +153,7 @@ it.each([
     'agent.trae-cn.hub.total_tokens_observed': 25,
   });
   const firstRound = {
-    id: 'a'.repeat(24), at: '2000000000', request: 'unique', initial: true, toolIds: ['call_one'],
+    id: 'a'.repeat(24), at: '2000000000', headersAt, request: 'unique', initial: true, toolIds: ['call_one'],
     input: 12, output: 3,
   };
   const terminalRounds = (shared ? ['b', 'c'] : ['b']).map(c => ({
@@ -183,6 +185,8 @@ it.each([
   }
   const firstModel = models.find(s => s.attributes['gen_ai.response.id'] === firstRound.id);
   expect(firstModel?.parentSpanId).toBe(tool.parentSpanId);
+  expect(firstModel?.startTime).toEqual([2, 0]);
+  expect(firstModel?.attributes['loongsuite.trae_cn.timing_source']).toBeUndefined();
   expect(firstModel?.attributes['gen_ai.usage.total_tokens']).toBe(15);
   expect(agent.attributes['gen_ai.usage.total_tokens']).toBe(25);
   expect(agent.attributes['agent.trae-cn.hub.total_tokens_observed']).toBe(25);

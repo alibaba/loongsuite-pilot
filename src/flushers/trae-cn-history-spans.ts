@@ -22,6 +22,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   if (!llm || !step || !agent || llm.attributes['gen_ai.span.kind'] !== 'LLM' ||
       step.attributes['gen_ai.span.kind'] !== 'STEP' || agent.attributes['gen_ai.span.kind'] !== 'AGENT') return spans;
   const trace = llm.spanContext().traceId;
+  const agentStart = BigInt(agent.startTime[0]) * 1000000000n + BigInt(agent.startTime[1]);
   const observed: ReadableSpan[] = [];
   const parents = new Map<string, { span: ReadableSpan; history: string }>();
   // Use the converted (content-policy filtered) messages. A continuation's
@@ -53,6 +54,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     const instant: [number, number] = [Number(ns / 1000000000n), Number(ns % 1000000000n)];
     let parent = agent.spanContext().spanId;
     const shared = r.shared === true && typeof r.request === 'string' ? r.request : undefined;
+    const headers = typeof r.headersAt === 'string' && /^\d{1,19}$/.test(r.headersAt) ? BigInt(r.headersAt) : undefined;
     const layers = shared ? ['stream', 'round', 'model'] : ['round', 'model'];
     for (const layer of layers) {
       const isModel = layer === 'model';
@@ -112,9 +114,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       let startTime = instant;
       // A uniquely owned stream gives us a client-side interval. The server
       // can dispatch tools before the client records the model history.
-      if (!shared && typeof r.request === 'string' && typeof r.headersAt === 'string' &&
-          /^\d{1,19}$/.test(r.headersAt) && BigInt(r.headersAt) < ns) {
-        const headers = BigInt(r.headersAt);
+      if (!shared && typeof r.request === 'string' && headers !== undefined && headers >= agentStart && headers < ns) {
         startTime = [Number(headers / 1000000000n), Number(headers % 1000000000n)];
         attributes['loongsuite.trae_cn.timing_source'] = 'response_headers_to_history_recorded';
       }
@@ -127,7 +127,6 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
         const requestStart: [number, number] = [Math.floor(r.requestStartMs / 1000), (r.requestStartMs % 1000) * 1000000];
         if (!isModel && earlier(requestStart, startTime)) startTime = requestStart;
         attributes['loongsuite.trae_cn.request_to_first_token_ns'] = (r.firstTokenMs - r.requestStartMs) * 1000000;
-        const agentStart = BigInt(agent.startTime[0]) * 1000000000n + BigInt(agent.startTime[1]);
         const elapsed = BigInt(r.firstTokenMs) * 1000000n - agentStart;
         if (elapsed >= 0n && elapsed <= BigInt(Number.MAX_SAFE_INTEGER)) agent.attributes['gen_ai.response.time_to_first_token'] = Number(elapsed);
       }
