@@ -5,6 +5,7 @@ import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
 import { classifyZCodeRolloutFailure, ZCODE_NATIVE_OUTPUT_UNAVAILABLE } from '../../normalization/zcode-rollout-outcome.js';
 import { readZCodeMessageWindow, ZCODE_MESSAGE_WINDOW } from '../../normalization/zcode-message-window.js';
+import { readZCodeRequestMaxTokens, readZCodeToolDefinitions } from '../../normalization/zcode-request-metadata.js';
 import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
@@ -230,8 +231,8 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     // FunctionToolDefinition schema ({type:'function', name, description?,
     // parameters?}) so the OTLP converter's parseToolDefinitions accepts them
     // and getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
-    const toolDefinitions = extractToolDefinitions(record);
-    const maxTokens = finiteNumber(requestBody.max_tokens);
+    const toolDefinitions = readZCodeToolDefinitions(record);
+    const maxTokens = readZCodeRequestMaxTokens(request);
     const rawFinishReason = stringValue(response.finishReason) ?? stringValue(response.finish_reason);
     const failure = classifyZCodeRolloutFailure(rawFinishReason, record.error ?? response.error);
     // Older clients could finalize an interrupted record without a reason or error.
@@ -518,39 +519,6 @@ function toGenAiOutputMessages(response: Record<string, unknown>, finishReason?:
 }
 
 /**
- * Extract tool definitions from a ZCode rollout record. Tries multiple paths
- * to be robust against version differences in the rollout record structure.
- *
- * v3.2.3 fixture (researcher CP1): request.body.tools = [{name, description,
- * input_schema}, ...]
- * v0.15.0 production: request.body.tools = [{type:'function', function:{name,
- * description, parameters}}, ...] (OpenAI nested shape). Both shapes are
- * normalized by normalizeToolDefinitions below.
- */
-function extractToolDefinitions(record: Record<string, unknown>): JsonValue | undefined {
-  const request = asRecord(record.request);
-  const requestBody = asRecord(request.body);
-  const candidates: unknown[] = [
-    requestBody.tools,
-    request.tools,
-    requestBody.function_definitions,
-    request.function_definitions,
-    request.toolDefinitions,
-    requestBody.toolDefinitions,
-    record.tools,
-  ];
-  for (const c of candidates) {
-    if (Array.isArray(c) && c.length > 0) {
-      const normalized = normalizeToolDefinitions(c);
-      if (normalized && Array.isArray(normalized) && normalized.length > 0) {
-        return normalized as unknown as JsonValue;
-      }
-    }
-  }
-  return undefined;
-}
-
-/**
  * G2 recovery: scan request.messages for role=tool entries with isError=true
  * and emit a real tool.result event for each. The hook side (cmdPostToolUse)
  * never fires when ZCode's tool call fails — its 4-event stream for a failed
@@ -628,60 +596,6 @@ function synthesizeToolResultsFromRollout(args: {
     if (entry) out.push(entry);
   }
   return out.length > 0 ? out : undefined;
-}
-
-/**
- * Normalize ZCode tool definitions to ARMS GenAI FunctionToolDefinition schema
- * (tests/schemas/gen-ai-tool-definitions.json):
- *   {type:'function', name, description?, parameters?}
- *
- * ZCode v3.2.3 fixture: flat shape {name, description, input_schema}.
- * ZCode v0.15.0 production rollout: OpenAI nested shape
- *   {type:'function', function:{name, description, parameters}}.
- *
- * `unwindFunctionWrapper` flattens the nested form before the field extraction
- * so both shapes share one code path. input_schema is renamed to parameters
- * and type='function' is injected so the OTLP converter's
- * getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
- */
-function normalizeToolDefinitions(tools: unknown): JsonValue | undefined {
-  if (!Array.isArray(tools)) return undefined;
-  const out: JsonValue[] = [];
-  for (const t of tools) {
-    const rec = unwindFunctionWrapper(asRecord(t));
-    const name = stringValue(rec.name);
-    if (!name) continue;
-    const def: Record<string, unknown> = {
-      type: stringValue(rec.type) ?? 'function',
-      name,
-    };
-    const desc = stringValue(rec.description);
-    if (desc) def.description = desc;
-    // ZCode uses input_schema; ARMS GenAI uses parameters
-    const params = rec.parameters ?? rec.input_schema ?? rec.inputSchema;
-    if (params !== undefined && params !== null) def.parameters = params;
-    out.push(def as unknown as JsonValue);
-  }
-  return out.length > 0 ? (out as unknown as JsonValue) : undefined;
-}
-
-/**
- * Flatten OpenAI's `{type:'function', function:{name, description, parameters}}`
- * wrapper into the flat `{name, description, parameters, type}` form. v3.2.3
- * flat shape passes through unchanged. Returns empty record on null/non-object.
- */
-function unwindFunctionWrapper(rec: Record<string, unknown>): Record<string, unknown> {
-  const fn = rec.function;
-  if (fn && typeof fn === 'object' && !Array.isArray(fn)) {
-    const fnRec = fn as Record<string, unknown>;
-    return {
-      type: rec.type ?? 'function',
-      name: fnRec.name,
-      description: fnRec.description,
-      parameters: fnRec.parameters ?? fnRec.input_schema ?? fnRec.inputSchema,
-    };
-  }
-  return rec;
 }
 
 function toGenAiSystemInstructions(raw: unknown): JsonValue | undefined {

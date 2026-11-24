@@ -18,7 +18,7 @@ import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
-import { enrichZCodeModelOutcomes } from './zcode-model-outcomes.js';
+import { enrichZCodeModelSpans } from './zcode-model-outcomes.js';
 import { prepareZCodeRequestContext } from './zcode-request-context.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
@@ -2297,7 +2297,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === ZCODE_AGENT_TYPE) {
       this.enrichZCodeToolOutcomes(records, spans);
-      enrichZCodeModelOutcomes(records, spans);
+      enrichZCodeModelSpans(records, spans);
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
