@@ -206,24 +206,32 @@ export class HubUsage {
     }
     const matches = [...this.turns.values()].filter(t => t.session === entry['gen_ai.session.id'] &&
       ([...ids].some(id => t.tools.has(id)) || native?.ownsTool?.(t.trace, t.session, t.reply, ids)));
-    const rounds = native?.responses(entry['gen_ai.session.id'], ids);
+    const turn = matches.length === 1 ? matches[0] : undefined;
+    const evidence = native?.responses(entry['gen_ai.session.id'], ids, turn);
+    const rounds = evidence?.rounds;
     const recovered: AgentActivityEntry[] = [];
+    const recoveredCalls = [];
     for (const round of rounds ?? []) {
       if (!('todos' in round) || !round.todos || !entry.trace_id || !entry.parent_span_id) continue;
       for (const todo of round.todos) {
         if (ids.has(todo.call)) continue;
         ids.add(todo.call);
-        const body = matches.length === 1 && Array.isArray(messages) ? matches[0].todos.get(todo.call) : undefined;
+        const body = evidence?.matchesHubOwner && Array.isArray(messages) ? turn?.todos.get(todo.call) : undefined;
         recovered.push(...todoEvents(entry, todo, body ?? undefined));
         if (this.captureContent && Array.isArray(messages)) {
-          messages.push({ role: 'assistant', parts: [{ type: 'tool_call', name: 'TodoWrite', id: todo.call,
-            ...(body ? { arguments: JSON.parse(body.args) } : {}) }] });
+          recoveredCalls.push({ type: 'tool_call', name: 'TodoWrite', id: todo.call,
+            ...(body ? { arguments: JSON.parse(body.args) } : {}) });
         }
       }
     }
+    if (Array.isArray(messages) && recoveredCalls.length) {
+      const finalAnswer = messages.findIndex(message => message && typeof message === 'object' &&
+        !Array.isArray(message) && message.role === 'assistant' && Array.isArray(message.parts) &&
+        message.parts.some(part => part && typeof part === 'object' && !Array.isArray(part) && part.type === 'text'));
+      messages.splice(finalAnswer < 0 ? messages.length : finalAnswer, 0, { role: 'assistant', parts: recoveredCalls });
+    }
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
-    if (matches.length !== 1) return recovered;
-    const turn = matches[0];
+    if (!turn || evidence?.matchesHubOwner === false) return recovered;
     if (this.captureContent && Array.isArray(messages)) {
       const parts = [...turn.plans].filter(([, plan]) => plan.content).map(([id, plan]) => ({
         type: 'reasoning', content: plan.content, plan_item_id: id,

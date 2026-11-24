@@ -67,7 +67,11 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
   }
 });
 
-it.each([false, true])('joins TodoWrite bodies only on the verified tool call with capture=%s', async capture => {
+it.each([
+  { capture: false, matchesHubOwner: true },
+  { capture: true, matchesHubOwner: true },
+  { capture: true, matchesHubOwner: false },
+])('joins TodoWrite bodies with capture=$capture and matching Hub owner=$matchesHubOwner', async ({ capture, matchesHubOwner }) => {
   const root = await mkdtemp(join(tmpdir(), 'pilot-trae-todo-'));
   const hub = new HubUsage(root, capture);
   const reply = '1'.repeat(24), session = '2'.repeat(24);
@@ -87,12 +91,21 @@ it.each([false, true])('joins TodoWrite bodies only on the verified tool call wi
       JSON.stringify({ type, seq, data: JSON.stringify({ ...data, reply_to_message_id: reply }) })).join('\n') + '\n');
     await hub.refresh();
     const entry = { 'event.name': 'llm.response', trace_id: 'a'.repeat(32), parent_span_id: '1'.repeat(16),
-      'gen_ai.session.id': session, 'agent.trae-cn.tool_call_ids': ['read-call'], 'gen_ai.output.messages': [] } as unknown as AgentActivityEntry;
+      'gen_ai.session.id': session, 'agent.trae-cn.tool_call_ids': ['read-call'],
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Final answer' }] }],
+    } as unknown as AgentActivityEntry;
     const events = hub.enrich(entry, { expectedSeqs: () => undefined, complete: () => false,
-      responses: () => [{ id: '3'.repeat(24), at: '100', todos: [{ call: 'todo-call', start: '102', committedAt: '105' }] }] });
+      responses: () => ({ matchesHubOwner, rounds: [
+        { id: '3'.repeat(24), at: '100', todos: [{ call: 'todo-call', start: '102', committedAt: '105' }] },
+      ] }) });
     expect(events?.map(e => e['gen_ai.tool.call.id'])).toEqual(['todo-call', 'todo-call']);
-    expect(events?.[0]['gen_ai.tool.call.arguments']).toEqual(capture ? args : undefined);
-    expect(events?.[1]['gen_ai.tool.call.result']).toEqual(capture ? result : undefined);
+    const includesBody = capture && matchesHubOwner;
+    expect(events?.[0]['gen_ai.tool.call.arguments']).toEqual(includesBody ? args : undefined);
+    expect(events?.[1]['gen_ai.tool.call.result']).toEqual(includesBody ? result : undefined);
+    const answer = { role: 'assistant', parts: [{ type: 'text', content: 'Final answer' }] };
+    expect(entry['gen_ai.output.messages']).toEqual(capture ? [
+      { role: 'assistant', parts: [expect.objectContaining({ type: 'tool_call', id: 'todo-call' })] }, answer,
+    ] : [answer]);
   } finally {
     await hub.close();
     await rm(root, { recursive: true, force: true });

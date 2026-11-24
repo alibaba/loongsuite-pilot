@@ -78,8 +78,12 @@ export function checkLastStepNoToolCall(spans, childrenMap) {
     isTraeTurnSummary(step, childrenMap)) || lastStep;
   const children = childrenMap.get(terminalStep.spanId) || [];
   const llm = children.find(c => c._kind === 'LLM');
-  if (!llm) return [];
-  const raw = llm.attributes?.['gen_ai.output.messages'];
+  // When one terminal stream contains several model responses, only the
+  // agent-level summary owns the final text.
+  const owner = spans.find(span => span.spanId === terminalStep.parentSpanId &&
+    span._kind === 'AGENT' && isTraeObservation(span, 'turn_summary')) || llm;
+  if (!owner) return [];
+  const raw = owner.attributes?.['gen_ai.output.messages'];
   if (!raw) return [pass('semantic.last_step_no_tool_call')];
   try {
     const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
@@ -97,8 +101,8 @@ export function checkLastStepNoToolCall(spans, childrenMap) {
     }
     return [hasToolCall
       ? error('semantic.last_step_no_tool_call',
-          'last STEP LLM terminal assistant message contains tool_call, expected text-only final answer',
-          llm.spanId, llm.name)
+          'terminal assistant message contains tool_call, expected text-only final answer',
+          owner.spanId, owner.name)
       : pass('semantic.last_step_no_tool_call')];
   } catch {
     return [pass('semantic.last_step_no_tool_call')];
@@ -367,6 +371,9 @@ export function validateStructure(trace) {
     if (llm && tools.length > 0) {
       const llmStart = BigInt(llm.startTimeUnixNano);
       for (const t of tools) {
+        // A native model persistence observation can follow tool dispatch.
+        if (isRecordedTraeModel(llm) && llm.startTimeUnixNano === llm.endTimeUnixNano &&
+            isTraeObservation(t, 'native_tool_acknowledged')) continue;
         if (BigInt(t.startTimeUnixNano) < llmStart) {
           checks.push(error('structure.llm_before_tools', `TOOL ${t.name} starts before LLM`, t.spanId, t.name));
           llmOrderOk = false;
@@ -506,7 +513,8 @@ export function validateTime(trace, rules) {
   for (const s of spans) {
     const start = BigInt(s.startTimeUnixNano);
     const end = BigInt(s.endTimeUnixNano);
-    if (end < start || (end === start && !isInstantTraeResponse(s, childrenMap))) {
+    if (end < start || (end === start && !isInstantTraeResponse(s, childrenMap) &&
+        !(s._kind === 'TOOL' && isTraeObservation(s, 'native_tool_acknowledged')))) {
       checks.push(error('time.non_zero_duration', `duration=${Number(end - start) / 1e6}ms`, s.spanId, s.name));
       allNonZero = false;
     }
@@ -1088,6 +1096,11 @@ export function validateSemantic(trace, rules) {
     for (const t of toolSpans) {
       const args = t.attributes?.['gen_ai.tool.call.arguments'];
       if (args === undefined || args === null || args === '') {
+        if (isTraeObservation(t, 'native_tool_acknowledged')) {
+          checks.push(warn('semantic.tool_has_arguments', 'Native dispatch was observed without matching tool arguments', t.spanId, t.name));
+          allHaveArgs = false;
+          continue;
+        }
         checks.push(error('semantic.tool_has_arguments',
           `TOOL ${t.attributes?.['gen_ai.tool.name'] || t.name} missing gen_ai.tool.call.arguments`,
           t.spanId, t.name));

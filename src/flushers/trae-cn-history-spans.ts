@@ -9,6 +9,10 @@ function earlier(a: ReadableSpan['startTime'], b: ReadableSpan['startTime']): bo
   return a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
 }
 
+function hrTime(ns: bigint): ReadableSpan['startTime'] {
+  return [Number(ns / 1000000000n), Number(ns % 1000000000n)];
+}
+
 // The Hook converter's single STEP and LLM represent an entire user turn.
 // Replace that pair only when the terminal response is bound to native history.
 export function expandTraeHistory(records: AgentActivityEntry[], spans: ReadableSpan[]): ReadableSpan[] {
@@ -23,6 +27,31 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       step.attributes['gen_ai.span.kind'] !== 'STEP' || agent.attributes['gen_ai.span.kind'] !== 'AGENT') return spans;
   const trace = llm.spanContext().traceId;
   const agentStart = BigInt(agent.startTime[0]) * 1000000000n + BigInt(agent.startTime[1]);
+  const nativeToolBounds = new Map<string, { start?: bigint; end?: bigint }>();
+  for (const record of records) {
+    const timestamp = record.time_unix_nano;
+    if (record['agent.trae-cn.tool_timing_source'] !== 'native_start_to_batch_commit' ||
+        !record.span_id || typeof timestamp !== 'string' || !/^\d{1,19}$/.test(timestamp)) continue;
+    const range = nativeToolBounds.get(record.span_id) ?? {};
+    if (record['event.name'] === 'tool.call') range.start = BigInt(timestamp);
+    if (record['event.name'] === 'tool.result') range.end = BigInt(timestamp);
+    nativeToolBounds.set(record.span_id, range);
+  }
+  if (nativeToolBounds.size > 0) {
+    spans = spans.map(span => {
+      const range = nativeToolBounds.get(span.spanContext().spanId);
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL' ||
+          range?.start === undefined || range.end === undefined || range.start > range.end) return span;
+      // The generic converter rounds tool times to milliseconds. Copy the
+      // ended span to preserve exact native times without changing SDK state.
+      const startTime = hrTime(range.start);
+      const endTime = hrTime(range.end);
+      return { ...span, spanContext: () => span.spanContext(), ended: span.ended,
+        droppedAttributesCount: span.droppedAttributesCount, droppedEventsCount: span.droppedEventsCount,
+        droppedLinksCount: span.droppedLinksCount, startTime, endTime, duration: hrTimeDuration(startTime, endTime),
+        attributes: { ...span.attributes, 'loongsuite.trae_cn.observation': 'native_tool_acknowledged' } };
+    });
+  }
   const observed: ReadableSpan[] = [];
   const parents = new Map<string, { span: ReadableSpan; history: string }>();
   // Use the converted (content-policy filtered) messages. A continuation's
@@ -45,14 +74,16 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   }
   const sharedSteps = new Map<string, ReadableSpan>();
   const seen = new Set<string>();
+  let sharedTerminal = false;
   for (const r of rounds) {
     if (!r || typeof r !== 'object' || Array.isArray(r) || typeof r.id !== 'string' || !/^[a-f0-9]{24}$/.test(r.id) ||
         typeof r.at !== 'string' || !/^\d{1,19}$/.test(r.at) || seen.has(r.id)) return spans;
     seen.add(r.id);
     const ns = BigInt(r.at);
-    const instant: [number, number] = [Number(ns / 1000000000n), Number(ns % 1000000000n)];
+    const instant = hrTime(ns);
     let parent = agent.spanContext().spanId;
     const shared = r.shared === true && typeof r.request === 'string' ? r.request : undefined;
+    if (shared && r.terminal === true) sharedTerminal = true;
     const headers = typeof r.headersAt === 'string' && /^\d{1,19}$/.test(r.headersAt) ? BigInt(r.headersAt) : undefined;
     const layers = shared ? ['stream', 'round', 'model'] : ['round', 'model'];
     for (const layer of layers) {
@@ -114,7 +145,7 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
       // A uniquely owned stream gives us a client-side interval. The server
       // can dispatch tools before the client records the model history.
       if (!shared && typeof r.request === 'string' && headers !== undefined && headers >= agentStart && headers < ns) {
-        startTime = [Number(headers / 1000000000n), Number(headers % 1000000000n)];
+        startTime = hrTime(headers);
         attributes['loongsuite.trae_cn.timing_source'] = 'response_headers_to_history_recorded';
       }
       if (r.initial === true && typeof r.requestStartMs === 'number' && typeof r.firstTokenMs === 'number' &&
@@ -171,8 +202,8 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     delete step.attributes['gen_ai.react.round'];
     step.attributes['loongsuite.trae_cn.observation'] = 'unattributed_tools';
   }
-  // The original LLM may survive as a turn summary. Move aggregate usage
-  // to the AGENT so consumers can sum measured model responses independently.
+  // Move aggregate usage to the AGENT so consumers can sum measured model
+  // responses independently.
   for (const [key, value] of Object.entries(llm.attributes)) {
     if (!key.startsWith('gen_ai.usage.') && !key.startsWith('agent.trae-cn.hub.')) continue;
     agent.attributes[key] = value;
@@ -194,6 +225,9 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
   // agent scope even when a per-history message cannot be reconstructed.
   for (const key of ['gen_ai.input.messages', 'gen_ai.output.messages']) {
     if (llm.attributes[key] !== undefined) agent.attributes[key] ??= llm.attributes[key];
+  }
+  if (sharedTerminal) {
+    agent.attributes['loongsuite.trae_cn.observation'] = 'turn_summary';
   }
   return [...spans.filter(s => (s !== step || unassigned) && s !== llm), ...observed];
 }

@@ -141,14 +141,17 @@ export class NativeUsageIndex {
     }
   }
 
-  responses(session: string, calls: Set<string>) {
+  responses(session: string, calls: Set<string>, hubTurn?: { trace: string; reply: string }) {
     if (!calls.size) return;
-    const matches = [...this.streams.values()].flatMap(s => [...s.receipts.values()])
-      .filter(r => r.session === session && [...calls].some(id => r.calls.has(id)));
-    if (matches.length !== 1 || !matches[0].done || !matches[0].history.size) return;
-    const receipt = matches[0];
+    const matches = [...this.streams.values()].flatMap(s => [...s.receipts])
+      .filter(([, receipt]) => receipt.session === session && [...calls].some(id => receipt.calls.has(id)));
+    if (matches.length !== 1) return;
+    const [trace, receipt] = matches[0];
+    if (!receipt.done || !receipt.history.size) return;
     const exactTurn = [...calls].every(call => receipt.calls.has(call)) && receipt.expected.size <= 1;
-    return [...receipt.history].map(([id, at]) => {
+    const matchesHubOwner = hubTurn?.trace === trace &&
+      (receipt.expected.size === 0 || receipt.expected.has(hubTurn.reply));
+    const rounds = [...receipt.history].map(([id, at]) => {
       const owners = receipt.streams.filter(s => s.histories.has(id));
       const s = owners[0];
       if (receipt.ambiguousStreams || owners.length !== 1 || !s.closed ||
@@ -169,6 +172,7 @@ export class NativeUsageIndex {
         ...(s.terminal && s === receipt.streams.at(-1) ? { terminal: true } : {}),
         ...(s.continuation ? { continuation: s.continuation } : {}), ...(usage ? { reply: usage.reply, seq: usage.seq } : {}) };
     });
+    return { rounds, matchesHubOwner };
   }
 
   ownsTool(trace: string, session: string, reply: string, calls: Set<string>): boolean {

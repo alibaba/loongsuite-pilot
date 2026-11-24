@@ -52,11 +52,15 @@ it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two rep
     if (mode === 'rotated') await writeFile(join(dir, 'ai_agent-1-2026-11-20.alaudalog'),
       Buffer.concat([header, deflateRawSync(Buffer.concat(chunks.slice(-3)))]));
     await index.refresh();
-    const rounds = index.responses(session, new Set(['one']));
+    const calls = new Set(['one']);
+    const trace = 'a'.repeat(32);
+    const evidence = index.responses(session, calls, { trace, reply });
+    const rounds = evidence?.rounds;
     expect(rounds?.[0].id).toBe(history);
+    expect(evidence?.matchesHubOwner).toBe(true);
+    expect(index.responses(session, calls, { trace: 'f'.repeat(32), reply })?.matchesHubOwner).toBe(false);
+    expect(index.responses(session, calls, { trace, reply: '9'.repeat(24) })?.matchesHubOwner).toBe(false);
     if (mode === 'two replies') {
-      const trace = 'a'.repeat(32);
-      const calls = new Set(['one']);
       expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
       expect(index.ownsTool(trace, session, unrelatedReply, calls)).toBe(false);
     }

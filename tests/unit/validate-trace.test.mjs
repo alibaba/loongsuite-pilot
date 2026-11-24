@@ -204,6 +204,30 @@ describe('TRAE CN native response observations', () => {
     expect(errors(trace().spans).filter(rule => checkedRules.includes(rule))).toEqual([]);
   });
 
+  test('validates the real terminal answer at agent scope for a shared TRAE stream', () => {
+    const { spans, agent, summary, answer } = trace();
+    const nativeSpans = spans.filter(span => span !== summary && span !== answer);
+    agent.attributes[observation] = 'turn_summary';
+    agent.attributes['gen_ai.output.messages'] = answer.attributes['gen_ai.output.messages'];
+    expect(errors(nativeSpans)).not.toContain('semantic.last_step_no_tool_call');
+    agent.attributes['gen_ai.output.messages'] = [{ role: 'assistant', parts: [toolCall] }];
+    expect(errors(nativeSpans)).toContain('semantic.last_step_no_tool_call');
+  });
+
+  test('permits an acknowledged native tool to have an unobserved body and an instantaneous timestamp', () => {
+    const { spans, tool } = trace();
+    tool.attributes[observation] = 'native_tool_acknowledged';
+    tool.startTimeUnixNano = tool.endTimeUnixNano = '24';
+    delete tool.attributes['gen_ai.tool.call.arguments'];
+    for (const rule of ['time.non_zero_duration', 'structure.llm_before_tools', 'semantic.tool_has_arguments']) {
+      expect(errors(spans)).not.toContain(rule);
+    }
+    delete tool.attributes[observation];
+    expect(errors(spans)).toEqual(expect.arrayContaining([
+      'time.non_zero_duration', 'structure.llm_before_tools', 'semantic.tool_has_arguments',
+    ]));
+  });
+
   test.each([
     ['time.non_zero_duration', ({ response }) => { response.endTimeUnixNano = '24'; }],
     ['time.non_zero_duration', ({ response }) => { delete response.attributes['gen_ai.response.id']; }],
