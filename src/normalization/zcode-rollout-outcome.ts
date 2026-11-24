@@ -1,5 +1,6 @@
 export const ZCODE_MODEL_CANCELLED = 'zcode.model_cancelled';
 export const ZCODE_MODEL_ERROR = 'zcode.model_error';
+export const ZCODE_NATIVE_OUTPUT_UNAVAILABLE = 'agent.zcode.rollout.output_unavailable';
 
 type ZCodeRolloutFailure =
   | { finishReason: 'cancelled'; errorType: typeof ZCODE_MODEL_CANCELLED }

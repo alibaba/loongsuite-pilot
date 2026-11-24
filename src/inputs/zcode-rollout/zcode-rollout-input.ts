@@ -3,7 +3,8 @@ import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
-import { classifyZCodeRolloutFailure } from '../../normalization/zcode-rollout-outcome.js';
+import { classifyZCodeRolloutFailure, ZCODE_NATIVE_OUTPUT_UNAVAILABLE } from '../../normalization/zcode-rollout-outcome.js';
+import { readZCodeMessageWindow, ZCODE_MESSAGE_WINDOW } from '../../normalization/zcode-message-window.js';
 import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
@@ -218,6 +219,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     // (来自 request.body.system + request.messages 中 role=system 的消息 +
     //  user 消息里嵌入的 <system-reminder> 段),其余角色进 gen_ai.input.messages。
     const inputMessages = toGenAiInputMessages(request.messages);
+    const messageWindow = readZCodeMessageWindow(request);
     const systemInstructions = mergeSystemInstructions(
       toGenAiSystemInstructions(requestBody.system),
       extractSystemFromMessages(request.messages),
@@ -278,11 +280,12 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.agent.name': 'ZCode',
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
-      ...(inputMessages ? { 'gen_ai.input.messages': inputMessages } : {}),
+      ...(inputMessages || (messageWindow?.kind === 'delta' && messageWindow.length === 0)
+        ? { 'gen_ai.input.messages': inputMessages ?? [] } : {}),
       ...(systemInstructions ? { 'gen_ai.system_instructions': systemInstructions } : {}),
       ...(toolDefinitions ? { 'gen_ai.tool.definitions': toolDefinitions } : {}),
       ...(maxTokens !== undefined ? { 'gen_ai.request.max_tokens': maxTokens } : {}),
-      attributes: baseAttrs,
+      attributes: messageWindow ? { ...baseAttrs, [ZCODE_MESSAGE_WINDOW]: messageWindow } : baseAttrs,
     });
 
     const responseEntry = buildAgentActivityEntry({
@@ -308,7 +311,11 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.usage.cache_creation.input_tokens': effectiveCacheWrite,
       'gen_ai.usage.total_tokens': effectiveTotalTokens,
       ...(effectiveOutputMessages ? { 'gen_ai.output.messages': effectiveOutputMessages } : {}),
-      attributes: toolCallIds.length > 0 ? { ...baseAttrs, 'agent.zcode.rollout.tool_call_ids': toolCallIds } : baseAttrs,
+      attributes: {
+        ...baseAttrs,
+        ...(toolCallIds.length > 0 ? { 'agent.zcode.rollout.tool_call_ids': toolCallIds } : {}),
+        ...(failure && !outputMessages ? { [ZCODE_NATIVE_OUTPUT_UNAVAILABLE]: true } : {}),
+      },
     });
 
     const out: AgentActivityEntry[] = [];

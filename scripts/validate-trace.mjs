@@ -965,7 +965,15 @@ export function validateSemantic(trace, rules) {
     let allOk = true;
     for (const s of spans.filter(s => s._kind === 'LLM')) {
       const hasInput = s.attributes?.['gen_ai.input.messages'] !== undefined;
-      const hasOutput = s.attributes?.['gen_ai.output.messages'] !== undefined;
+      const attrs = s.attributes;
+      const finishReasons = attrs?.['gen_ai.response.finish_reasons'];
+      const errorType = attrs?.['error.type'];
+      const nativeOutputUnavailable = String(attrs?.['gen_ai.agent.name'] ?? '').toLowerCase() === 'zcode' &&
+        attrs?.['agent.zcode.rollout.output_unavailable'] === true &&
+        Array.isArray(finishReasons) &&
+        ((errorType === 'zcode.model_cancelled' && finishReasons.includes('cancelled')) ||
+         (errorType === 'zcode.model_error' && finishReasons.includes('error')));
+      const hasOutput = attrs?.['gen_ai.output.messages'] !== undefined || nativeOutputUnavailable;
       if (!hasInput || !hasOutput) {
         checks.push(error('semantic.llm_has_input_output',
           `LLM missing ${!hasInput ? 'input' : ''}${!hasInput && !hasOutput ? ' and ' : ''}${!hasOutput ? 'output' : ''}.messages`,

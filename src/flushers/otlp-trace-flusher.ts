@@ -19,6 +19,7 @@ import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
 import { enrichZCodeModelOutcomes } from './zcode-model-outcomes.js';
+import { prepareZCodeRequestContext } from './zcode-request-context.js';
 import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
@@ -2128,7 +2129,9 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // Keep it in the normal OTLP flusher path, but exclude it at the
         // EventLog-to-Trace boundary so the converter does not emit an extra
         // empty STEP for the duplicate input boundary.
-        const traceConversionRecords = prepareTraceEvents(recordsForConversion);
+        const traceConversionRecords = prepareTraceEvents(agentType === ZCODE_AGENT_TYPE && this.cfg.captureMessageContent !== false
+          ? prepareZCodeRequestContext(recordsForConversion)
+          : recordsForConversion);
 
         // Drop orphan llm.request / tool.call events before conversion so the
         // converter doesn't emit empty LLM/TOOL spans with duration=0 and
