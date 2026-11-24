@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { classifyZCodeRolloutFailure } from '../../normalization/zcode-rollout-outcome.js';
 import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import { directoryExists, resolveHome } from '../../utils/fs-utils.js';
 import {
@@ -229,21 +230,13 @@ export class ZcodeRolloutInput extends BaseSessionInput {
     // and getToolDefinitionsForSpan emits gen_ai.tool.definitions on LLM spans.
     const toolDefinitions = extractToolDefinitions(record);
     const maxTokens = finiteNumber(requestBody.max_tokens);
-    const rawFinishReason = stringValue(response.finishReason);
-
-    // Interrupted-path detection: rollout record was finalized (completedAt
-    // present) but the model never returned a finishReason — typically SIGTERM
-    // / timeout mid-stream. Without intervention the synthesized LLM span
-    // would lack gen_ai.response.finish_reasons, gen_ai.output.messages, and
-    // gen_ai.usage.* (all gated on the response fields being present), failing
-    // validate-trace MUST rules and the CLAUDE.md input/output.messages
-    // non-empty high-priority invariant. Inject `cancelled` + placeholder
-    // output + zero usage so the span satisfies the schema.
-    const isInterrupted = !!completedAt && !rawFinishReason;
+    const rawFinishReason = stringValue(response.finishReason) ?? stringValue(response.finish_reason);
+    const failure = classifyZCodeRolloutFailure(rawFinishReason, record.error ?? response.error);
+    // Older clients could finalize an interrupted record without a reason or error.
+    // Keep their compatibility fields without inventing usage for an observed failure.
+    const isInterrupted = !failure && !!completedAt && !rawFinishReason;
     const nativeFinishReason = rawFinishReason?.replace(/-/g, '_') ?? '';
-    const finishReason = isInterrupted || ['interrupted', 'canceled'].includes(nativeFinishReason)
-      ? 'cancelled'
-      : normalizeFinishReason(nativeFinishReason);
+    const finishReason = failure?.finishReason ?? (isInterrupted ? 'cancelled' : normalizeFinishReason(nativeFinishReason));
     const outputMessages = toGenAiOutputMessages(response, finishReason);
     // Call IDs carry the rollout-to-hook association even when messages are suppressed.
     const toolCallIds = Array.isArray(response.toolCalls) ? response.toolCalls.flatMap(call => {
@@ -308,6 +301,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': stringValue(response.modelId) ?? modelId,
       ...(finishReason ? { 'response.finish_reasons': [finishReason] } : {}),
+      ...(failure ? { 'error.type': failure.errorType } : {}),
       'gen_ai.usage.input_tokens': effectiveInputTokens,
       'gen_ai.usage.output_tokens': effectiveOutputTokens,
       'gen_ai.usage.cache_read.input_tokens': effectiveCacheRead,

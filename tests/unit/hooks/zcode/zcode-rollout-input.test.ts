@@ -450,6 +450,21 @@ describe('ZcodeRolloutInput', () => {
   // 占位字段满足 MUST 规则。
   // fixture 来源: 基于 ROLLOUT_FIXTURE 改造,模拟 SIGTERM 中断 (response
   // 字段清空,保留 completedAt)。
+  test.each([
+    [{ name: 'Error', message: 'CLI received SIGINT' }, 'cancelled', 'zcode.model_cancelled'],
+    [{ name: 'TypeError', message: 'terminated' }, 'error', 'zcode.model_error'],
+  ])('retains the observed model failure %j', async (error, finish, errorType) => {
+    const base = JSON.parse(fs.readFileSync(ROLLOUT_FIXTURE, 'utf8').split('\n')[0]);
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
+    const entries = await (input as any).processSessionLine({ ...base, response: { toolCalls: [] }, error },
+      path.join(TMPDIR, 'rollout', 'model-io-test.jsonl'));
+    const response = entries.find(entry => entry['event.name'] === 'llm.response');
+    expect(response?.['gen_ai.response.finish_reasons']).toEqual([finish]);
+    expect(response?.['error.type']).toBe(errorType);
+    expect(response?.['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(response?.['error.message']).toBeUndefined();
+  });
+
   test('an interrupted rollout exports a cancelled reason, placeholder output and zero usage', async () => {
     const lines = fs.readFileSync(ROLLOUT_FIXTURE, 'utf-8').split('\n').filter((l) => l.trim());
     const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.join(TMPDIR, 'rollout') });
