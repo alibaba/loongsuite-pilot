@@ -685,9 +685,10 @@ describe('OtlpTraceFlusher - conversion', () => {
       status: { code: 0 },
     };
 
-    (flusher as any).enrichOpenClawToolAttributes(
+    (flusher as any).enrichToolResultAttributes(
       records,
       [failedTool, successfulTool],
+      'OpenClaw',
     );
 
     expect(failedTool.attributes).toMatchObject({
@@ -703,6 +704,16 @@ describe('OtlpTraceFlusher - conversion', () => {
       'tool.result.status': 'success',
     });
     expect(successfulTool.status.code).toBe(0);
+
+    const traeSpan = {
+      attributes: { 'gen_ai.span.kind': 'TOOL', 'gen_ai.tool.call.id': 'failed-tool-1' },
+      status: { code: 0 },
+    };
+    (flusher as any).enrichToolResultAttributes(records, [traeSpan], 'TRAE-CN');
+    expect(traeSpan.status.code).toBe(2);
+    expect(traeSpan.attributes).toMatchObject({ 'tool.result.status': 'failure', 'error.type': 'tool_use_failure' });
+    expect(traeSpan.attributes).not.toHaveProperty('error.message');
+
   });
 
   describe('with GlobalAttributesProvider', () => {

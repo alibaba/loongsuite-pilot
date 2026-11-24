@@ -375,17 +375,18 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'openclaw': 'openclaw',
 };
 
-export function hookCapturesContent(agentType, runtimeConfig = {}) {
+export function shouldCaptureHookMessageContent(agentType, runtimeConfig = {}) {
   const agents = runtimeConfig.agents;
   const policy = agentType && agents
     ? (agents[agentType] || agents[AGENT_TYPE_TO_CONFIG_KEY[agentType] || ''])
     : undefined;
-  return parseCaptureMessageContent(policy?.captureMessageContent);
+  return parseCaptureMessageContent(policy?.captureMessageContent) !== false;
 }
 
 export function applyHookContentPolicy(record, runtimeConfig = {}) {
   const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
-  if (hookCapturesContent(agentType, runtimeConfig)) return record;
+  if (shouldCaptureHookMessageContent(agentType, runtimeConfig)) return record;
+
   return removeContentFields(record);
 }
 

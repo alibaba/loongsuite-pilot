@@ -38,6 +38,7 @@ const defaultConfig: HookWatchdogConfig = {
   enabled: true,
   intervalMs: 300_000,
   repairCooldownMs: 600_000,
+  tamperProtection: false,
 };
 
 function makeTarget(overrides: Partial<InterceptCheckTarget> = {}): InterceptCheckTarget {

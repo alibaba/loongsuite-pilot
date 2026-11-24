@@ -19,6 +19,7 @@ import {
 } from '../utils/fs-utils.js';
 import { configJsonPath } from '../utils/data-dir.js';
 import { detectAgent } from './detect-utils.js';
+import { reconcileQoderTokenUsageDefaults } from './qoder-token-usage.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
@@ -58,7 +59,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -94,7 +95,7 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
@@ -106,10 +107,10 @@ function legacyHookCommands(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -195,7 +196,7 @@ export class HookStrategy implements DeployStrategy {
     if (await this.needsTrustRepairForCodex(def)) {
       return true;
     }
-    return false;
+    return reconcileQoderTokenUsageDefaults(def, false);
   }
 
   private async needsSettingsRepairForCodex(def: AgentDefinition): Promise<boolean> {
@@ -362,6 +363,8 @@ export class HookStrategy implements DeployStrategy {
           }
         }
       }
+
+      await reconcileQoderTokenUsageDefaults(def, true);
 
       logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
 

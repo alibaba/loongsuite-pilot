@@ -41,6 +41,7 @@ const watchdogConfig: HookWatchdogConfig = {
   enabled: true,
   intervalMs: 1_000_000, // we drive runCheck() manually
   repairCooldownMs: 0,   // no cooldown so the test can repair immediately
+  tamperProtection: false,
 };
 
 describe('E2E: opencode plugin-inject watchdog self-heal', () => {

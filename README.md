@@ -77,10 +77,11 @@ Pilot is designed to answer practical questions:
 | Qoder Work CN | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       | No         |
 | Qwen Code CLI | Hook                      | Yes          | Yes        | Yes         | Yes                       | No         |
 | Qwen Work CN  | Hook / local data polling | Yes          | Yes        | Yes         | Yes                       | Yes (Opt-in) |
+| TRAE CN       | Hook + local session data | Yes          | Yes        | Yes         | Yes                       | No |
 | Wukong        | CLI API polling           | Yes          | Yes        | Yes         | Yes                       | No         |
 | WorkBuddy     | Hook wakeup + local transcript watch/poll fallback | Yes          | Yes        | Yes         | Yes                       | No         |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | Client turns, local tools + native sandbox executions | Metadata only | No | No | No |
-| [Doubao App work mode (macOS/Windows, experimental)](docs/doubao-work.md) | Same parser, independent discovery and state | Client turns, local tools + native sandbox executions | Metadata only | No | No | No |
+| [Doubao App (experimental)](docs/doubao-work.md) | Read-only logs, work trajectories and chat task store | Client turns, text chat + work-mode local tools/executions | Client events and available I/O | No | Text chat and work-mode content | No |
 
 GitHub Copilot CLI automatic deployment supports Unix shells. Exact per-call token usage requires native OTel; transcript-only collection omits unavailable usage. Windows and subagents are not supported. See [telemetry details](docs/zh-CN/copilot-native-telemetry.md).
 

@@ -20,7 +20,7 @@ import { decodePayload } from './shared/decode-payload.mjs';
 import { appendRawJsonl } from './shared/raw-jsonl-writer.mjs';
 import {
   applyHookContentPolicy,
-  hookCapturesContent,
+  shouldCaptureHookMessageContent,
   hashJson,
   loadHookRuntimeConfig,
   sanitizeObject,
@@ -94,8 +94,8 @@ function writeEmptyResponse() {
 
 function captureForVariant(variant, runtimeConfig) {
   if (!runtimeConfig.policyAvailable) return false;
-  if (variant) return hookCapturesContent(variant, runtimeConfig);
-  return hookCapturesContent('cursor', runtimeConfig) && hookCapturesContent('cursor-cli', runtimeConfig);
+  if (variant) return shouldCaptureHookMessageContent(variant, runtimeConfig);
+  return shouldCaptureHookMessageContent('cursor', runtimeConfig) && shouldCaptureHookMessageContent('cursor-cli', runtimeConfig);
 }
 
 function prepareHistory(events, conversationId, runtimeConfig) {

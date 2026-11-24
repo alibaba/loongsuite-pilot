@@ -85,6 +85,8 @@ MASK_MODE=""
 MASK_TYPES=""
 MASK_REPLACEMENT_MODE=""
 INTERCEPTOR_MODE=""
+HOOK_TAMPER_PROTECTION=""
+HOOK_TAMPER_PROTECTION_SET=0
 HAS_SUDO=0
 PURGE=0
 PREFER_SYSTEM_NODE=0
@@ -200,6 +202,8 @@ while [[ $# -gt 0 ]]; do
         --mask-replacement-mode=*) MASK_REPLACEMENT_MODE="${1#*=}"; shift ;;
         --interceptor-mode)   INTERCEPTOR_MODE="$2"; shift 2 ;;
         --interceptor-mode=*) INTERCEPTOR_MODE="${1#*=}"; shift ;;
+        --hook-tamper-protection) HOOK_TAMPER_PROTECTION="${2-}"; HOOK_TAMPER_PROTECTION_SET=1; shift 2 || shift ;;
+        --hook-tamper-protection=*) HOOK_TAMPER_PROTECTION="${1#*=}"; HOOK_TAMPER_PROTECTION_SET=1; shift ;;
         --purge)              PURGE=1; shift ;;
         --prefer-system-node) PREFER_SYSTEM_NODE=1; shift ;;
         --prefer-system-node=*) PREFER_SYSTEM_NODE=1; shift ;;
@@ -226,6 +230,17 @@ fi
 if [ -n "$ENABLE_STATUS_BAR_APP" ] && [ "$COMMAND" != "install" ]; then
     echo "--enable-status-bar-app is only supported with install" >&2
     exit 1
+fi
+
+if [ "$HOOK_TAMPER_PROTECTION_SET" -eq 1 ]; then
+    case "$HOOK_TAMPER_PROTECTION" in
+        true|false) ;;
+        *) echo "--hook-tamper-protection requires true or false" >&2; exit 1 ;;
+    esac
+    if [ "$COMMAND" != "install" ]; then
+        echo "--hook-tamper-protection is only supported with install" >&2
+        exit 1
+    fi
 fi
 
 if [ "$DASHBOARD_PORT_SET" -eq 1 ]; then
@@ -1250,6 +1265,7 @@ write_config() {
         LP_MULTIMODAL_SUPPORTED_AGENTS="$MULTIMODAL_SUPPORTED_AGENTS" \
         LP_DASHBOARD_PORT="$DASHBOARD_PORT" \
         LP_ENABLE_STATUS_BAR_APP="$ENABLE_STATUS_BAR_APP" \
+        LP_HOOK_TAMPER_PROTECTION="$HOOK_TAMPER_PROTECTION" \
         "$NODE_BIN" -e "
 const fs = require('fs');
 const path = '$config_file';
@@ -1383,6 +1399,17 @@ if (interceptorMode) {
   config.interceptor = config.interceptor || {};
   config.interceptor.mode = interceptorMode;
   delete config.interceptor.types;
+}
+
+const hookTamperProtection = process.env.LP_HOOK_TAMPER_PROTECTION || '';
+if (hookTamperProtection) {
+  if (!config.hookWatchdog || typeof config.hookWatchdog !== 'object' || Array.isArray(config.hookWatchdog)) {
+    config.hookWatchdog = {};
+  }
+  if (!config.hookWatchdog.tamperProtection || typeof config.hookWatchdog.tamperProtection !== 'object' || Array.isArray(config.hookWatchdog.tamperProtection)) {
+    config.hookWatchdog.tamperProtection = {};
+  }
+  config.hookWatchdog.tamperProtection.enabled = hookTamperProtection === 'true';
 }
 
 const INTERCEPTOR_MASK_TYPES = ['cloudAccessKey', 'apiKey', 'privateKey', 'databaseUrl'];
@@ -2435,6 +2462,7 @@ remove_hook_configs() {
         "$HOME/.codex/hooks.json"
         "$HOME/.kiro/agents/pilot-kiro.json"
         "$HOME/.qwen/settings.json"
+        "$HOME/.trae-cn/hooks.json"
         "$HOME/.workbuddy/settings.json"
     )
 
