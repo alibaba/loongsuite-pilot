@@ -146,6 +146,9 @@ export interface ConfigFile {
     enabled?: boolean;
     intervalMs?: number;
     repairCooldownMs?: number;
+    tamperProtection?: {
+      enabled?: boolean;
+    };
   };
   selfCheck?: Partial<SelfCheckConfig>;
 
@@ -944,8 +947,11 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
 }
 
 function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
+  const enabled = envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true);
+  const requested = envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false);
   return {
-    enabled: envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true),
+    enabled,
+    tamperProtection: enabled && requested,
     intervalMs: envInt(
       'LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS',
       file?.hookWatchdog?.intervalMs ?? 5 * 60_000, // 5 minutes
@@ -1519,9 +1525,12 @@ export function buildAutoUpdateConfig(
   }
 
   const hasPackageConfig = !!packageUrl;
+  const enabled = envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true);
+  const requested = envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false);
 
   return {
     enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    tamperProtection: enabled && requested,
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,

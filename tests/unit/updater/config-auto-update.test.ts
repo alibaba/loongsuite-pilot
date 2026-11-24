@@ -89,6 +89,23 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.checkIntervalMs).toBe(999);
   });
 
+  it('leaves hook tamper repair off unless the watchdog parent and child are both on', () => {
+    expect(buildAutoUpdateConfig(null).tamperProtection).toBe(false);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: true, tamperProtection: { enabled: true } } }).tamperProtection).toBe(true);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: true, tamperProtection: { enabled: false } } }).tamperProtection).toBe(false);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: false, tamperProtection: { enabled: true } } }).tamperProtection).toBe(false);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: false, tamperProtection: { enabled: false } } }).tamperProtection).toBe(false);
+  });
+
+  it('env LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED overrides the child and still requires the watchdog', () => {
+    vi.stubEnv('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', 'true');
+    vi.stubEnv('LOONGSUITE_PILOT_PACKAGE_URL', 'https://example.com/pkg.tar.gz');
+    expect(buildAutoUpdateConfig(null).tamperProtection).toBe(true);
+
+    vi.stubEnv('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', 'false');
+    expect(buildAutoUpdateConfig({ hookWatchdog: { tamperProtection: { enabled: true } } }).tamperProtection).toBe(false);
+  });
+
   it('reads installId and canary fields from config', () => {
     const config = buildAutoUpdateConfig({
       installId: 'test-install-id',

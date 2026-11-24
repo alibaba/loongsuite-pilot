@@ -27,6 +27,7 @@ export interface AutoUpdateConfig {
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
+  tamperProtection?: boolean;
 }
 
 export interface CmsConfig {
@@ -413,6 +414,7 @@ export interface HookWatchdogConfig {
   enabled: boolean;
   intervalMs: number;
   repairCooldownMs: number;
+  tamperProtection: boolean;
 }
 
 export interface SelfCheckConfig {
