@@ -98,6 +98,9 @@ Codex 开发验证使用 `codex_rollout_v1` 采集一个授权的 `transcript` �
 
 如需管理 Codex Hook，在 SDK 启动参数中传入绝对 `codex_home`，并在 `hcd.agent_configs.codex` 下配置 `"hook_deployment": {"settings_path": "/absolute/codex/hooks.json", "channel": "cloud"}`。路径必须对应 `codex_home/hooks.json`，主源必须是该目录下的 `sessions`。二进制从 `resource_dir/bin` 加载。SDK 注册观察点和三个原生裁决点，并更新同一目录的 `config.toml` 信任记录。`channel` 默认走宿主回调，也可设为 `local`。查询状态使用 `snapshot` 的 `codex_hook_deployment`。应用移除 Codex 的策略撤回本实例注册，保留其他 Hook。普通的停止和重启保留配置。
 
+SDK 公告 `PILOT_CAP_CODEX_HOOK_CONTROL` 时，宿主可以向 `apply_policy` 单独传入 `{"hook_management":{"agent":"codex","operation":"list"}}`，在运行中或收到 `on_stop` 后读取本实例实际注册的 Hook 及其信任记录。用 `hooks[].trust_key` 对照 `trust_records[].key`。手动调整 Hook 顺序后，如果当前位置的信任无法与本实例的命令哈希匹配，`trust_key` 为 `null`。仍可确认归属的旧记录列在 `trust_records` 中。将操作改为 `clear` 可在收到 `on_stop` 后、销毁句柄前清理。其他采集器已经接管同一数据目录时返回 `PILOT_BUSY`。清理支持独立 TOML 信任段和 `[hooks.state]` 下的内联记录。遇到无法安全改写的目标记录时返回失败，并保留原配置。
+
+
 共享原生 Hook 对 Codex 支持 `UserPromptSubmit`、`PreToolUse` 和 `PostToolUse`。提示提交可拒绝发送，工具调用前可拒绝支持 Hook 的工具，调用完成后可将原始结果替换为裁决反馈。已产生的文件等副作用会保留。嵌入调试可用 `loongsuite-pilot-sdk-hook sdk-hook --agent codex --event <event> --channel <observe|local> --data-dir <sdk-data>`。宿主安装这些调试命令并处理 Codex 信任。
 
 启动普通版 Qoder CLI 时在进程环境中设置 `QODER_EXPOSE_TOKEN_USAGE=true`，SDK 直接从授权 transcript 的逐响应 `message.usage` 读取真实用量。Qoder CLI 1.1.76 已验证。完整 Pilot 的既有 Unix 启动入口会设置该变量，云壳管理 Qoder 进程时应在启动时传入。Qoder 设置文件里的 `env` 对该开关无效。没有正数用量的原生占位记录不作为计量来源。现有诊断 segments 和历史 sidecar 仍可用于兼容读取，Qoder IDE 沿用 SQLite。
@@ -138,6 +141,8 @@ SDK 的自监控包括以下字段与口径：
 活动在首次持久交付前补充 SDK `version`；与完整模式的 SLS 出口一致，该已知元数据使用 SDK 版本覆盖同名来值，其余未知字段保留。裁决审计事件也带 `version` 和 `user.id`。因此版本筛选和旧告警字段不需要云壳另补 SDK 本身已知的信息；宿主仍负责其安全上下文和接收端存储。
 
 ## 两条 Hook 与截止
+
+默认情况下 SDK 无法连接时，原生 Hook 快速放行。SDK 公告 `PILOT_CAP_OFFLINE_DENY` 后，需要按 Agent 和事件离线拒绝时，在完整策略加 `"sdk_options": {"hooks": {"offline_deny": {"qoder": ["PreToolUse"], "codex": ["UserPromptSubmit"]}}}`。支持已启用 Agent 的 cloud 通道，事件限 `PreToolUse` 和 `UserPromptSubmit`。正常停机仍执行最后一次成功应用的离线策略。通过下一份完整策略移除对应项即可撤回。SDK 将策略保存在实例私有目录，Hook 在连接不可用时读取。文件缺失、无效或有未恢复事务时采用默认放行。
 
 SDK 分别发布 `sdk-hooks-cloud.json`、`sdk-hooks-local.json` 和 `sdk-hooks-observe.json`，包含进程号、实际 loopback UDP 端口、实例标识和随机 token。两个裁决入口各自最多同时运行 8 个裁决工作。观察入口只唤醒采集，有独立并发额度。
 

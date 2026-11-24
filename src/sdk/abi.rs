@@ -11,6 +11,8 @@ pub const RETRY: i32 = 1;
 pub const CAP_ACTIVITY_V2: u64 = 1;
 pub const CAP_HOOK_UDP: u64 = 2;
 pub const CAP_MONITORING: u64 = 4;
+pub const CAP_CODEX_HOOK_CONTROL: u64 = 32;
+pub const CAP_OFFLINE_DENY: u64 = 64;
 
 #[repr(C)]
 pub struct PilotHandle {

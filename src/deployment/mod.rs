@@ -105,8 +105,10 @@ pub use hook_install_service::{
     HookInstallRunOptions, HookInstallRunResult, HOOK_INSTALL_REASONS, HOOK_INSTALL_RESULT_FILE,
     HOOK_INSTALL_SIGNAL_FILE,
 };
+#[cfg(test)]
 pub(crate) use hook_strategy::reconcile_embedded_codex_hooks;
 pub use hook_strategy::HookStrategy;
+pub(crate) use hook_strategy::{inspect_embedded_codex_hooks, prepare_embedded_codex_hooks};
 pub use inject_command::{inject_claude_directory, merge_claude_hooks, parse_inject_command_args};
 pub use openclaw_compat::{open_claw_capabilities, OpenClawCapabilities, MIN_OPENCLAW_VERSION};
 pub use openclaw_version_resolver::{

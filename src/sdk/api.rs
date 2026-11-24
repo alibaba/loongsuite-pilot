@@ -1,3 +1,7 @@
+use super::hook_protocol::{
+    read_offline_deny, OfflineDeny, OfflineDenyRules, OFFLINE_DENY_FILE, OFFLINE_POLICY_LOCK,
+    POLICY_FILES_DIR,
+};
 use super::hooks::Hooks;
 use super::{
     abi::*,
@@ -7,7 +11,7 @@ use super::{
 };
 use fs2::FileExt;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use std::fs::{File, OpenOptions};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -64,6 +68,7 @@ struct Instance {
     key: usize,
     init: Init,
     status: Mutex<Status>,
+    hook_files: Mutex<()>,
     callbacks: Callbacks,
     stop_requested: Arc<AtomicBool>,
     dispatching: AtomicBool,
@@ -203,6 +208,7 @@ unsafe extern "C" fn start(
             let instance = Arc::new(Instance {
                 key,
                 init,
+                hook_files: Mutex::new(()),
                 status: Mutex::new(Status {
                     phase: Phase::Starting,
                     version: policy.version.clone(),
@@ -269,6 +275,69 @@ unsafe extern "C" fn snapshot(
         }
     })
 }
+fn open_state_lease(init: &Init) -> anyhow::Result<File> {
+    let path = init.data_dir.join("collector.lock");
+    crate::utils::source_access::private_path(&path)?;
+    Ok(OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?)
+}
+
+fn manage_codex(instance: &Instance, request: &Value) -> Result<Value, (i32, String)> {
+    let control = &request["hook_management"];
+    let operation = control["operation"].as_str();
+    if request.as_object().map(|o| o.len()) != Some(1)
+        || control.as_object().map(|o| o.len()) != Some(2)
+        || control["agent"] != "codex"
+        || !matches!(operation, Some("list" | "clear"))
+    {
+        return Err((
+            BAD_ARGUMENT,
+            "expected a Codex Hook list or clear request".into(),
+        ));
+    }
+    let _guard = instance.hook_files.lock().unwrap();
+    let phase = instance.status.lock().unwrap().phase;
+    let stopped = phase == Phase::Stopped && instance.stop_notified.load(Ordering::SeqCst);
+    let init = &instance.init;
+    let failure = |err: anyhow::Error| (FAILURE, format!("{err:#}"));
+    if operation == Some("list") && (phase == Phase::Running || stopped) {
+        return crate::deployment::inspect_embedded_codex_hooks(
+            init.codex_home.as_deref(),
+            &init.data_dir,
+            &init.resource_dir,
+        )
+        .map_err(failure);
+    }
+    if operation != Some("clear") || !stopped {
+        return Err((
+            BUSY,
+            "list requires a running or stopped SDK; clear requires on_stop".into(),
+        ));
+    }
+    if let Some(home) = &init.codex_home {
+        crate::utils::source_access::private_path(&init.data_dir)
+            .map_err(|err| failure(err.into()))?;
+        std::fs::create_dir_all(&init.data_dir).map_err(|err| failure(err.into()))?;
+        let lease = open_state_lease(init).map_err(failure)?;
+        lease
+            .try_lock_exclusive()
+            .map_err(|_| (BUSY, "SDK state is owned by another collector".into()))?;
+        {
+            let _lock = hook_policy_lock(init).map_err(failure)?;
+            recover_hook_policy_files(init).map_err(failure)?;
+        }
+        let mut offline = read_offline_deny(&init.data_dir).unwrap_or_default();
+        offline.remove("codex");
+        configure_hook_files(init, Some(home), None, &offline).map_err(failure)?;
+    }
+    instance.status.lock().unwrap().codex_hook_deployment = json!({"state":"disabled"});
+    Ok(json!({"agent":"codex","state":"disabled"}))
+}
+
 unsafe extern "C" fn apply(
     handle: *mut PilotHandle,
     policy: PilotJsonView,
@@ -287,10 +356,24 @@ unsafe extern "C" fn apply(
             Ok(i) => i,
             Err(c) => return c,
         };
+        let raw = unsafe { json_input(policy) };
+        if let Ok(request) = &raw {
+            if request.get("hook_management").is_some() {
+                return match manage_codex(&instance, request) {
+                    Ok(report) => {
+                        unsafe { output(&report, out, len) }.map_or_else(|code| code, |_| OK)
+                    }
+                    Err((code, reason)) => {
+                        let _ = unsafe { output(&json!({"ok":false,"reason":reason}), out, len) };
+                        code
+                    }
+                };
+            }
+        }
         if instance.status.lock().unwrap().phase != Phase::Running {
             return BUSY;
         }
-        let policy = match unsafe { json_input(policy) }
+        let policy = match raw
             .map_err(|code| (code, "invalid policy JSON".to_owned()))
             .and_then(|raw| {
                 Policy::parse(raw, &instance.init)
@@ -471,13 +554,7 @@ impl Session {
             instance.init.resource_dir.is_dir(),
             "resource_dir is not a directory"
         );
-        crate::utils::source_access::private_path(&instance.init.data_dir.join("collector.lock"))?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(instance.init.data_dir.join("collector.lock"))?;
+        let lock = open_state_lease(&instance.init)?;
         lock.try_lock_exclusive().map_err(|_| {
             anyhow::anyhow!("SDK state directory is already owned by another collector")
         })?;
@@ -570,8 +647,9 @@ impl Session {
             instance.stop_requested.clone(),
             instance.activated.clone(),
         )?);
-        session.collector.apply(policy)?;
-        update_codex_deployment(instance, policy)?;
+        session
+            .collector
+            .apply(policy, || update_codex_deployment(instance, policy))?;
         Ok(session)
     }
     fn shutdown(&mut self) {
@@ -604,15 +682,104 @@ impl Drop for Session {
     }
 }
 
+const OFFLINE_TARGET: &str = "offline-deny";
+
+fn hook_policy_lock(init: &Init) -> anyhow::Result<File> {
+    let path = init.data_dir.join(OFFLINE_POLICY_LOCK);
+    crate::utils::source_access::private_path(&path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+fn recover_hook_policy_files(init: &Init) -> anyhow::Result<()> {
+    let base = BTreeMap::from([(OFFLINE_TARGET.into(), init.data_dir.join(OFFLINE_DENY_FILE))]);
+    let mut registered = BTreeMap::new();
+    if let Some(home) = &init.codex_home {
+        registered.insert("config".into(), home.join("hooks.json"));
+        registered.insert("trust".into(), home.join("config.toml"));
+        registered.insert(
+            "backup".into(),
+            home.join("hooks.json.loongsuite-pilot.bak"),
+        );
+    }
+    let journal = init.data_dir.join(POLICY_FILES_DIR);
+    crate::utils::source_access::private_path(&journal)?;
+    crate::updater::ActivationTransaction::recover_registered(&journal, &[base], &registered)
+}
+
+fn configure_hook_files(
+    init: &Init,
+    codex_home: Option<&std::path::Path>,
+    codex_channel: Option<&'static str>,
+    offline: &OfflineDenyRules,
+) -> anyhow::Result<Option<Value>> {
+    let _lock = hook_policy_lock(init)?;
+    recover_hook_policy_files(init)?;
+    let codex = codex_home
+        .map(|home| {
+            crate::deployment::prepare_embedded_codex_hooks(
+                home,
+                &init.data_dir,
+                &init.resource_dir,
+                codex_channel,
+            )
+        })
+        .transpose()?;
+    let mut targets = match &codex {
+        Some(plan) => plan.targets()?,
+        None => BTreeMap::new(),
+    };
+    let offline_path = init.data_dir.join(OFFLINE_DENY_FILE);
+    crate::utils::source_access::private_path(&offline_path)?;
+    let write_offline = !offline.is_empty() || offline_path.exists();
+    if !targets.is_empty() || write_offline {
+        targets.insert(OFFLINE_TARGET.into(), offline_path);
+        let journal = init.data_dir.join(POLICY_FILES_DIR);
+        std::fs::create_dir_all(&journal)?;
+        let mut tx = crate::updater::ActivationTransaction::begin(&journal, targets)?;
+        let result = (|| {
+            if let Some(plan) = &codex {
+                plan.write(&mut tx)?;
+            }
+            if write_offline {
+                let bytes = serde_json::to_vec(&OfflineDeny {
+                    schema: 1,
+                    events: offline.clone(),
+                })?;
+                if tx.original_bytes(OFFLINE_TARGET)?.as_deref() != Some(&bytes) {
+                    tx.write(OFFLINE_TARGET, &bytes, 0o600)?;
+                }
+            }
+            tx.commit()
+        })();
+        if let Err(error) = result {
+            return match tx.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("SDK Hook policy recovery failed: {rollback:#}")))
+                }
+            };
+        }
+    }
+    Ok(codex.as_ref().map(|plan| plan.report()))
+}
+
 fn update_codex_deployment(instance: &Instance, policy: &Policy) -> anyhow::Result<()> {
-    if let Some(home) = &instance.init.codex_home {
-        let deployment = crate::deployment::reconcile_embedded_codex_hooks(
-            home,
-            &instance.init.data_dir,
-            &instance.init.resource_dir,
-            policy.codex_hook_channel,
-        )?;
-        instance.status.lock().unwrap().codex_hook_deployment = deployment;
+    let _guard = instance.hook_files.lock().unwrap();
+    let init = &instance.init;
+    if let Some(report) = configure_hook_files(
+        init,
+        init.codex_home.as_deref(),
+        policy.codex_hook_channel,
+        &policy.offline_deny,
+    )? {
+        instance.status.lock().unwrap().codex_hook_deployment = report;
     }
     Ok(())
 }
@@ -683,27 +850,23 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 let result = if instance.stop_requested.load(Ordering::SeqCst) {
                     Err("SDK is stopping".into())
                 } else if let Some(session) = session.as_mut() {
-                    match session
-                        .collector
-                        .apply(&next)
-                        .and_then(|()| update_codex_deployment(&instance, &next))
-                    {
+                    match session.collector.apply(&next, || {
+                        let hooks = session.hooks.as_ref().expect("running Hook endpoints");
+                        update_codex_deployment(&instance, &next)?;
+                        let mut settings = hooks.settings.write().unwrap();
+                        instance.status.lock().unwrap().version = next.version.clone();
+                        *settings = Arc::new(next.hooks.clone());
+                        super::hooks::update_local_status(&session.queue, &next.hooks);
+                        Ok(())
+                    }) {
                         Ok(()) => {
-                            if let Some(hooks) = &session.hooks {
-                                *hooks.settings.write().unwrap() = next.hooks.clone();
-                                super::hooks::update_local_status(&session.queue, &next.hooks);
-                            }
                             policy = *next;
                             let mut status = instance.status.lock().unwrap();
-                            status.version = policy.version.clone();
                             status.agents = session.collector.snapshot();
                             drop(status);
                             Ok(instance.snapshot())
                         }
-                        Err(error) => {
-                            let _ = session.collector.apply(&policy);
-                            Err(error.to_string())
-                        }
+                        Err(error) => Err(format!("{error:#}")),
                     }
                 } else {
                     Err("SDK is not running".into())
@@ -750,7 +913,11 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
 static API: PilotApiV2 = PilotApiV2 {
     abi_version: ABI_VERSION,
     struct_size: std::mem::size_of::<PilotApiV2>() as u32,
-    capabilities: CAP_ACTIVITY_V2 | CAP_HOOK_UDP | CAP_MONITORING,
+    capabilities: CAP_ACTIVITY_V2
+        | CAP_HOOK_UDP
+        | CAP_MONITORING
+        | CAP_CODEX_HOOK_CONTROL
+        | CAP_OFFLINE_DENY,
     start,
     apply_policy: apply,
     snapshot,

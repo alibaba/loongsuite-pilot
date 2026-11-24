@@ -496,6 +496,17 @@ fn codex_checkpoint_rebinds_old_sdk_pending_bytes_then_admits_a_legacy_handoff()
         )
         .is_err());
     let newer = r#"{"codex-transcript:rollout":{"lastOffset":27,"future":true}}"#;
+    let before = queue.saved_checkpoints().unwrap();
+    assert_eq!(
+        queue
+            .preview_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(Some(
+                newer.to_owned()
+            )))
+            .unwrap()
+            .as_deref(),
+        Some(newer)
+    );
+    assert_eq!(queue.saved_checkpoints().unwrap(), before);
     assert_eq!(
         queue
             .prepare_shell_checkpoint("new-source", LegacyCheckpointHandoff::Codex, || Ok(Some(
