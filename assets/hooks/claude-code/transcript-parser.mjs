@@ -150,58 +150,44 @@ function fillRequestStartTimes(llmCalls, promptTimestamp) {
  *
  * @param {string} transcriptPath - transcript 文件路径
  * @param {number} byteOffset - 增量读取起点(字节偏移)
- * @returns {{ turns: Array, nextOffset: number }}
+ * @param {{ promptId: string, sourceIdentity?: string }} [stopBoundary]
+ *   A queued Stop reads only complete records and cannot consume a later prompt.
+ * @returns {{ turns: Array, nextOffset: number, sourceIdentity?: string, sawStopPrompt?: boolean, unkeyedPromptCount?: number }}
  *   turns: 按 promptId 切分的 turn 数组,每个 turn 包含 llmCalls + prompt + timestamps
  */
-export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
-  if (!transcriptPath || !fs.existsSync(transcriptPath)) {
-    return { turns: [], nextOffset: byteOffset };
-  }
+export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBoundary) {
+  if (!transcriptPath) return { turns: [], nextOffset: byteOffset };
 
-  let content;
-  let fileSize;
+  let buffer;
+  let readFrom;
+  let sourceIdentity;
+  let fd;
   try {
-    const stat = fs.statSync(transcriptPath);
-    fileSize = stat.size;
+    fd = fs.openSync(transcriptPath, 'r');
+    const stat = fs.fstatSync(fd);
+    sourceIdentity = `${stat.dev}:${stat.ino}`;
+    if (stopBoundary && (byteOffset > stat.size
+      || (stopBoundary.sourceIdentity && stopBoundary.sourceIdentity !== sourceIdentity))) byteOffset = 0;
 
-    if (byteOffset >= fileSize) {
-      return { turns: [], nextOffset: byteOffset };
-    }
+    if (byteOffset >= stat.size) return { turns: [], nextOffset: byteOffset, sourceIdentity };
 
-    const readFrom = Math.max(byteOffset, 0);
-    const readLen = fileSize - readFrom;
-
-    if (readLen > MAX_TRANSCRIPT_BYTES) {
-      const fd = fs.openSync(transcriptPath, 'r');
-      try {
-        const tailOffset = fileSize - MAX_TRANSCRIPT_BYTES;
-        const actualOffset = Math.max(tailOffset, readFrom);
-        const actualLen = fileSize - actualOffset;
-        const buf = Buffer.alloc(actualLen);
-        fs.readSync(fd, buf, 0, actualLen, actualOffset);
-        content = buf.toString('utf-8');
-        if (actualOffset > readFrom) {
-          const firstNewline = content.indexOf('\n');
-          if (firstNewline >= 0) content = content.slice(firstNewline + 1);
-        }
-      } finally {
-        fs.closeSync(fd);
-      }
-    } else if (readFrom > 0) {
-      const fd = fs.openSync(transcriptPath, 'r');
-      try {
-        const buf = Buffer.alloc(readLen);
-        fs.readSync(fd, buf, 0, readLen, readFrom);
-        content = buf.toString('utf-8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } else {
-      content = fs.readFileSync(transcriptPath, 'utf-8');
+    readFrom = Math.max(byteOffset, stat.size - MAX_TRANSCRIPT_BYTES, 0);
+    buffer = Buffer.allocUnsafe(stat.size - readFrom);
+    buffer = buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, readFrom));
+    if (readFrom > byteOffset) {
+      const firstNewline = buffer.indexOf(10);
+      if (firstNewline < 0) return { turns: [], nextOffset: byteOffset, sourceIdentity };
+      readFrom += firstNewline + 1;
+      buffer = buffer.subarray(firstNewline + 1);
     }
   } catch {
     return { turns: [], nextOffset: byteOffset };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
+
+  if (stopBoundary) buffer = buffer.subarray(0, buffer.lastIndexOf(10) + 1);
+  let nextOffset = readFrom + buffer.length;
 
   // Phase 1: 收集 assistant 分组 + 顺序的对话记录 + 时间戳
   const assistantGroups = new Map(); // message.id → group
@@ -214,8 +200,13 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   const slashCommandsByPromptId = new Map(); // promptId → { name, timestamp }
   const skillLoads = []; // 从 skill isMeta 注入还原的加载事实
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
+  let lineOffset = readFrom;
+  let sawStopPrompt = false;
+  let unkeyedPromptCount = 0;
 
-  for (const line of content.split('\n')) {
+  for (const line of buffer.toString('utf8').split('\n')) {
+    const lineStart = lineOffset;
+    if (stopBoundary) lineOffset += Buffer.byteLength(line) + 1;
     const trimmed = line.trim();
     if (!trimmed) continue;
 
@@ -285,6 +276,15 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
       const recordTs = record.timestamp || null;
       const promptId = record.promptId || null;
       const isMeta = isMetaRecord(record);
+
+      if (stopBoundary && !isMeta && !isToolResultContent(msg.content)) {
+        if (sawStopPrompt && promptId && stopBoundary.promptId !== promptId) {
+          nextOffset = lineStart;
+          break;
+        }
+        if (promptId && promptId === stopBoundary.promptId) sawStopPrompt = true;
+        if (!promptId) unkeyedPromptCount++;
+      }
 
       // promptId 变化 = 新 turn 开始
       if (promptId) currentPromptId = promptId;
@@ -374,7 +374,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   }
 
   if (assistantGroups.size === 0) {
-    return { turns: [], nextOffset: fileSize };
+    return { turns: [], nextOffset, sourceIdentity, sawStopPrompt, unkeyedPromptCount };
   }
 
   // Phase 2: 每组内 content blocks 去重(streaming chunks 会重复)
@@ -495,7 +495,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0) {
   // Phase 4: 按 promptId 切分 turns
   const turns = splitIntoTurns(conversationRecords, llmCalls, skillLoads);
 
-  return { turns, nextOffset: fileSize };
+  return { turns, nextOffset, sourceIdentity, sawStopPrompt, unkeyedPromptCount };
 }
 
 /**
