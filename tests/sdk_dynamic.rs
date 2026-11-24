@@ -2298,7 +2298,7 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
     same["hcd"]["agent_configs"]["codex"]["collection"]["limits"] =
         json!({"poll_interval_ms":2000});
     assert_eq!(host.apply(same).0, OK);
-    let journal = data.join("codex-hook-deployment/update-recovery.json");
+    let journal = data.join("sdk-hook-policy/update-recovery.json");
     std::fs::write(&journal, "{}").unwrap();
     assert_managed_deny();
     let mut local = policy.clone();
