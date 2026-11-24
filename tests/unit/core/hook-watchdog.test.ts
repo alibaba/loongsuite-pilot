@@ -91,6 +91,7 @@ function makeConfig(overrides: Partial<HookWatchdogConfig> = {}): HookWatchdogCo
     enabled: true,
     intervalMs: 60_000,
     repairCooldownMs: 600_000,
+    tamperProtection: true,
     ...overrides,
   };
 }
@@ -814,6 +815,19 @@ describe('HookWatchdog', () => {
       expect(await fs.readFile(processor, 'utf8')).toBe('export const x = 2;\n');
       expect(await fs.readFile(extra, 'utf8')).toBe('keep\n');
       expect(await reportedPaths(dataDir)).toContain('shared/decode-payload.mjs');
+    });
+
+    it('does not record a mismatch when hook tamper protection is off', async () => {
+      const { pilotDir, dataDir } = await installAssets();
+      const processor = path.join(dataDir, 'hooks', 'shared', 'decode-payload.mjs');
+      await fs.mkdir(path.dirname(processor), { recursive: true });
+      await fs.writeFile(processor, 'export const x = 2;\n');
+      setHookManifest(fixtureManifest());
+      const wd = new HookWatchdog(makeConfig({ tamperProtection: false }), [], [], { pilotDir, dataDir });
+
+      await wd.runCheck();
+
+      await expect(fs.readFile(getHookRestoreRequestPath(dataDir), 'utf8')).rejects.toThrow();
     });
 
     it('reports a missing execute bit without calling settings repair', async () => {

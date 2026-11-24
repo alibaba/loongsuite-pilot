@@ -371,7 +371,7 @@ export class Updater {
         }
         await this.writeHeartbeat();
       }
-      if (this.config.repairHooks !== false && !published) {
+      if (this.config.tamperProtection && !published) {
         try {
           await repairRequestedHookAssets({
             cacheDir: this.paths.cacheDir,

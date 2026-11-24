@@ -117,7 +117,7 @@ describe('hook asset repair', () => {
     vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', '');
     const defaultBefore = await defaultScript();
 
-    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000 });
+    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000, tamperProtection: true });
     await updater.check();
 
     expect(resolveHome((await loadConfig()).dataDir)).toBe(dataDir);
@@ -134,7 +134,7 @@ describe('hook asset repair', () => {
     const { cacheDir } = await deployedRequest(fromEnv);
     vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', fromEnv);
 
-    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000 });
+    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000, tamperProtection: true });
     await updater.check();
 
     expect(resolveHome((await loadConfig()).dataDir)).toBe(fromEnv);

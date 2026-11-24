@@ -626,6 +626,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
       expect(config.hookWatchdog.intervalMs).toBe(5 * 60_000);
       expect(config.hookWatchdog.repairCooldownMs).toBe(10 * 60_000);
     });
@@ -651,6 +652,18 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(false);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
+    });
+
+    it('turns hook tamper protection on without following the watchdog switch', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: { enabled: false },
+        hookTamper: { enabled: true },
+      });
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(false);
+      expect(config.hookWatchdog.tamperProtection).toBe(true);
     });
 
     it('LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS overrides interval', async () => {

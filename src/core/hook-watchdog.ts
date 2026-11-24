@@ -361,6 +361,7 @@ export class HookWatchdog {
 
   /** Report deployed hook files whose bytes no longer match HOOK_ASSET_MANIFEST. The updater writes them. */
   private async checkHookAssets(): Promise<void> {
+    if (!this.config.tamperProtection) return;
     if (!this.assetRoots) return;
     if (this.assetCheckInFlight) {
       logger.debug('hook-watchdog.skipped', { reason: 'asset-check-in-flight' });

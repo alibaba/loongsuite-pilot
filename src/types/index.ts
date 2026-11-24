@@ -27,7 +27,7 @@ export interface AutoUpdateConfig {
   installId?: string;
   canaryPolicy?: 'auto' | 'latest' | 'off';
   canaryHotfixVersion?: number;
-  repairHooks?: boolean;
+  tamperProtection?: boolean;
 }
 
 export interface CmsConfig {
@@ -413,6 +413,8 @@ export interface HookWatchdogConfig {
   enabled: boolean;
   intervalMs: number;
   repairCooldownMs: number;
+  /** Report tampered hook scripts for the updater to rewrite. Default off. */
+  tamperProtection: boolean;
 }
 
 export interface PipelineToggle {

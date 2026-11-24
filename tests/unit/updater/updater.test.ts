@@ -259,7 +259,7 @@ describe('Updater', () => {
     });
 
     it('does not read a hook restore request when hook repair is off', async () => {
-      const updater = new Updater(makeConfig({ repairHooks: false }), tmpDir);
+      const updater = new Updater(makeConfig({ tamperProtection: false }), tmpDir);
       await updater.check();
       expect(mockFsReadFile).not.toHaveBeenCalledWith(
         expect.stringContaining('hook-restore-request.json'),

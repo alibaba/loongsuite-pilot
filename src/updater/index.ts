@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   const file = await readJsonFile<ConfigFile>(configPath);
   const config = buildAutoUpdateConfig(file);
 
-  if (!config.enabled && config.repairHooks === false) {
+  if (!config.enabled && !config.tamperProtection) {
     logger.info('auto-update and hook repair disabled, exiting');
     flushLogsSync();
     process.exit(0);
