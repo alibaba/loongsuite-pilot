@@ -70,7 +70,7 @@ describe('Strands Harness trace identity', () => {
     }
   });
 
-  it('exports a positive sub-millisecond tool span at the source timestamps', async () => {
+  it('exports each step identity and preserves sub-millisecond tool timing', async () => {
     const spans: ReadableSpan[] = [];
     const exporter: TraceExporterLike = {
       export(batch, callback) {
@@ -87,11 +87,22 @@ describe('Strands Harness trace identity', () => {
     }, undefined, () => exporter);
     try {
       const records = turn(ClientType.StrandsHarness, 'strands-timing', 0);
-      const entries = records.map(record => {
+      const firstRound = records.slice(0, -1);
+      const secondStepId = 'strands-timing:second';
+      const secondRound = records.slice(1, 3).map((record, index) => ({
+        ...record,
+        'event.id': `strands-timing-second-${index}`,
+        'gen_ai.step.id': secondStepId,
+        'gen_ai.response.id': 'second-llm',
+        time_unix_nano: String(1700000000006000000n + BigInt(index) * 1000000n),
+        ...(index === 1 ? { 'gen_ai.response.finish_reasons': ['stop'] } : {}),
+      }));
+      const turnEnd = { ...records[records.length - 1], time_unix_nano: '1700000000008000000' };
+      const entries = [...firstRound, ...secondRound, turnEnd].map(record => {
         const event = record['event.name'];
         return buildCanonicalHookEntry({
           ...record,
-          'gen_ai.react.round': 1,
+          'gen_ai.react.round': record['gen_ai.step.id'] === secondStepId ? 2 : 1,
           ...(event === 'tool.call' ? { time_unix_nano: '1700000000003100000' } : {}),
           ...(event === 'tool.result' ? {
             time_unix_nano: '1700000000003450000',
@@ -104,13 +115,18 @@ describe('Strands Harness trace identity', () => {
       await flusher.flush();
 
       const tool = spans.find(span => span.attributes['gen_ai.tool.call.id'] === 'spawn');
-      const step = spans.find(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+      const steps = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
       expect(tool?.startTime).toEqual([1700000000, 3100000]);
       expect(tool?.endTime).toEqual([1700000000, 3450000]);
       expect(tool?.duration).toEqual([0, 350000]);
       expect(tool?.status.code).toBe(SpanStatusCode.ERROR);
       expect(tool?.attributes['error.type']).toBe('SyntheticToolError');
-      expect(step?.endTime).toEqual(tool?.endTime);
+      expect(steps.find(span => span.attributes['gen_ai.react.round'] === 1)?.endTime).toEqual(tool?.endTime);
+      expect(steps.map(span => span.attributes['gen_ai.step.id'])).toEqual(['strands-timing:step', secondStepId]);
+      for (const span of spans.filter(item => ['LLM', 'TOOL'].includes(String(item.attributes['gen_ai.span.kind'])))) {
+        const step = steps.find(item => item.spanContext().spanId === span.parentSpanId);
+        expect(step?.attributes['gen_ai.step.id']).toBe(span.attributes['gen_ai.step.id']);
+      }
     } finally {
       await flusher.shutdown();
     }

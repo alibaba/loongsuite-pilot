@@ -454,5 +454,5 @@ class PilotStrandsPlugin(Plugin):
                 self._warn_once("log write or disk limit")
         except queue.Full:
             self._warn_once("writer queue full")
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._warn_once("log write is still pending")

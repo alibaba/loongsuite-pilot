@@ -10,6 +10,10 @@ interface Bounds {
   errorType?: string;
 }
 
+interface StepBounds extends Bounds {
+  stepId: string;
+}
+
 function setBoundary(bounds: Bounds, edge: 'start' | 'end', value: bigint): void {
   if (bounds[edge] !== undefined && bounds[edge] !== value) bounds.ambiguous = true;
   bounds[edge] = value;
@@ -23,7 +27,7 @@ function hrTime(nanos: bigint): [number, number] {
  * native sub-millisecond tool timings and a consistent containing span tree. */
 export function prepareStrandsSpanTiming(records: AgentActivityEntry[]): (spans: readonly ReadableSpan[]) => void {
   const turn: Bounds = {};
-  const steps = new Map<number, Bounds>();
+  const steps = new Map<number, StepBounds>();
   const models = new Map<string, Bounds>();
   const tools = new Map<string, Bounds>();
 
@@ -38,7 +42,8 @@ export function prepareStrandsSpanTiming(records: AgentActivityEntry[]): (spans:
     const stepId = record['gen_ai.step.id'];
     const round = record['gen_ai.react.round'];
     if (typeof stepId !== 'string' || typeof round !== 'number') continue;
-    const step = steps.get(round) ?? {};
+    const step: StepBounds = steps.get(round) ?? { stepId };
+    if (step.stepId !== stepId) step.ambiguous = true;
     if (step.start === undefined || time < step.start) step.start = time;
     if (step.end === undefined || time > step.end) step.end = time;
     steps.set(round, step);
@@ -70,8 +75,11 @@ export function prepareStrandsSpanTiming(records: AgentActivityEntry[]): (spans:
       const toolId = attrs['gen_ai.tool.call.id'];
       let bounds: Bounds | undefined;
       if (kind === 'ENTRY' || kind === 'AGENT') bounds = turn;
-      else if (kind === 'STEP' && typeof round === 'number') bounds = steps.get(round);
-      else if (kind === 'LLM' && typeof stepId === 'string') bounds = models.get(stepId);
+      else if (kind === 'STEP' && typeof round === 'number') {
+        const step = steps.get(round);
+        if (step && !step.ambiguous) attrs['gen_ai.step.id'] = step.stepId;
+        bounds = step;
+      } else if (kind === 'LLM' && typeof stepId === 'string') bounds = models.get(stepId);
       else if (kind === 'TOOL' && typeof stepId === 'string' && typeof toolId === 'string') {
         bounds = tools.get(`${stepId}\0${toolId}`);
       }
