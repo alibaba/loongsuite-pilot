@@ -344,6 +344,38 @@ describe('HookStrategy', () => {
       }
     });
 
+    it.each(['darwin', 'win32'] as const)('registers the nested ZCode Stop hook on %s with a spaced install path', async platform => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+      Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+      try {
+        mockHookManager.isHookInstalled.mockResolvedValue(true);
+        const script = platform === 'win32'
+          ? 'C:/Users/Test User/Pilot/hooks/zcode-loongsuite-pilot-hook.ps1'
+          : '/Users/Test User/Pilot/hooks/zcode-loongsuite-pilot-hook.sh';
+        await strategy.needsDeploy(makeDef({
+          id: 'zcode',
+          hook: {
+            settingsPath: '/home/test/.zcode/cli/config.json',
+            events: ['Stop'],
+            hookCommand: script,
+            format: 'nested',
+            eventsRoot: 'events',
+            eventSubcommand: 'kebab-case',
+          },
+        }));
+
+        expect(mockHookManager.isHookInstalled.mock.calls[0][0]).toMatchObject({
+          hookJsonPath: ['hooks', 'events', 'Stop'],
+          hookCommand: platform === 'win32'
+            ? `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}" stop`
+            : `'${script}' stop`,
+          replaceHookCommands: [`${script} stop`, ...(platform === 'darwin' ? [`"${script}" stop`] : [])],
+        });
+      } finally {
+        if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+      }
+    });
+
     it('preserves the existing Windows command format for non-Codex hook agents', async () => {
       const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
@@ -496,6 +528,60 @@ describe('HookStrategy', () => {
         settingsSyntax: 'jsonc',
         settingsPath: '/home/.qwen/settings.json',
       });
+    });
+  });
+
+  describe('ZCode hook activation', () => {
+    const zcode = makeDef({
+      id: 'zcode',
+      hook: {
+        settingsPath: '/home/test/.zcode/cli/config.json',
+        events: ['Stop'],
+        hookCommand: '/opt/pilot/hooks/zcode-loongsuite-pilot-hook.sh',
+        format: 'nested',
+        eventsRoot: 'events',
+      },
+    });
+
+    it('enables hooks on a missing user config before adding the Stop hook', async () => {
+      vi.mocked(fs.readFile).mockRejectedValueOnce({ code: 'ENOENT' });
+      mockHookManager.installHook.mockResolvedValue(true);
+
+      expect((await strategy.deploy(zcode)).success).toBe(true);
+
+      const [settingsPath, text, options] = vi.mocked(writeTextFileAtomic).mock.calls[0];
+      expect(settingsPath).toBe(zcode.hook!.settingsPath);
+      expect(JSON.parse(text)).toEqual({ hooks: { enabled: true } });
+      expect(options?.expected).toEqual({ exists: false });
+      expect(vi.mocked(writeTextFileAtomic).mock.invocationCallOrder[0])
+        .toBeLessThan(mockHookManager.installHook.mock.invocationCallOrder[0]);
+    });
+
+    it('repairs an installed but disabled hook without deleting other settings', async () => {
+      const userSettings = {
+        theme: 'dark',
+        hooks: { enabled: false, events: { SessionStart: ['user-owned-hook'] } },
+      };
+      const raw = JSON.stringify(userSettings);
+      mockHookManager.isHookInstalled.mockResolvedValue(true);
+      vi.mocked(readJsonFile).mockResolvedValueOnce(userSettings);
+      expect(await strategy.needsDeploy(zcode)).toBe(true);
+
+      vi.mocked(fs.readFile).mockResolvedValueOnce(raw);
+      expect((await strategy.deploy(zcode)).success).toBe(true);
+      const [, text, options] = vi.mocked(writeTextFileAtomic).mock.calls[0];
+      const enabledSettings = { ...userSettings, hooks: { ...userSettings.hooks, enabled: true } };
+      expect(JSON.parse(text)).toEqual(enabledSettings);
+      expect(options?.expected).toEqual({ exists: true, content: raw });
+      vi.mocked(readJsonFile).mockResolvedValueOnce(enabledSettings);
+      expect(await strategy.needsDeploy(zcode)).toBe(false);
+    });
+
+    it('leaves invalid settings untouched', async () => {
+      vi.mocked(fs.readFile).mockResolvedValueOnce('{"hooks":');
+      expect((await strategy.deploy(zcode)).error).toContain('refusing to overwrite invalid settings');
+      expect(writeTextFileAtomic).not.toHaveBeenCalled();
+      expect(mockHookManager.installHook).not.toHaveBeenCalled();
     });
   });
 

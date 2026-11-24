@@ -192,6 +192,43 @@ describe('uninstall cleans hook configs for all hook agents', () => {
   });
 });
 
+describe('ZCode hook cleanup', () => {
+  it.each([
+    ['POSIX', sh, 'remove_hook_configs()', 'node -e "\n', '\n" "$cfg"'],
+    ['PowerShell', ps1, 'function Remove-HookConfigs', "-e @'\n", "\n'@ $cfg"],
+  ])('%s removes only Pilot commands from nested event groups', (_platform, source, fn, start, end) => {
+    const offset = source.indexOf(start, source.indexOf(fn)) + start.length;
+    const script = source.slice(offset, source.indexOf(end, offset));
+    const root = mkdtempSync(join(tmpdir(), 'pilot-zcode-cleanup-'));
+    try {
+      const configDir = join(root, '.zcode', 'cli');
+      const config = join(configDir, 'config.json');
+      mkdirSync(configDir, { recursive: true });
+      const unrelated = { command: '/opt/third-party/stop.sh' };
+      const expected = { hooks: { events: { Stop: [{ matcher: '.*', hooks: [unrelated] }] } } };
+      writeFileSync(config, JSON.stringify({
+        hooks: {
+          events: {
+            Stop: [{
+              matcher: '.*',
+              hooks: [
+                { command: '"/custom pilot data/hooks/zcode-loongsuite-pilot-hook.sh" stop' },
+                { command: 'powershell.exe -File "C:\\Pilot Data\\hooks\\zcode-loongsuite-pilot-hook.ps1" stop' },
+                unrelated,
+              ],
+            }],
+          },
+        },
+      }));
+      const run = spawnSync(process.execPath, ['-e', script, config, '.loongsuite-pilot'], { encoding: 'utf8' });
+      expect(run.status, run.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(config, 'utf8'))).toEqual(expected);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('uninstall cleans the OpenCode plugin-inject spec', () => {
   it.each([['sh', sh], ['ps1', ps1]])('%s removes V1/V2 references from both keys while preserving unrelated plugins', (style, source) => {
     const start = source.indexOf(style === 'sh' ? 'remove_opencode_plugin()' : 'function Remove-OpenCodePlugin');

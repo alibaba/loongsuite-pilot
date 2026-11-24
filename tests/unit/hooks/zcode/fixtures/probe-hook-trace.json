@@ -1,0 +1,1 @@
+{"event":"hook.invoked","timestamp":"2026-07-13T02:39:27.387Z","session_id":"sess_36734977-639d-4424-94ba-8c1957576a5f","trace_id":"e294f5ce-30c2-4817-92be-d035412905a1","turn_id":"turn_b8638fe6-b763-4258-9b91-660d2f8edaef","hook_event_name":"Stop","rollout_state":{"exists":true,"line_count":1,"size_bytes":38677},"sqlite_state":{"model_usage":1,"turn_usage":0}}

@@ -293,6 +293,8 @@ export interface OtlpTraceFlusherConfig {
   captureMessageContent?: boolean;
   debug?: boolean;
   turnIdleTimeoutMs?: number;
+  /** Time for the other ZCode input to deliver its closing record. */
+  zcodeSourceWaitMs?: number;
   resourceAttributeKeys?: string[];
   /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
   spanAttributePassthroughPrefixes?: string[];

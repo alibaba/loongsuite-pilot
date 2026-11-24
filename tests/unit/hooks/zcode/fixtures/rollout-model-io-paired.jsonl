@@ -1,0 +1,71 @@
+{
+  "type": "model_io",
+  "querySource": "main_turn",
+  "sessionId": "sess_36734977-639d-4424-94ba-8c1957576a5f",
+  "turnId": "turn_b8638fe6-b763-4258-9b91-660d2f8edaef",
+  "traceId": "e294f5ce-30c2-4817-92be-d035412905a1",
+  "requestId": "90829445-8faa-4353-a688-a53229465b69",
+  "attempt": 1,
+  "startedAt": "2026-07-13T02:39:25.447Z",
+  "completedAt": "2026-07-13T02:39:27.370Z",
+  "durationMs": 1923,
+  "model": {
+    "modelId": "glm-5.2",
+    "providerId": "dashscope",
+    "role": "main",
+    "source": "config"
+  },
+  "request": {
+    "messages_sample_count": 6,
+    "messages_sample_truncated": [
+      {
+        "role": "system",
+        "content": "You are ZCode, an interactive coding agent"
+      },
+      {
+        "role": "system",
+        "content": "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts....[truncated 953 chars]"
+      },
+      {
+        "role": "system",
+        "content": "Write code that reads like the surrounding code: match its comment density, naming, and idiom.\n\nFor actions that are hard to reverse or outward-facing, confirm first unless durably authorized or expli...[truncated 1246 chars]"
+      },
+      {
+        "role": "user",
+        "content": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- a1: \u96c6\u56e2\u5185\u90e8\u7814\u53d1\u4ea7\u54c1\u7edf\u4e00\u547d\u4ee4\u884c\u5ba2\u6237\u7aef\uff08a1 CLI\uff09\u4f7f\u7528\u52a9\u624b\u3002\u8986\u76d6\u4ee3\u7801\u4ed3\u5e93\u3001\u5408\u5e76\u8bf7\u6c42\uff08MR/\u4ee3\u7801\u8bc4\u5ba1\uff09\u3001CI/CD \u6d41\u6c34\u7ebf\u3001\u5e94\u7528\u7ba1\u7406\u4e0e\u53d1\u5e03\u3001\u53d8\u66f4\u5355\uff08CR\uff09\u3001Maven \u5236\u54c1\u4e0e\u4e8c\u65b9\u5305\u53d1\u5e03\u3001\u9700\u6c42/\u7f3a\u9677/\u4efb\u52a1\uff08\u5de5\u4f5c\u9879\uff09\u3001\u9879\u76ee\u7a7a\u95f4\u3001\u5458...[truncated 4980 chars]"
+      },
+      {
+        "role": "user",
+        "content": "<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-07-13.\n\nIMPORTANT: this context may or may not be relevant to your tasks. Yo...[truncated 99 chars]"
+      }
+    ],
+    "toolNames": [
+      "Agent",
+      "AskUserQuestion",
+      "Bash",
+      "Edit",
+      "EnterPlanMode",
+      "ExitPlanMode",
+      "Read",
+      "Skill",
+      "TodoRead",
+      "TodoWrite"
+    ],
+    "messageCount": 6,
+    "messagesKind": "full"
+  },
+  "response": {
+    "text": "hello",
+    "finishReason": "stop",
+    "responseId": "chatcmpl-2c4a9745-9ce5-92c9-8bbc-93ef0fe55238",
+    "modelId": "glm-5.2",
+    "toolCalls": [],
+    "usage": {
+      "inputTokens": 8594,
+      "outputTokens": 3,
+      "totalTokens": 8597,
+      "cacheReadTokens": 0,
+      "reasoningTokens": 0
+    }
+  }
+}

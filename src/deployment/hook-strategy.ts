@@ -17,6 +17,7 @@ import {
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
+import { readJsonDocument } from '../utils/json-document.js';
 import { detectAgent } from './detect-utils.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
@@ -57,7 +58,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -93,7 +94,7 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
@@ -105,10 +106,10 @@ function legacyHookCommands(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'zcode')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'zcode'].includes(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -170,6 +171,10 @@ export class HookStrategy implements DeployStrategy {
         return true;
       }
     }
+    if (def.id === 'zcode' && def.hook) {
+      const settings = await readJsonFile<{ hooks?: { enabled?: boolean } }>(resolveHome(def.hook.settingsPath));
+      if (settings?.hooks?.enabled !== true) return true;
+    }
     for (const retiredDef of this.buildRetiredHookDefinitions(def)) {
       if (await this.hookManager.isHookInstalled(retiredDef)) {
         return true;
@@ -227,6 +232,7 @@ export class HookStrategy implements DeployStrategy {
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
       else await ensureSettings();
+      if (def.id === 'zcode') await this.ensureZCodeHooksEnabled(hookConfig.settingsPath);
 
       // Kiro CLI: settingsPath 是整个 Agent 定义 JSON，需要顶层 name + tools +
       // hooks:<event>:[{command, matcher}]（flat，无 type 字段）。
@@ -569,11 +575,19 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) return [];
 
+    // eventsRoot lets agents with strict schemas (zcode.cjs hkn) place hook
+    // entries under `hooks.events.<event>` instead of the default
+    // `hooks.<event>`. Default behavior unchanged for all other agents.
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
+
     return hookConfig.events.map(event => ({
       agentId: def.id,
       settingsPath: hookConfig.settingsPath,
       settingsSyntax: hookConfig.settingsSyntax,
-      hookJsonPath: ['hooks', event],
+      hookJsonPath: hookJsonPath(event),
       hookCommand: formatHookCommand(
         hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
       ),
@@ -593,13 +607,17 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig?.retiredEvents?.length) return [];
     const currentEvents = new Set(hookConfig.events);
+    const eventsRoot = hookConfig.eventsRoot;
+    const hookJsonPath = eventsRoot
+      ? (event: string) => ['hooks', eventsRoot, event]
+      : (event: string) => ['hooks', event];
     return [...new Set(hookConfig.retiredEvents)]
       .filter(event => !currentEvents.has(event))
       .map(event => ({
         agentId: def.id,
         settingsPath: hookConfig.settingsPath,
         settingsSyntax: hookConfig.settingsSyntax,
-        hookJsonPath: ['hooks', event],
+        hookJsonPath: hookJsonPath(event),
         hookCommand: formatHookCommand(
           hookConfig.hookCommand, event, hookConfig.eventSubcommand, def.id,
         ),
@@ -758,6 +776,30 @@ export class HookStrategy implements DeployStrategy {
       if (!found) return true;
     }
     return false;
+  }
+
+  private async ensureZCodeHooksEnabled(settingsPath: string): Promise<void> {
+    const resolvedPath = resolveHome(settingsPath);
+    const document = await readJsonDocument<Record<string, unknown>>(resolvedPath);
+    if (document.status === 'error') {
+      throw new Error('refusing to overwrite invalid settings: ' + document.error.message);
+    }
+    const settings = document.status === 'ok' ? document.data : {};
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+      throw new Error('expected ZCode settings to be a JSON object');
+    }
+    const existing = settings.hooks;
+    const hooks = existing && typeof existing === 'object' && !Array.isArray(existing)
+      ? existing as Record<string, unknown>
+      : {};
+    if (hooks.enabled === true) return;
+
+    await writeTextFileAtomic(resolvedPath, JSON.stringify({
+      ...settings,
+      hooks: { ...hooks, enabled: true },
+    }, null, 2) + '\n', {
+      expected: document.status === 'missing' ? { exists: false } : { exists: true, content: document.raw },
+    });
   }
 
   /**
