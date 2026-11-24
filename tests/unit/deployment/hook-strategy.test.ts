@@ -25,7 +25,7 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
 }));
 
 vi.mock('../../../src/deployment/qoder-token-usage.js', () => ({
-  planQoderTokenUsageDefaults: vi.fn(),
+  reconcileQoderTokenUsageDefaults: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock('../../../src/utils/fs-utils.js', () => ({
