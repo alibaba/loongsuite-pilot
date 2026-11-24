@@ -178,7 +178,12 @@ run_system_processor() {
   [[ "$config_file" == /* && "$config_file" != *$'\n'* && "$config_file" != *$'\r'* ]] || return 1
   trusted_system_ancestors "$(dirname "$config_file")" || return 1
   if [[ -e "$config_file" || -L "$config_file" ]]; then
-    trusted_system_files "$config_file" || return 1
+    # An owned policy may be temporarily unreadable. Let the processor retain
+    # metadata with content capture disabled while that policy is unavailable.
+    [[ -f "$config_file" && ! -L "$config_file" ]] || return 1
+    metadata="$(system_stat "$config_file")" || return 1
+    read -r owner mode <<< "$metadata"
+    trusted_system_mode "$owner" "$mode" && (( (8#$mode & 022) == 0 )) || return 1
   fi
   if [[ -e "$data_dir/state" || -L "$data_dir/state" ]]; then
     trusted_system_directory "$data_dir/state" || return 1

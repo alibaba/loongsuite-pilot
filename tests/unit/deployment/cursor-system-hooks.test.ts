@@ -350,15 +350,16 @@ describe('Cursor enterprise system registration', () => {
     ].map(row => JSON.stringify(row)).join('\n') + '\n');
 
     const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
-    const result = spawnSync('/bin/bash', ['-c', hooks.sessionEnd[0].command], {
+    const sendEnd = (id: string, transcriptPath: string) => spawnSync('/bin/bash', ['-c', hooks.sessionEnd[0].command], {
       env: { HOME: home, PATH: '/usr/bin:/bin', AGENT_DATA_COLLECTION_CONFIG: stalePolicy },
       encoding: 'utf8', timeout: 10_000,
       input: JSON.stringify({
-        hook_event_name: 'sessionEnd', session_id: session, conversation_id: session, generation_id: session,
+        hook_event_name: 'sessionEnd', session_id: id, conversation_id: id, generation_id: id,
         cursor_version: '2026.09.26-dd393fe', reason: 'completed', duration_ms: 100,
-        transcript_path: transcript, workspace_roots: [home],
+        transcript_path: transcriptPath, workspace_roots: [home],
       }),
     });
+    const result = sendEnd(session, transcript);
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({});
     const history = path.join(dataDir, 'logs/cursor/history');
@@ -382,6 +383,22 @@ describe('Cursor enterprise system registration', () => {
     expect((await fs.readFile(journal, 'utf8')).includes(prompt)).toBe(capture);
     const raw = path.join(dataDir, 'logs/cursor/raw/cursor-raw-trace.jsonl');
     expect((await fs.readFile(raw, 'utf8').catch(() => '')).includes(prompt)).toBe(capture);
+
+    if (process.geteuid?.() !== 0) {
+      const id = 'completed-while-policy-unreadable';
+      const deferred = path.join(path.dirname(path.dirname(transcript)), id, id + '.jsonl');
+      await write(deferred, (await fs.readFile(transcript, 'utf8')).replace('native user prompt', 'deferred native prompt'));
+      await fs.chmod(collectorPolicy, 0o000);
+      const blocked = sendEnd(id, deferred);
+      expect(blocked.status, blocked.stderr).toBe(0);
+      expect(await fs.readFile(journal, 'utf8')).toContain('"session_id":"' + id + '"');
+      await fs.chmod(collectorPolicy, 0o600);
+      expect(sendPrompt('wake-recovery').status).toBe(0);
+      const recovered = (await fs.readFile(path.join(history, files[0]), 'utf8'))
+        .trim().split('\n').map(row => JSON.parse(row)).filter(row => row['gen_ai.session.id'] === id);
+      expect(recovered).toHaveLength(3);
+      expect(JSON.stringify(recovered)).not.toContain('deferred native prompt');
+    }
 
     await fs.unlink(collectorPolicy);
     expect(sendPrompt('missing-policy').status).toBe(0);
