@@ -1,0 +1,13 @@
+{
+  "id": "strands-harness",
+  "displayName": "Strands Harness Python SDK",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["$PILOT_DATA/logs/strands-harness"],
+    "commands": []
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/strands-harness"
+  }
+}

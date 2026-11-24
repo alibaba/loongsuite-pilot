@@ -5,7 +5,7 @@ import { buildCanonicalHookEntry } from '../base/canonical-hook-record.js';
 const EVENT_NAMES = new Set(['other', 'llm.request', 'llm.response', 'tool.call', 'tool.result']);
 
 /**
- * Opt-in input for canonical turns written by an explicitly configured Strands adapter.
+ * Read canonical turns from the Strands Harness Python plugin.
  * Each source file is an immutable, newline-terminated BaseHookInput segment.
  */
 export class StrandsHarnessInput extends BaseHookInput {

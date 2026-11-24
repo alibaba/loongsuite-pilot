@@ -106,7 +106,12 @@ vi.mock('../../../src/core/agent-control-manager.js', () => ({
 const mockDiscoveryStart = vi.fn().mockResolvedValue(undefined);
 const mockDiscoveryStop = vi.fn().mockResolvedValue(undefined);
 const discoveryHandlers: Record<string, Function> = {};
-let discoveryEntries: Array<{ id: string; watchPaths: string[]; enabled: () => boolean }> = [];
+let discoveryEntries: Array<{
+  id: string;
+  watchPaths: string[];
+  enabled: () => boolean;
+  isAvailable: () => Promise<boolean>;
+}> = [];
 vi.mock('../../../src/core/agent-discovery-service.js', () => ({
   AgentDiscoveryService: vi.fn().mockImplementation((entries = []) => {
     discoveryEntries = entries;
@@ -196,6 +201,7 @@ vi.mock('../../../src/multimodal/index.js', async (importOriginal) => {
 import { InputManager } from '../../../src/core/input-manager.js';
 import { Orchestrator } from '../../../src/core/orchestrator.js';
 import * as interceptorWorker from '../../../src/interceptor/worker-service.js';
+import { directoryExists } from '../../../src/utils/fs-utils.js';
 
 function makeConfig(overrides: Partial<AnalyticsConfig> = {}): AnalyticsConfig {
   return {
@@ -667,6 +673,26 @@ describe('Orchestrator', () => {
       ]);
 
       await orch.stop();
+    });
+
+    it('discovers Strands plugin logs without an explicit listener configuration', async () => {
+      const config = makeConfig();
+      const orch = new Orchestrator(config);
+      await orch.start();
+      try {
+        const detection = discoveryEntries.find(entry => entry.id === 'strands-harness')!;
+        const logsDir = path.join(config.dataDir!, 'logs');
+        const sourceDir = path.join(logsDir, 'strands-harness');
+        expect(detection.watchPaths).toEqual([sourceDir, logsDir]);
+        expect(detection.enabled()).toBe(true);
+        await expect(detection.isAvailable()).resolves.toBe(false);
+        vi.mocked(directoryExists).mockImplementationOnce(async dir => dir === sourceDir);
+        await expect(detection.isAvailable()).resolves.toBe(true);
+        config.agents['strands-harness'] = { enabled: false };
+        expect(detection.enabled()).toBe(false);
+      } finally {
+        await orch.stop();
+      }
     });
 
     it('registers the QwenWorkCN Hook listener as a fallback when trace is disabled', async () => {

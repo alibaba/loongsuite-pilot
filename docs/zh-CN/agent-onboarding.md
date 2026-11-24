@@ -78,8 +78,10 @@ pilot = PilotStrandsPlugin(session_id=session_id, provider="qwen")
 agent = create_harness(model=model, session={"id": session_id}, plugins=[pilot])
 ```
 
-在 Pilot 配置启用 `listeners.strands-harness.enabled=true` 后，collector 会读取
-`$LOONGSUITE_PILOT_DATA_DIR/logs/strands-harness/`。插件与 collector 在同一用户下运行并使用同一数据目录。安装在默认位置时，目录为 `~/.loongsuite-pilot`。应用可通过 `data_dir` 显式指定共享数据目录。
+插件与 collector 在同一用户下运行并使用同一数据目录。首轮结束后，Pilot 会发现插件创建的
+`$LOONGSUITE_PILOT_DATA_DIR/logs/strands-harness/`，并自动启动采集。通过常规的
+`agents.strands-harness.enabled` 设置管理采集。安装在默认位置时，数据目录为
+`~/.loongsuite-pilot`。应用可通过 `data_dir` 显式指定共享数据目录。
 
 模型用量来自每次结束回调的原生消息元数据，工具按 SDK 的调用 ID 配对。采集依赖应用加载插件，本地日志路径无需配置 Strands OTLP exporter。通过插件参数 `capture_content=False` 可在源文件写入前省略消息、系统指令和工具正文。Pilot 的输出侧脱敏与内容配置继续生效。
 

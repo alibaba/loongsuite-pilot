@@ -75,7 +75,7 @@ pilot = PilotStrandsPlugin(session_id=session_id, provider="qwen")
 agent = create_harness(model=model, session={"id": session_id}, plugins=[pilot])
 ```
 
-Set `listeners.strands-harness.enabled=true` in Pilot's configuration. Run the application and collector as the same user and point them at the same data directory. The plugin uses `LOONGSUITE_PILOT_DATA_DIR` or `~/.loongsuite-pilot` by default and supports an explicit `data_dir`. This path works with Strands SDK OTLP export disabled. Use `capture_content=False` to omit messages, instructions, and tool payloads from the source files.
+Run the application and collector as the same user and point them at the same data directory. Pilot discovers the plugin's log directory on the first completed turn and starts the input automatically. Use the usual `agents.strands-harness.enabled` setting to control collection. The plugin uses `LOONGSUITE_PILOT_DATA_DIR` or `~/.loongsuite-pilot` by default and supports an explicit `data_dir`. This path works with Strands SDK OTLP export disabled. Use `capture_content=False` to omit messages, instructions, and tool payloads from the source files.
 
 This version was tested with the Strands Python SDK 1.66.0 and Harness 0.5.0 for a single Agent and tools completed within its invocation. Register a separate plugin instance for each Agent. Completed turns are published at the invocation callback, so a process exit before that callback leaves the active turn in memory. TypeScript, automatic CLI setup, subagents, and background tools require additional integration.
 

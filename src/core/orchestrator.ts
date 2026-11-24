@@ -1983,24 +1983,23 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
-    const strandsHarness = listenerCfg[ClientType.StrandsHarness];
-    if (strandsHarness?.enabled) {
-      const logDir = path.join(this.dataDir, 'logs', ClientType.StrandsHarness);
-      await fs.promises.mkdir(logDir, { recursive: true, mode: 0o700 });
-      const input = new StrandsHarnessInput({
-        stateStore: this.stateStore,
-        logDir,
-        pollIntervalMs: strandsHarness.pollInterval,
-      });
-      this.inputManager.registerInput(input);
-      entries.push(this.inputManager.buildDetectionEntry(input, {
-        watchPaths: [logDir],
-        isAvailable: () => directoryExists(logDir),
-        enabled: () => this.isAgentGatedEnabled(input.agentType)
-          && this.agentControlManager.resolveEnabled(input.id),
-        pollIntervalMs: strandsHarness.pollInterval,
-      }));
-    }
+    // --- Strands Harness (Python plugin JSONL) ---
+    const strandsLogDir = path.join(this.dataDir, 'logs', ClientType.StrandsHarness);
+    const strandsPollInterval = listenerCfg[ClientType.StrandsHarness]?.pollInterval;
+    const strandsInput = new StrandsHarnessInput({
+      stateStore: this.stateStore,
+      logDir: strandsLogDir,
+      pollIntervalMs: strandsPollInterval,
+    });
+    this.inputManager.registerInput(strandsInput);
+    entries.push(this.inputManager.buildDetectionEntry(strandsInput, {
+      // The producer creates its private log directory on the first completed turn.
+      watchPaths: [strandsLogDir, path.dirname(strandsLogDir)],
+      isAvailable: () => directoryExists(strandsLogDir),
+      enabled: () => this.isAgentGatedEnabled(strandsInput.agentType) &&
+        this.agentControlManager.resolveEnabled(strandsInput.id, listenerCfg[strandsInput.id]?.enabled ?? true),
+      pollIntervalMs: strandsPollInterval,
+    }));
 
     // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
     const workBuddyInput = new WorkBuddyInput({
