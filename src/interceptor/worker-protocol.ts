@@ -20,6 +20,7 @@ export interface InterceptorWorkerData {
 }
 
 export type InterceptorWorkerCommand =
+  | { type: 'bind-prompt'; record: InterceptorVerdictRecord }
   | { type: 'ack'; id: number }
   | { type: 'reload' | 'sync' | 'stop' | 'status'; id: number };
 

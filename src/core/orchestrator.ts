@@ -579,18 +579,6 @@ export class Orchestrator extends EventEmitter {
     });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
-    await this.interceptorService?.stop().catch(err => {
-      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
-    });
-    try {
-      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
-    } catch {
-      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
-      logger.warn('final interceptor status unavailable');
-    }
-    // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
-    this.interceptorService = null;
-    this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
@@ -604,6 +592,20 @@ export class Orchestrator extends EventEmitter {
     this.inputManager?.cancelPendingOutputs();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // Drain native requests before the worker's final checkpoint: enrichment
+    // can still establish anonymous prompt ownership while inputs are stopping.
+    await this.interceptorService?.stop().catch(err => {
+      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    try {
+      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
+    } catch {
+      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
+      logger.warn('final interceptor status unavailable');
+    }
+    // The runtime writer has exited; stop has also saved any unconfirmed mirror bindings.
+    this.interceptorService = null;
+    this.verdictStore = null;
     // The final dataflow window must observe the last serialized collect and
     // entry queue drain, while the flusher counters are still available.
     try {

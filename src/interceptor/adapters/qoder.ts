@@ -61,6 +61,7 @@ export function resolveQoderEventAgentType(request: HookRequest, fallbackAgentTy
   const product = business && typeof business === 'object' && !Array.isArray(business)
     ? (business as Record<string, unknown>).product
     : undefined;
+  if (product === 'cli') return 'qoder-cli';
   return resolveQoderProductAgentType(product, fallbackAgentType);
 }
 

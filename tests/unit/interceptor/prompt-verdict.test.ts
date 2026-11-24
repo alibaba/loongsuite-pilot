@@ -24,6 +24,86 @@ function entry(id?: string, at = Date.now(), agentType = 'qoder-cli') {
 }
 
 describe('prompt verdict correlation', () => {
+  function anonymous(product?: string) {
+    return promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 'session', prompt: text,
+      raw: product ? { parent_business_info: { product } } : {} })!;
+  }
+
+  it('joins a metadata-poor Qoder hook to one native App request and persists its ownership', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anonymous-prompt-')); dirs.push(dir);
+    const file = join(dir, 'verdicts.json'); const now = new Date();
+    const store = new ToolVerdictStore(file);
+    store.put(anonymous(), { action: 'log', ruleId: 'policy', ruleVersion: '3' }, now);
+    const app = entry('native', now.getTime() + 184, 'qoder-app');
+    new InterceptResultLinker(store, true).enrich([app]);
+    expect(app['gen_ai.guardrail.rule_id']).toBe('policy');
+    expect(app).not.toHaveProperty(PROMPT_CORRELATION_FIELD);
+    // An unrelated native request cannot consume the same anonymous observation.
+    expect(store.getPromptSnapshot(promptLookupFromEntry(entry('another', now.getTime() + 200, 'qoder-app'))!, now)).toBeNull();
+    await store.checkpoint();
+    const restored = new ToolVerdictStore(file); restored.restore(now);
+    const mirror = new ToolVerdictStore(join(dir, 'mirror.json')); mirror.merge(restored.records(now));
+    expect(mirror.getPromptSnapshot(promptLookupFromEntry(entry('native', now.getTime() + 184, 'qoder-app'))!, now))
+      .toMatchObject({ action: 'log', ruleId: 'policy' });
+    expect(mirror.getPromptSnapshot(promptLookupFromEntry(entry('another', now.getTime() + 200, 'qoder-app'))!, now)).toBeNull();
+    expect(await readFile(file, 'utf8')).not.toContain(text);
+    expect(mirror.getPromptSnapshot(promptLookupFromEntry(entry('native', now.getTime() + 184, 'qoder-app'))!,
+      new Date(now.getTime() + TOOL_VERDICT_TTL_MS + 1))).toBeNull();
+  });
+
+  it('keeps anonymous ownership across stale IPC and replacement snapshots', () => {
+    const store = new ToolVerdictStore('/tmp/unused-anonymous.json'); const now = Date.now();
+    store.put(anonymous(), { action: 'log' }, new Date(now));
+    const unbound = store.records();
+    const lookup = promptLookupFromEntry(entry('native', now, 'qoder-app'))!;
+    expect(store.getPromptSnapshot(lookup)).toMatchObject({ action: 'log' });
+    const writer = new ToolVerdictStore('/tmp/unused-writer.json'); writer.merge(unbound); writer.merge(store.records());
+    store.replace(unbound); store.merge(unbound);
+    store.put(anonymous(), { action: 'unknown' }, new Date(now + 100));
+    for (const s of [store, writer]) {
+      expect(s.getPromptSnapshot(lookup)).toMatchObject({ action: 'log' });
+      expect(s.getPromptSnapshot({ ...lookup, requestId: promptRequestId('other') })).toBeNull();
+    }
+  });
+
+  it.each(['unknown', 'block', 'allow'] as const)('counts an additional %s attempt as ambiguous', action => {
+    const store = new ToolVerdictStore('/tmp/unused-anonymous.json'); const now = Date.now();
+    store.put(anonymous(), { action: 'log', ruleId: 'older' }, new Date(now));
+    store.put(anonymous(), { action }, new Date(now + 100));
+    expect(store.getPromptSnapshot(promptLookupFromEntry(entry('native', now + 184, 'qoder-app'))!)).toBeNull();
+  });
+
+  it('allows sequential repeated prompts once an earlier attempt has a proven native owner', () => {
+    const store = new ToolVerdictStore('/tmp/unused-repeated.json'); const now = Date.now();
+    store.put(anonymous(), { action: 'log', ruleId: 'first' }, new Date(now));
+    const first = promptLookupFromEntry(entry('first-native', now + 100, 'qoder-app'))!;
+    expect(store.getPromptSnapshot(first)?.ruleId).toBe('first');
+    store.put(anonymous(), { action: 'log', ruleId: 'second' }, new Date(now + 200));
+    const second = promptLookupFromEntry(entry('second-native', now + 300, 'qoder-app'))!;
+    expect(store.getPromptSnapshot(second)?.ruleId).toBe('second');
+    expect(store.getPromptSnapshot(first)?.ruleId).toBe('first');
+  });
+
+  it('supports each missing metadata field independently without widening explicit identities', () => {
+    const now = Date.now();
+    const store = new ToolVerdictStore('/tmp/unused-partial.json');
+    store.put(key('native', 'qoder'), { action: 'log', ruleId: 'id-known' }, new Date(now));
+    const lookup = promptLookupFromEntry(entry('native', now, 'qoder-app'))!;
+    expect(store.getPromptSnapshot(lookup)?.ruleId).toBe('id-known');
+    expect(store.getPromptSnapshot({ ...lookup, requestId: promptRequestId('other') })).toBeNull();
+    const app = new ToolVerdictStore('/tmp/unused-app.json'); app.put(anonymous('app'), { action: 'log' }, new Date(now));
+    expect(app.getPromptSnapshot(promptLookupFromEntry(entry('native', now))!)).toBeNull();
+    expect(app.getPromptSnapshot(lookup)?.action).toBe('log');
+    const cli = anonymous('cli'); expect(cli.agentType).toBe('qoder-cli');
+    expect(cli.missingAgentType).toBeUndefined();
+    const legacy = new ToolVerdictStore('/tmp/unused-legacy.json');
+    const old = { ...anonymous() }; delete old.missingRequestId; delete old.missingAgentType;
+    legacy.put(old, { action: 'log' }, new Date(now));
+    expect(legacy.getPromptSnapshot(lookup)).toBeNull();
+    const stale = new ToolVerdictStore('/tmp/unused-stale.json'); stale.put(anonymous(), { action: 'log' }, new Date(now - 6000));
+    expect(stale.getPromptSnapshot(lookup)).toBeNull();
+  });
+
   it('stores only the digest and preserves it through checkpoint restore and IPC without extending expiry', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'prompt-verdict-')); dirs.push(dir);
     const file = join(dir, 'verdicts.json'); const now = new Date();

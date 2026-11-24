@@ -775,6 +775,20 @@ describe('Orchestrator', () => {
       expect(events).toContain('stopped');
     });
 
+    it('drains native enrichment before the interceptor writer checkpoint and keeps the flusher alive', async () => {
+      const orch = new Orchestrator(makeConfig());
+      await orch.start();
+      const order: string[] = [];
+      vi.spyOn(orch.getInputManager(), 'stopAll').mockImplementationOnce(async () => { order.push('inputs'); });
+      (orch as any).interceptorService = {
+        stop: async () => { order.push('interceptor'); },
+        getStatus: async () => undefined,
+      };
+      vi.spyOn((orch as any).flusher, 'shutdown').mockImplementationOnce(async () => { order.push('flusher'); });
+      await orch.stop();
+      expect(order).toEqual(['inputs', 'interceptor', 'flusher']);
+    });
+
     it('still shuts down the flusher and saves state when metrics stop fails', async () => {
       const orch = new Orchestrator(makeConfig());
       await orch.start();
