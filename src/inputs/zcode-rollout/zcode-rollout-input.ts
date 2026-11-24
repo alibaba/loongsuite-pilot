@@ -346,7 +346,7 @@ export class ZCodeRolloutInput extends BaseInput {
           ...(result.content !== undefined
             ? { 'gen_ai.tool.call.result': result.content as JsonValue }
             : {}),
-          'tool.result.status': isError ? 'error' : 'ok',
+          'tool.result.status': isError ? 'failure' : 'success',
           ...(isError && result.content
             ? { 'error.type': 'ToolError', 'error.message': String(result.content).slice(0, 500) }
             : {}),
@@ -371,7 +371,7 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.tool.name': p.toolName,
           'gen_ai.tool.call.id': p.callId,
           'gen_ai.tool.call.exec.id': p.callId,
-          'tool.result.status': 'ok',
+          'tool.result.status': 'unknown',
           trace_id: p.traceId,
           span_id: toolSpanId,
           parent_span_id: p.stepSpanId,
@@ -436,20 +436,15 @@ export class ZCodeRolloutInput extends BaseInput {
     const rawInputMessages = Array.isArray(request.messages_sample_truncated)
       ? request.messages_sample_truncated
       : Array.isArray(request.messages) ? request.messages : [];
-    const inputMessages = (rawInputMessages as unknown[])
-      .map((m) => normalizeInputMessage(m))
-      .filter(Boolean) as { role: string; content: string }[];
+    const inputMessages = rawInputMessages.map(normalizeInputMessage).filter(message => message !== null);
 
     // P1 fix: extract system_instructions (role=="system" messages) and
     // tool_definitions (request.toolNames — names only, no
     // description/parameters; ZCode rollout does not log full tool schemas,
     // so we emit name-only definitions and document the gap as P2 follow-up
     // for downstream consumers needing full JSON schemas).
-    const systemInstructions: JsonValue[] = (rawInputMessages as unknown[])
-      .map((m) => normalizeInputMessage(m))
-      .filter(Boolean)
-      .filter((m) => m!.role === 'system')
-      .map((m) => ({ type: 'text', content: String(m!.content ?? '') })) as JsonValue[];
+    const systemInstructions: JsonValue[] = inputMessages.filter(message => message.role === 'system')
+      .map(message => ({ type: 'text', content: message.content ?? '' }));
     const toolNamesRaw = Array.isArray(request.toolNames) ? request.toolNames : [];
     const toolDefinitions: JsonValue[] = (toolNamesRaw as unknown[])
       .map((n) => (typeof n === 'string' ? { name: n } : null))
@@ -570,10 +565,15 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.provider.name': providerId,
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': responseModelId,
-      'gen_ai.input.messages': inputMessages.map((m) => ({
-        role: m.role,
-        parts: [{ type: 'text', content: String(m.content ?? '') }],
-      })) as JsonValue,
+      'gen_ai.input.messages': inputMessages.map(({ role, content, toolResult }) => ({
+        role,
+        parts: toolResult ? [{
+          type: 'tool_call_response',
+          id: toolResult.callId,
+          response: (toolResult.content ?? null) as JsonValue,
+          ...(toolResult.isError ? { isError: true } : {}),
+        }] : [{ type: 'text', content: content ?? '' }],
+      })),
       ...(systemInstructions.length > 0
         ? { 'gen_ai.system_instructions': systemInstructions }
         : {}),
@@ -719,7 +719,7 @@ export class ZCodeRolloutInput extends BaseInput {
           ...(result.content !== undefined
             ? { 'gen_ai.tool.call.result': result.content as JsonValue }
             : {}),
-          'tool.result.status': isError ? 'error' : 'ok',
+          'tool.result.status': isError ? 'failure' : 'success',
           ...(isError && result.content
             ? { 'error.type': 'ToolError', 'error.message': String(result.content).slice(0, 500) }
             : {}),
@@ -745,7 +745,7 @@ export class ZCodeRolloutInput extends BaseInput {
           'gen_ai.tool.name': tc.name,
           'gen_ai.tool.call.id': tc.id,
           'gen_ai.tool.call.exec.id': tc.id,
-          'tool.result.status': 'ok',
+          'tool.result.status': 'unknown',
           trace_id: traceId,
           span_id: toolSpanId,
           parent_span_id: stepSpanId,
@@ -794,14 +794,14 @@ export class ZCodeRolloutInput extends BaseInput {
   }
 }
 
-function normalizeInputMessage(m: unknown): { role: string; content: string } | null {
+function normalizeInputMessage(m: unknown): { role: string; content?: string; toolResult?: ToolResult } | null {
   if (!m || typeof m !== 'object') return null;
   const r = m as Record<string, unknown>;
   const role = str(r.role);
   if (!role) return null;
   const content = str(r.content);
-  if (content === undefined) return null;
-  return { role, content };
+  const toolResult = normalizeToolResult(r);
+  return content === undefined && !toolResult ? null : { role, content, toolResult };
 }
 
 function normalizeToolCall(tc: unknown): { id: string; name: string; args: unknown } | null {
@@ -856,18 +856,22 @@ function collectToolResults(nextRecord?: Record<string, unknown>): Map<string, T
     : Array.isArray(req.messages) ? req.messages : [];
   for (const m of msgs as unknown[]) {
     if (!m || typeof m !== 'object') continue;
-    const r = m as Record<string, unknown>;
-    if (r.role !== 'tool') continue;
-    const callId = str(r.toolCallId) ?? str(r.tool_call_id) ?? str(r.toolCallID);
-    if (!callId) continue;
-    out.set(callId, {
-      callId,
-      content: r.content,
-      toolName: str(r.toolName) ?? str(r.tool_name),
-      isError: r.isError === true,
-    });
+    const result = normalizeToolResult(m as Record<string, unknown>);
+    if (result) out.set(result.callId, result);
   }
   return out;
+}
+
+function normalizeToolResult(message: Record<string, unknown>): ToolResult | undefined {
+  if (message.role !== 'tool') return undefined;
+  const callId = str(message.toolCallId) ?? str(message.tool_call_id) ?? str(message.toolCallID);
+  if (!callId) return undefined;
+  return {
+    callId,
+    content: message.content,
+    toolName: str(message.toolName) ?? str(message.tool_name),
+    isError: message.isError === true,
+  };
 }
 
 function str(v: unknown): string | undefined {

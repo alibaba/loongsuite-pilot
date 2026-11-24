@@ -1876,6 +1876,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+    if (agentType === 'zcode') this.enrichZCodeToolOutcomes(records, spans);
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
     if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
@@ -2679,6 +2680,23 @@ export class OtlpTraceFlusher extends BaseFlusher {
       llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
         metadata.systemInstructions,
       );
+    }
+  }
+
+  private enrichZCodeToolOutcomes(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    const resultsBySpanId = new Map(records
+      .filter(record => record['event.name'] === 'tool.result' && record.span_id)
+      .map(record => [record.span_id, record]));
+    for (const span of spans) {
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const result = resultsBySpanId.get(span.spanContext().spanId);
+      const status = result?.['tool.result.status'];
+      if (!status) continue;
+      span.attributes['tool.result.status'] = status;
+      if (status === 'failure') {
+        span.attributes['error.type'] = result['error.type'] ?? 'ToolError';
+        Object.assign(span.status, { code: SpanStatusCode.ERROR });
+      }
     }
   }
 

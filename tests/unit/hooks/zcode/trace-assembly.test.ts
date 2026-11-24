@@ -70,6 +70,39 @@ it.each(['hook', 'rollout'])('joins both inputs into one trace when %s is polled
     .toEqual(Array(4).fill(spansOf('AGENT')[0]?.spanContext().spanId));
 });
 
+it.each([false, true])('exports the recorded ZCode tool outcome (isError=%s)', async isError => {
+  const first = lines[0]!;
+  const next = lines[1]!;
+  const request = next.request as { messages: Array<Record<string, unknown>> };
+  const rawResult = request.messages.find(message => message.role === 'tool')!;
+  const response = isError ? 'Fixture file was not found' : 'Fixture file was read';
+  const continuation = {
+    ...next,
+    request: {
+      ...request,
+      messages: request.messages.map(message =>
+        message === rawResult ? { ...message, content: response, isError } : message),
+    },
+  };
+  const records = input.buildEntriesFromRolloutLines([first, continuation, ...lines.slice(2)]);
+  const result = records.find(record => record['event.name'] === 'tool.result'
+    && record['gen_ai.tool.call.id'] === rawResult.toolCallId);
+  const status = isError ? 'failure' : 'success';
+  expect(result?.['tool.result.status']).toBe(status);
+  await flusher.sendBatch(envelope());
+  await flusher.sendBatch(records);
+  const tool = spansOf('TOOL').find(span => span.spanContext().spanId === result?.span_id);
+  expect(tool?.attributes['tool.result.status']).toBe(status);
+  expect(tool?.status.code).toBe(isError ? 2 : 0);
+  const nextLlm = spansOf('LLM').find(span =>
+    span.attributes['gen_ai.response.id'] === (next.response as { responseId: string }).responseId);
+  const messages = JSON.parse(String(nextLlm?.attributes['gen_ai.input.messages']));
+  expect(messages).toContainEqual({
+    role: 'tool',
+    parts: [{ type: 'tool_call_response', id: rawResult.toolCallId, response, ...(isError ? { isError: true } : {}) }],
+  });
+});
+
 it('retains rollout after an already installed hook emits a session-only entry', async () => {
   const [entry, agent] = envelope();
   const sessionEntry = { ...entry };
