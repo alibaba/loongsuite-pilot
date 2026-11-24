@@ -180,7 +180,8 @@ Cursor CLI uses the [Enterprise-managed hooks file](https://cursor.com/docs/hook
 Keep `cursor-agent` or the official `agent` alias on the installer's PATH and
 grant the installer write access to the managed file. The CLI loads the shared
 hook for each HOME and the hook writes to the common Pilot runtime directory.
-The system hook uses the shared directory's `node-bin` pin and `config.json`.
+The system hook uses the shared directory's `node-bin` and the collector
+configuration path recorded at installation.
 Keep the hook assets and pinned Node runtime under root-owned or installer-owned
 paths with write access limited to the owner. The Cursor journal is private to
 the UID running the collector and CLI.
@@ -192,7 +193,8 @@ the normal prompt and response hooks, Pilot can recover a completed turn from
 the native transcript referenced by the CLI's `sessionEnd` hook. The transcript
 must be readable under the active identity's `~/.cursor/projects`. Message
 capture follows the existing privacy settings. Token usage is only reported
-when present in the source.
+when present in the source. After a temporary policy or history write failure,
+later hooks can retry the same transcript for up to 15 minutes.
 
 Pi reuses its existing configuration root (`PI_CODING_AGENT_DIR`, default
 `~/.pi/agent`). Later sessions using that root load the same extension, even

@@ -66,9 +66,12 @@ export function buildCursorCliRecordsFromCompletedTurn(turn, events, endEvent, r
     _journal_ts: new Date(turn.startMs).toISOString(),
     generation_id: turn.turnId,
   };
-  return buildTranscriptRecords(transcript, events, startEvent, {
+  const records = buildTranscriptRecords(transcript, events, startEvent, {
     variant: 'cursor-cli', runtimeConfig, endEvent,
   }) ?? [];
+  return records.map((record, index) => ({
+    ...record, 'event.id': deriveTraceId(turn.turnId + ':event:' + index),
+  }));
 }
 
 function buildTranscriptRecords(turn, journalEvents, promptEvent, options) {
@@ -140,7 +143,7 @@ function buildTranscriptRecords(turn, journalEvents, promptEvent, options) {
     const isLast = i === steps.length - 1;
 
     // T2: shared responseId between llm.request and llm.response
-    const responseId = crypto.randomUUID();
+    const responseId = endEvent ? deriveTraceId(stepId + ':response') : crypto.randomUUID();
 
     // T4: Precise request timestamp
     // s1: prefer thought event duration backtrack (actual LLM start); fallback to prompt time

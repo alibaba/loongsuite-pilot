@@ -28,10 +28,14 @@ import {
 import { cursorVariantFromVersion, omitCursorEventContent, toInternalEvent } from './cursor/source-event.mjs';
 import { appendEvent, CURSOR_DATA_DIR, readAllEvents, rewriteJournal } from './cursor/event-journal.mjs';
 import { withAssemblyLock } from './cursor/assembly-lock.mjs';
-import { inspectTurnJournal, selectTurnEvents } from './cursor/turn-events.mjs';
+import { inspectTurnJournal, isCursorCliCompletion, selectTurnEvents } from './cursor/turn-events.mjs';
 import { assembleTurn } from './cursor/react-assembler.mjs';
 import { buildCursorCliRecordsFromCompletedTurn, buildCursorRecordsFromTranscript } from './cursor/transcript-assembler.mjs';
-import { appendCursorCliRecoveredTurn, readCursorCliCompletedTurn } from './cursor/cli-transcript-recovery.mjs';
+import {
+  appendCursorCliRecoveredTurn,
+  readCursorCliCompletedTurn,
+  snapshotCursorCliTranscript,
+} from './cursor/cli-transcript-recovery.mjs';
 import {
   agentBaseFieldPatch,
   collectResourceAttributesFromEnv,
@@ -159,6 +163,7 @@ function applyCursorCliResourceContext(records, events, conversationId, variant)
 }
 
 const CURSOR_ORPHAN_GRACE_MS = 15 * 60 * 1000;
+const MAX_HEADLESS_RECOVERIES_PER_HOOK = 4;
 
 function compactJournal(snapshot, consumedConversationIds, turnEvents, staleBefore) {
   const consumed = new Set(turnEvents.filter(e => consumedConversationIds.has(e.conversation_id)));
@@ -166,30 +171,30 @@ function compactJournal(snapshot, consumedConversationIds, turnEvents, staleBefo
   rewriteJournal(inspectTurnJournal(unconsumed, staleBefore).remaining, snapshot);
 }
 
-function recoverCursorCliSessionEnd(endEvent, dataDir, runtimeConfig) {
+function recoverCursorCliSessionEnd(endEvent, snapshot, dataDir, runtimeConfig) {
   const allowed = filterWorkspaceRecords([{
     'gen_ai.session.id': endEvent.conversation_id,
     'agent.cursor-cli.cwd': endEvent.cwd || endEvent.workspace_roots?.[0],
   }], 'cursor-cli').length > 0;
-  if (!allowed) return;
+  if (!allowed) return [endEvent];
   const turn = readCursorCliCompletedTurn(endEvent);
-  if (!turn) return;
-  const allEvents = readAllEvents();
-  const sessionEvents = allEvents.filter(event => {
+  if (!turn) return [];
+  const sessionEvents = snapshot.filter(event => {
     const time = Date.parse(event._journal_ts);
-    return event.conversation_id === endEvent.conversation_id && time >= turn.startMs && time <= turn.endMs;
+    return event.conversation_id === endEvent.conversation_id && time >= turn.startMs && time <= turn.endMs
+      && (event.hook_event !== 'sessionEnd' || event === endEvent);
   });
   // An observed prompt still belongs to the regular Hook assembler. Leave it
   // pending so a late response cannot race a second turn out of the transcript.
-  if (sessionEvents.some(event => event.hook_event === 'beforeSubmitPrompt')) return;
+  if (sessionEvents.some(event => event.hook_event === 'beforeSubmitPrompt')) return [];
   const history = prepareHistory(sessionEvents, endEvent.conversation_id, runtimeConfig);
-  if (history.variant !== 'cursor-cli') return;
+  if (history.variant !== 'cursor-cli') return [];
   const historyConfig = history.allowTranscriptText ? history.runtimeConfig : {
     ...history.runtimeConfig,
     agents: { ...history.runtimeConfig.agents, 'cursor-cli': { captureMessageContent: false } },
   };
   const records = buildCursorCliRecordsFromCompletedTurn(turn, history.events, endEvent, historyConfig);
-  if (!records.length) return;
+  if (!records.length) return [];
   applyCursorCliResourceContext(records, sessionEvents, endEvent.conversation_id, 'cursor-cli');
 
   const historyDir = path.join(dataDir, 'logs', 'cursor', 'history');
@@ -198,12 +203,8 @@ function recoverCursorCliSessionEnd(endEvent, dataDir, runtimeConfig) {
   const file = path.join(historyDir, `cursor-${endDay}.jsonl`);
   const previousFile = startDay !== endDay ? path.join(historyDir, `cursor-${startDay}.jsonl`) : undefined;
   const visible = filterWorkspaceRecords(records, 'cursor-cli');
-  if (visible.length > 0) appendCursorCliRecoveredTurn(file, previousFile, visible, endEvent, turn);
-
-  // Only retire evidence from this invocation. Other identity homes may be
-  // writing into the same journal while their own CLI processes are active.
-  const completed = new Set(sessionEvents);
-  rewriteJournal(allEvents.filter(event => !completed.has(event)), allEvents);
+  if (visible.length > 0 && !appendCursorCliRecoveredTurn(file, previousFile, visible, endEvent, turn)) return [];
+  return sessionEvents;
 }
 
 function applyPolicy(record, runtimeConfig) {
@@ -516,8 +517,9 @@ async function main() {
   let configPath;
   let implicitDefault = false;
   if (process.env.LOONGSUITE_PILOT_CURSOR_SYSTEM_SCOPE === '1') {
-    // The system wrapper validates this file before invoking the processor.
-    configPath = path.join(dataDir, 'config.json');
+    // The system wrapper sets this from the installed, trusted config pin.
+    configPath = process.env.AGENT_DATA_COLLECTION_CONFIG;
+    if (!configPath || !path.isAbsolute(configPath)) throw new Error('Missing Cursor system config path');
   } else {
     try {
       const marker = (await fs.readFile(new URL('./cursor-config-path', import.meta.url), 'utf8')).trim();
@@ -548,6 +550,9 @@ async function main() {
   const captureContent = captureForVariant(eventVariant, runtimeConfig);
   const checkConflictingSource = captureContent && !captureForVariant(undefined, runtimeConfig);
   let internalEvent = toInternalEvent(payload, captureContent);
+  if (isCursorCliCompletion(internalEvent)) {
+    internalEvent.transcript_stamp = snapshotCursorCliTranscript(internalEvent);
+  }
   const invocationResourceAttributes = collectResourceAttributesFromEnv(process.env, {
     agentId: 'cursor-cli',
   });
@@ -593,9 +598,24 @@ async function main() {
   // Ownership covers snapshot, history write and consumption. Other hooks may
   // append meanwhile; journal compaction preserves those appended events.
   await withAssemblyLock(async () => {
-    if (eventVariant === 'cursor-cli' && internalEvent.hook_event === 'sessionEnd' && internalEvent.reason === 'completed') {
+    const staleBefore = Date.now() - CURSOR_ORPHAN_GRACE_MS;
+    const snapshot = readAllEvents();
+    const { stops, completions, remaining } = inspectTurnJournal(snapshot, staleBefore);
+    // Handle the new completion first. Rotate pending ones so repeated failures
+    // cannot monopolize the bounded recovery budget.
+    const current = completions.find(event => event.conversation_id === internalEvent.conversation_id
+      && event.generation_id === internalEvent.generation_id && event._journal_ts === internalEvent._journal_ts
+      && internalEvent.hook_event === 'sessionEnd');
+    const pending = completions.filter(event => event !== current)
+      .sort((a, b) => (a._recovery_attempt_ms ?? 0) - (b._recovery_attempt_ms ?? 0));
+    if (current) pending.unshift(current);
+    const consumed = new Set();
+    const attempts = pending.slice(0, MAX_HEADLESS_RECOVERIES_PER_HOOK);
+    for (const completion of attempts) {
+      completion._recovery_attempt_ms = now.getTime();
       try {
-        recoverCursorCliSessionEnd(internalEvent, dataDir, runtimeConfig);
+        const recovered = recoverCursorCliSessionEnd(completion, snapshot, dataDir, runtimeConfig);
+        for (const event of recovered) consumed.add(event);
       } catch (err) {
         await appendErrorJsonl(dataDir, now, {
           stage: 'cli_transcript_recovery',
@@ -604,11 +624,9 @@ async function main() {
         });
       }
     }
-
-    const staleBefore = Date.now() - CURSOR_ORPHAN_GRACE_MS;
-    const snapshot = readAllEvents();
-    const { stops, remaining } = inspectTurnJournal(snapshot, staleBefore);
-    if (remaining.length !== snapshot.length) rewriteJournal(remaining, snapshot);
+    if (attempts.length || remaining.length !== snapshot.length) {
+      rewriteJournal(remaining.filter(event => !consumed.has(event)), snapshot);
+    }
     for (const stop of stops) {
       const isCurrentStop = internalEvent.hook_event === 'stop'
         && stop.conversation_id === internalEvent.conversation_id

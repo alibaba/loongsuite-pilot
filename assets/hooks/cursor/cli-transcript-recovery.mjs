@@ -12,20 +12,27 @@ const MAX_TRANSCRIPT_ROWS_PER_TURN = 64;
 const MAX_HISTORY_TAIL_BYTES = 2 * 1024 * 1024;
 const NANOSECONDS_PER_MILLISECOND = 1_000_000;
 
-function readTail(file, maxBytes, requireOwner = false) {
+function transcriptStamp(stat) {
+  const uid = process.geteuid?.();
+  if (!stat.isFile() || stat.nlink !== 1 || (uid != null && stat.uid !== uid)) return undefined;
+  return [stat.dev, stat.ino, stat.size, stat.mtimeMs].join(':');
+}
+
+function readTail(file, maxBytes, expectedStamp) {
   let fd;
   try {
     const flags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
     fd = fs.openSync(file, flags);
     const details = fs.fstatSync(fd);
-    const uid = process.geteuid?.();
-    if (!details.isFile() || (requireOwner && (details.nlink !== 1 || (uid != null && details.uid !== uid)))) {
-      throw new Error('Cursor collection source is not an owned regular file');
+    if (!details.isFile() || (expectedStamp && transcriptStamp(details) !== expectedStamp)) {
+      throw new Error('Cursor collection source changed');
     }
     const start = Math.max(0, details.size - maxBytes);
     const buffer = Buffer.alloc(details.size - start);
     const length = fs.readSync(fd, buffer, 0, buffer.length, start);
-    if (length !== buffer.length) throw new Error('Cursor collection source changed during read');
+    if (length !== buffer.length || (expectedStamp && transcriptStamp(fs.fstatSync(fd)) !== expectedStamp)) {
+      throw new Error('Cursor collection source changed during read');
+    }
     const skip = start === 0 ? 0 : buffer.indexOf(0x0a) + 1;
     const text = start > 0 && skip === 0 ? '' : buffer.toString('utf8', skip);
     return { text, offset: start + skip, truncated: start > 0 };
@@ -47,6 +54,17 @@ function officialTranscriptPath(event) {
   return resolved;
 }
 
+// Pin the original file version before policy evaluation or history writes can
+// defer recovery. A resumed invocation may rewrite the end of this same file.
+export function snapshotCursorCliTranscript(event) {
+  try {
+    const transcript = officialTranscriptPath(event);
+    return transcript ? transcriptStamp(fs.lstatSync(transcript)) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function isUserPrompt(row) {
   return row.role === 'user' && Array.isArray(row.message?.content)
     && row.message.content.some(part => part?.type === 'text' && typeof part.text === 'string' && part.text.trim());
@@ -57,11 +75,11 @@ function isUserPrompt(row) {
 export function readCursorCliCompletedTurn(event) {
   try {
     const transcript = officialTranscriptPath(event);
-    if (!transcript || event.reason !== 'completed') return null;
+    if (!transcript || event.reason !== 'completed' || !event.transcript_stamp) return null;
     const endMs = Date.parse(event._journal_ts);
     if (!Number.isFinite(endMs) || !Number.isFinite(event.duration_ms) || event.duration_ms <= 0
       || event.duration_ms > 24 * 60 * 60 * 1000) return null;
-    const { text, offset } = readTail(transcript, MAX_TRANSCRIPT_TAIL_BYTES, true);
+    const { text, offset } = readTail(transcript, MAX_TRANSCRIPT_TAIL_BYTES, event.transcript_stamp);
     const content = text.trimEnd();
     if (!content) return null;
     const terminalIndex = content.lastIndexOf('\n');
@@ -93,38 +111,50 @@ export function readCursorCliCompletedTurn(event) {
   }
 }
 
-function historyAlreadyCoversTurn(file, conversationId, turn) {
+function inspectHistory(file, conversationId, turn, emittedIds) {
   let tail;
   try {
     tail = readTail(file, MAX_HISTORY_TAIL_BYTES);
   } catch (error) {
-    if (error?.code === 'ENOENT') return false;
+    if (error?.code === 'ENOENT') return 'open';
     throw error;
   }
   let earliest = Infinity;
-  for (const line of tail.text.split('\n')) {
+  const lines = tail.text.split('\n');
+  for (const [index, line] of lines.entries()) {
     if (!line.trim()) continue;
+    // A short append may leave a valid JSON object without its newline.
+    const covered = index === lines.length - 1 ? 'needs-newline' : 'covered';
     let row;
     try { row = JSON.parse(line); } catch { continue; }
     if (!row || typeof row !== 'object') continue;
     const atMs = Number(row.time_unix_nano) / NANOSECONDS_PER_MILLISECOND;
     if (Number.isFinite(atMs)) earliest = Math.min(earliest, atMs);
     if (row['gen_ai.session.id'] !== conversationId) continue;
-    if (row['gen_ai.turn.id'] === turn.turnId && row['gen_ai.turn.end'] === true) return true;
+    if (row['gen_ai.turn.id'] === turn.turnId) {
+      if (row['gen_ai.turn.end'] === true) return covered;
+      emittedIds.add(row['event.id']);
+    }
     // Preserve normal Hook collection when it completed a turn in this session
     // before the end callback arrived. Earlier resumed turns are out of window.
     if (!row['agent.cursor.transcript_recovery'] && row['event.name'] === 'llm.response'
-      && atMs >= turn.startMs && atMs <= turn.endMs) return true;
+      && atMs >= turn.startMs && atMs <= turn.endMs) return covered;
   }
   // When the relevant window falls outside the bounded tail, defer recovery.
-  return tail.truncated && earliest > turn.startMs;
+  return tail.truncated && earliest > turn.startMs ? 'uncertain' : 'open';
 }
 
 export function appendCursorCliRecoveredTurn(file, previousFile, records, event, turn) {
   const result = withSyncFileLock(`${file}.recovery.lock`, 100, 30_000, () => {
-    if (historyAlreadyCoversTurn(file, event.conversation_id, turn)
-      || (previousFile && historyAlreadyCoversTurn(previousFile, event.conversation_id, turn))) return;
-    const text = records.map(record => JSON.stringify(record)).join('\n') + '\n';
+    const emittedIds = new Set();
+    const current = inspectHistory(file, event.conversation_id, turn, emittedIds);
+    if (current === 'covered') return true;
+    const previous = previousFile && inspectHistory(previousFile, event.conversation_id, turn, emittedIds);
+    if (previous === 'covered') return true;
+    if (current === 'uncertain' || previous === 'uncertain' || previous === 'needs-newline') return false;
+    // Complete a partially written batch without re-emitting its valid prefix.
+    const pending = current === 'needs-newline' ? [] : records.filter(record => !emittedIds.has(record['event.id']));
+    const text = pending.map(record => JSON.stringify(record) + '\n').join('');
     // An incomplete final line should remain separate from this batch.
     const flags = fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_RDWR
       | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
@@ -134,10 +164,13 @@ export function appendCursorCliRecoveredTurn(file, previousFile, records, event,
       if (!stat.isFile() || stat.nlink !== 1) throw new Error('Invalid Cursor history file');
       const last = Buffer.alloc(1);
       if (stat.size > 0) fs.readSync(fd, last, 0, 1, stat.size - 1);
-      fs.appendFileSync(fd, stat.size > 0 && last[0] !== 0x0a ? '\n' + text : text);
+      const suffix = stat.size > 0 && last[0] !== 0x0a ? '\n' + text : text;
+      if (suffix) fs.appendFileSync(fd, suffix);
+      return true;
     } finally {
       fs.closeSync(fd);
     }
   });
   if (!result.acquired) throw new Error('Cursor transcript recovery history lock unavailable');
+  return result.value;
 }

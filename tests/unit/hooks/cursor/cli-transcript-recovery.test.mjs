@@ -133,3 +133,64 @@ it('skips failed, incomplete, and outside-HOME transcripts without affecting the
   }
   expect(records()).toEqual([]);
 });
+
+it.each(['history', 'policy'])('retries an ended headless turn after transient %s failure', (failure) => {
+  writeTranscript([message('user', 'recover me'), message('assistant', 'recovered reply'), terminal]);
+  const history = path.join(root, 'logs/cursor/history');
+  const journal = path.join(root, 'state/cursor/event-journal.jsonl');
+  if (failure === 'history') {
+    fs.mkdirSync(path.dirname(history), { recursive: true });
+    fs.writeFileSync(history, 'simulate an unavailable history directory');
+  } else {
+    fs.writeFileSync(config, '{');
+  }
+
+  run();
+  expect(fs.existsSync(journal) && fs.readFileSync(journal, 'utf8')).toContain('"hook_event":"sessionEnd"');
+  if (failure === 'history') fs.unlinkSync(history);
+  else fs.writeFileSync(config, JSON.stringify({ privacy: { captureMessageContent: true } }));
+
+  const nextSession = { hook_event_name: 'sessionStart', conversation_id: 'other-session' };
+  run(nextSession);
+  const out = records();
+  expect(out).toHaveLength(3);
+  expect(out.every(record => record['gen_ai.session.id'] === session)).toBe(true);
+  expect(JSON.stringify(out).includes('recovered reply')).toBe(failure === 'history');
+  expect(fs.readFileSync(journal, 'utf8')).not.toContain('"hook_event":"sessionEnd"');
+  run(nextSession);
+  expect(records()).toEqual(out);
+});
+
+it('does not attribute a replaced transcript to an older completion', () => {
+  writeTranscript([message('user', 'earlier request'), message('assistant', 'earlier reply'), terminal]);
+  fs.writeFileSync(config, '{');
+  run();
+  writeTranscript([message('user', 'resumed request'), message('assistant', 'resumed reply which replaced the old tail'), terminal]);
+  fs.writeFileSync(config, JSON.stringify({ privacy: { captureMessageContent: true } }));
+
+  run({ hook_event_name: 'sessionStart', conversation_id: 'other-session' });
+  expect(records()).toEqual([]);
+  run();
+  expect(records()).toHaveLength(3);
+  expect(JSON.stringify(records())).toContain('resumed reply');
+});
+
+it('appends only the missing rows when a previous recovery wrote a partial batch', () => {
+  writeTranscript([message('user', 'partially written request'), message('assistant', 'final reply'), terminal]);
+  const journal = path.join(root, 'state/cursor/event-journal.jsonl');
+  const history = path.join(root, 'logs/cursor/history');
+  fs.mkdirSync(path.dirname(history), { recursive: true });
+  fs.writeFileSync(history, 'simulate a write failure');
+  run();
+  const pending = fs.readFileSync(journal, 'utf8');
+
+  fs.unlinkSync(history);
+  const next = { hook_event_name: 'sessionStart', conversation_id: 'other-session' };
+  run(next);
+  const full = records();
+  const file = path.join(history, fs.readdirSync(history).find(name => name.endsWith('.jsonl')));
+  fs.writeFileSync(file, full.slice(0, 2).map(row => JSON.stringify(row)).join('\n'));
+  fs.writeFileSync(journal, pending);
+  run(next);
+  expect(records()).toEqual(full);
+});

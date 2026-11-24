@@ -154,9 +154,8 @@ trusted_system_files() {
 
 run_system_processor() {
   local data_dir="${SCRIPT_DIR%/*}" list="$SCRIPT_DIR/cursor-system-assets.list"
-  local config_file rel pinned resolved metadata owner mode
+  local config_pin="$SCRIPT_DIR/cursor-system-config-path" config_file rel pinned resolved metadata owner mode
   local -a assets=()
-  config_file="$data_dir/config.json"
   trusted_system_ancestors "$SCRIPT_DIR" || return 1
   trusted_system_directory "$SCRIPT_DIR/cursor" && trusted_system_directory "$SCRIPT_DIR/shared" || return 1
   [[ -s "$list" ]] && trusted_system_files "$list" "$data_dir/node-bin" || return 1
@@ -174,6 +173,10 @@ run_system_processor() {
   trusted_system_ancestors "$(dirname "$resolved")" || return 1
   trusted_system_files "$resolved" && node_is_suitable "$resolved" || return 1
 
+  trusted_system_files "$config_pin" || return 1
+  config_file="$(cat "$config_pin")" || return 1
+  [[ "$config_file" == /* && "$config_file" != *$'\n'* && "$config_file" != *$'\r'* ]] || return 1
+  trusted_system_ancestors "$(dirname "$config_file")" || return 1
   if [[ -e "$config_file" || -L "$config_file" ]]; then
     trusted_system_files "$config_file" || return 1
   fi

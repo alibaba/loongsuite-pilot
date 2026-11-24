@@ -1,4 +1,11 @@
-/** Classify stops and expired metadata from an immutable journal snapshot. */
+import { cursorVariantFromVersion } from './source-event.mjs';
+
+export function isCursorCliCompletion(event) {
+  return event.hook_event === 'sessionEnd' && event.reason === 'completed'
+    && typeof event.transcript_path === 'string' && cursorVariantFromVersion(event.cursor_version) === 'cursor-cli';
+}
+
+/** Classify completed boundaries and expired metadata from a journal snapshot. */
 export function inspectTurnJournal(events, staleBefore) {
   const promptsByConversation = new Map();
   const lastSessionEnd = new Map();
@@ -17,6 +24,7 @@ export function inspectTurnJournal(events, staleBefore) {
   });
 
   const stops = [];
+  const completions = [];
   const remaining = events.filter((event, index) => {
     const id = event.conversation_id;
     const prompts = promptsByConversation.get(id);
@@ -32,13 +40,18 @@ export function inspectTurnJournal(events, staleBefore) {
       // to pair without repeatedly reading the journal or logging duplicates.
       return Date.parse(event._journal_ts) > staleBefore;
     }
+    if (isCursorCliCompletion(event) && event.transcript_stamp) {
+      if (!(Date.parse(event._journal_ts) > staleBefore)) return false;
+      completions.push(event);
+      return true;
+    }
     const isSessionBoundary = event.hook_event === 'sessionStart' || event.hook_event === 'sessionEnd';
     if (isSessionBoundary && !prompts) {
       return (lastSessionEnd.get(id) ?? -1) < index && Date.parse(event._journal_ts) > staleBefore;
     }
     return true;
   });
-  return { stops, remaining };
+  return { stops, completions, remaining };
 }
 
 /** Select one prompt generation without consuming its conversation's next turn. */

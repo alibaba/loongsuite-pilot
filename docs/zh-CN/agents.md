@@ -151,7 +151,7 @@ Codex 自身的 hooks 功能需保持启用。
 Cursor CLI 使用 [Enterprise 系统 Hook 配置](https://cursor.com/docs/hooks#configuration)。安装时
 `cursor-agent` 或官方 `agent` 别名需在 PATH 上，安装进程需有权限写入系统配置。
 同容器内的新 CLI 进程启动时读取公共 Hook，采集数据写到同一份 Pilot 目录。
-系统 Hook 使用共享目录中的 `node-bin` 和 `config.json`。Hook 文件和 Node 运行时
+系统 Hook 使用共享目录中的 `node-bin` 和安装时记录的 Collector 配置路径。Hook 文件和 Node 运行时
 应由 root 或安装用户持有，仅属主可写。Cursor 会话日志只允许 Collector 和 CLI
 共同使用的 UID 访问。
 可用 `--agents cursor-cli` 指定 Cursor 的这份共享注册。
@@ -159,6 +159,7 @@ Cursor CLI 使用 [Enterprise 系统 Hook 配置](https://cursor.com/docs/hooks#
 当 [官方无头 CLI](https://cursor.com/docs/cli/headless) 没有触发常规请求和响应 Hook 时，
 Pilot 可读取 `sessionEnd` 指向的原生会话记录，采集当前已完成的一轮。文件需在运行身份的
 `~/.cursor/projects` 下可读。消息内容遵循现有隐私配置，Token 用量以源数据为准。
+配置暂不可读或写入失败时，后续 Hook 可在 15 分钟内重试同一份会话记录。
 
 Pi 复用现有配置根 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。后续会话只要仍读取
 这份配置，就会加载同一插件；会话文件放在子目录不影响该注册。另行选择独立

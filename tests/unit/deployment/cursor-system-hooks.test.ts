@@ -43,8 +43,15 @@ beforeAll(async () => {
 afterAll(async () => { await fs.rm(runtimeRoot, { recursive: true, force: true }); });
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'cursor-system-'));
-  restore = isolateAgentHome(root);
+  const restoreHome = isolateAgentHome(root);
+  const previousConfig = process.env.AGENT_DATA_COLLECTION_CONFIG;
   dataDir = path.join(root, "pilot's data");
+  process.env.AGENT_DATA_COLLECTION_CONFIG = path.join(dataDir, 'config.json');
+  restore = () => {
+    restoreHome();
+    if (previousConfig === undefined) delete process.env.AGENT_DATA_COLLECTION_CONFIG;
+    else process.env.AGENT_DATA_COLLECTION_CONFIG = previousConfig;
+  };
   await fs.mkdir(dataDir);
   await fs.writeFile(path.join(dataDir, 'node-bin'), trustedNode + '\n', { mode: 0o644 });
   def = { id: 'cursor', displayName: 'Cursor', deployMode: 'hook',
@@ -322,15 +329,16 @@ describe('Cursor enterprise system registration', () => {
       ...def, hook: { ...def.hook!, events: [...def.hook!.events, 'sessionEnd'] },
     });
     const manager = new DeploymentManager({ dataDir, pilotDir });
-    await write(path.join(dataDir, 'config.json'), JSON.stringify({
+    const collectorPolicy = path.join(root, 'collector policy', 'policy.json');
+    const stalePolicy = path.join(dataDir, 'config.json');
+    await write(collectorPolicy, JSON.stringify({
       agents: { 'cursor-cli': { captureMessageContent: capture } },
     }));
-    expect((await manager.deployHookScope(target)).success).toBe(true);
-    const userPolicy = path.join(root, 'user-policy.json');
-    await write(userPolicy, JSON.stringify({
+    await write(stalePolicy, JSON.stringify({
       agents: { 'cursor-cli': { captureMessageContent: !capture } },
     }));
-    await write(path.join(dataDir, 'hooks', 'cursor-config-path'), userPolicy);
+    process.env.AGENT_DATA_COLLECTION_CONFIG = collectorPolicy;
+    expect((await manager.deployHookScope(target)).success).toBe(true);
 
     const home = path.join(root, 'identity-created-after-install');
     const session = 'headless-session';
@@ -343,7 +351,8 @@ describe('Cursor enterprise system registration', () => {
 
     const { hooks } = JSON.parse(await fs.readFile(target.hook!.settingsPath, 'utf8'));
     const result = spawnSync('/bin/bash', ['-c', hooks.sessionEnd[0].command], {
-      env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10_000,
+      env: { HOME: home, PATH: '/usr/bin:/bin', AGENT_DATA_COLLECTION_CONFIG: stalePolicy },
+      encoding: 'utf8', timeout: 10_000,
       input: JSON.stringify({
         hook_event_name: 'sessionEnd', session_id: session, conversation_id: session, generation_id: session,
         cursor_version: '2026.09.26-dd393fe', reason: 'completed', duration_ms: 100,
@@ -359,6 +368,26 @@ describe('Cursor enterprise system registration', () => {
     expect(output).toContain('llm.response');
     expect(output.includes('native user prompt')).toBe(capture);
     expect(output.includes('native assistant reply')).toBe(capture);
+    const journal = path.join(dataDir, 'state/cursor/event-journal.jsonl');
+    const prompt = 'system policy privacy regression marker';
+    const sendPrompt = (identity: string) => spawnSync('/bin/bash', ['-c', hooks.beforeSubmitPrompt[0].command], {
+      env: { HOME: home, PATH: '/usr/bin:/bin', AGENT_DATA_COLLECTION_CONFIG: stalePolicy, LOONGSUITE_CURSOR_RAW_TRACE: '1' },
+      encoding: 'utf8', timeout: 10_000,
+      input: JSON.stringify({
+        hook_event_name: 'beforeSubmitPrompt', conversation_id: identity, generation_id: identity,
+        cursor_version: '2026.09.26-dd393fe', prompt,
+      }),
+    });
+    expect(sendPrompt('explicit-policy').status).toBe(0);
+    expect((await fs.readFile(journal, 'utf8')).includes(prompt)).toBe(capture);
+    const raw = path.join(dataDir, 'logs/cursor/raw/cursor-raw-trace.jsonl');
+    expect((await fs.readFile(raw, 'utf8').catch(() => '')).includes(prompt)).toBe(capture);
+
+    await fs.unlink(collectorPolicy);
+    expect(sendPrompt('missing-policy').status).toBe(0);
+    const latest = JSON.parse((await fs.readFile(journal, 'utf8')).trim().split('\n').at(-1)!);
+    expect(latest).toMatchObject({ conversation_id: 'missing-policy', content_omitted: true });
+    expect(latest).not.toHaveProperty('prompt');
     await expect(fs.stat(path.join(home, '.loongsuite-pilot'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -399,6 +428,11 @@ describe('Cursor enterprise system registration', () => {
     await fs.chmod(pin, 0o666);
     await expectFailOpen();
     await fs.chmod(pin, 0o644);
+    const configPin = path.join(dataDir, 'hooks/cursor-system-config-path');
+    await fs.chmod(configPin, 0o666);
+    await expectFailOpen();
+    expect((await manager.repairHookSettings(def)).success).toBe(true);
+    expect((await fs.stat(configPin)).mode & 0o777).toBe(0o644);
     const config = path.join(dataDir, 'config.json');
     await write(config, '{}\n');
     await fs.chmod(config, 0o666);
