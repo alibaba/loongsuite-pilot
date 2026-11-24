@@ -258,6 +258,9 @@ describe('trae-cn hook processor', () => {
     const records = readEmittedJsonl();
     expect(records.filter(r => r['event.name'] !== 'other').map(r => r['event.name']))
       .toEqual(['llm.request', 'tool.call', 'tool.result', 'llm.response']);
+    const response = records.find(r => r['event.name'] === 'llm.response');
+    expect(response['agent.trae-cn.tool_call_ids']).toEqual(['t1']);
+    expect(response['gen_ai.output.messages']).toBeUndefined();
     expect(readOtlpDebugSpans().length).toBeGreaterThan(0);
   });
 

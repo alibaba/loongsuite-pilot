@@ -810,6 +810,11 @@ function llmResponseRecord(state, base, timestamp, lastAssistantMessage) {
     'agent.trae.stop_count': Number(state.stop_count || 0),
     'agent.trae.finish_reason_raw': 'stop',
   };
+  // Keep the Hub join keys available even when the content policy drops
+  // the assistant messages and tool arguments.
+  if (toolCallParts.length > 0) {
+    record['agent.trae-cn.tool_call_ids'] = toolCallParts.map(part => part.id);
+  }
   if (inputMessages) {
     record['gen_ai.input.messages'] = inputMessages;
     record['gen_ai.input.messages_hash'] = computeHash(INITIAL_HASH, inputMessages);

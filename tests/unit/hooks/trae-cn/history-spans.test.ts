@@ -140,7 +140,16 @@ it.each([
   llm.attributes['gen_ai.output.messages'] = JSON.stringify([{ role: 'assistant', parts: [
     { type: 'tool_call', name: 'Read', id: 'call_one' }, { type: 'text', content: 'report built' },
   ] }]);
-  const firstRound = { id: 'a'.repeat(24), at: '2000000000', request: 'unique', initial: true, toolIds: ['call_one'] };
+  Object.assign(llm.attributes, {
+    'gen_ai.usage.input_tokens': 20,
+    'gen_ai.usage.output_tokens': 5,
+    'gen_ai.usage.total_tokens': 25,
+    'agent.trae-cn.hub.total_tokens_observed': 25,
+  });
+  const firstRound = {
+    id: 'a'.repeat(24), at: '2000000000', request: 'unique', initial: true, toolIds: ['call_one'],
+    input: 12, output: 3,
+  };
   const terminalRounds = (shared ? ['b', 'c'] : ['b']).map(c => ({
     id: c.repeat(24), at: '3000000000', request: 'terminal', shared, continuation: 'unique', terminal: true, toolIds: [],
   }));
@@ -154,11 +163,19 @@ it.each([
   if (shared) {
     expect(finalModels[0]).toBe(llm);
     expect(llm.attributes['loongsuite.trae_cn.observation']).toBe('turn_summary');
+    expect(llm.attributes['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(llm.attributes['gen_ai.usage.output_tokens']).toBeUndefined();
+    expect(llm.attributes['gen_ai.usage.total_tokens']).toBeUndefined();
+    expect(llm.attributes['agent.trae-cn.hub.total_tokens_observed']).toBeUndefined();
   } else {
     expect(models).not.toContain(llm);
     expect(finalModels[0].attributes['gen_ai.response.id']).toBe(terminalRounds[0].id);
   }
-  expect(models.find(s => s.attributes['gen_ai.response.id'] === firstRound.id)?.parentSpanId).toBe(tool.parentSpanId);
+  const firstModel = models.find(s => s.attributes['gen_ai.response.id'] === firstRound.id);
+  expect(firstModel?.parentSpanId).toBe(tool.parentSpanId);
+  expect(firstModel?.attributes['gen_ai.usage.total_tokens']).toBe(15);
+  expect(agent.attributes['gen_ai.usage.total_tokens']).toBe(25);
+  expect(agent.attributes['agent.trae-cn.hub.total_tokens_observed']).toBe(25);
   expect(models.every(s => s.parentSpanId !== undefined &&
     result.some(parent => parent.spanContext().spanId === s.parentSpanId))).toBe(true);
 });

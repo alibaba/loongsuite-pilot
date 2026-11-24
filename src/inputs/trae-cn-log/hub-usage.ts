@@ -153,6 +153,12 @@ export class HubUsage {
   enrich(entry: AgentActivityEntry, native?: Pick<NativeUsageIndex, 'complete' | 'responses' | 'expectedSeqs'> & Partial<Pick<NativeUsageIndex, 'ownsTool'>>) {
     if (entry['event.name'] !== 'llm.response') return;
     const ids = new Set<string>();
+    const toolCallIds = entry['agent.trae-cn.tool_call_ids'];
+    delete entry['agent.trae-cn.tool_call_ids'];
+    if (Array.isArray(toolCallIds)) for (const id of toolCallIds) {
+      if (typeof id === 'string' && id.length > 0 && id.length <= 256) ids.add(id);
+    }
+    // Existing spool records can still use message parts for the same join.
     const messages = entry['gen_ai.output.messages'];
     if (Array.isArray(messages)) for (const msg of messages) {
       if (msg && typeof msg === 'object' && 'parts' in msg && Array.isArray(msg.parts)) {

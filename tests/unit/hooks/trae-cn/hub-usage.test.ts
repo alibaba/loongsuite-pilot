@@ -40,6 +40,16 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
     expect(e['gen_ai.usage.reasoning_tokens']).toBe(complete ? 3 : undefined);
     expect(e['gen_ai.usage.cache_creation.input_tokens']).toBe(complete ? 0 : undefined);
     expect(e['gen_ai.usage.total_tokens']).toBe(complete ? 405 : undefined);
+    const withoutContent = {
+      'event.name': 'llm.response',
+      'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_example'],
+    } as AgentActivityEntry;
+    hub.enrich(withoutContent);
+    expect(withoutContent['agent.trae-cn.hub.total_tokens_observed']).toBe(405);
+    expect(withoutContent['gen_ai.usage.total_tokens']).toBe(complete ? 405 : undefined);
+    expect(withoutContent['gen_ai.output.messages']).toBeUndefined();
+    expect(withoutContent['agent.trae-cn.tool_call_ids']).toBeUndefined();
     const partialHook = response('call_example');
     partialHook['gen_ai.usage.input_tokens'] = 400;
     hub.enrich(partialHook);

@@ -167,8 +167,12 @@ export function expandTraeHistory(records: AgentActivityEntry[], spans: Readable
     delete step.attributes['gen_ai.react.round'];
     step.attributes['loongsuite.trae_cn.observation'] = 'unattributed_tools';
   }
+  // The original LLM may survive as a turn summary. Move aggregate usage
+  // to the AGENT so consumers can sum measured model responses independently.
   for (const [key, value] of Object.entries(llm.attributes)) {
-    if (key.startsWith('gen_ai.usage.') || key.startsWith('agent.trae-cn.hub.')) agent.attributes[key] = value;
+    if (!key.startsWith('gen_ai.usage.') && !key.startsWith('agent.trae-cn.hub.')) continue;
+    agent.attributes[key] = value;
+    delete llm.attributes[key];
   }
   // Count the numeric receipts once at agent scope, including receipts for
   // model spans omitted for missing content. Coverage stays on the same span.
