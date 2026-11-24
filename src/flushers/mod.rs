@@ -25,6 +25,7 @@ mod sls_transport;
 mod span_enricher;
 mod span_id_reservation;
 mod trace_event_compat;
+mod trae_cn_history;
 mod turn_stream;
 
 pub(crate) use base_flusher::QuotaAlarm;

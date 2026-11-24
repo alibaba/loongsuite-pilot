@@ -27,6 +27,7 @@
     {"id":"qoder-work-cn","deployMode":"hook","extraScenarios":["replace-legacy-reference"]},
     {"id":"qwen-code-cli","deployMode":"hook","extraScenarios":[]},
     {"id":"qwen-work-cn","deployMode":"hook","extraScenarios":["interceptor-order-timeout"]},
+    {"id":"trae-cn","deployMode":"hook","extraScenarios":[]},
     {"id":"workbuddy","deployMode":"hook","extraScenarios":[]}
   ],
   "detectionScenarios": ["baseline", "status-read-only"],

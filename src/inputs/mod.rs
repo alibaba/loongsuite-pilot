@@ -64,6 +64,7 @@ pub mod pi_coding_agent_log;
 pub mod qwen_code_cli_log;
 #[path = "rest_support.rs"]
 pub mod rest_support;
+pub mod trae_cn_log;
 #[path = "workbuddy/mod.rs"]
 pub mod workbuddy;
 #[path = "wukong/mod.rs"]

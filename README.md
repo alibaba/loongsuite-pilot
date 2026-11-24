@@ -83,6 +83,7 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Qwen Code CLI | Hook | No | No | No | No |
 | Qwen Work CN | Hook / local data polling | No | No | No | No |
 | Wukong | CLI API polling | No | No | No | No |
+| TRAE CN | Native Hook / local session data | No | No | No | No |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | No | No | No | No |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | No | No | No | No |
 

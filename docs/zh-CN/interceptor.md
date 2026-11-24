@@ -190,3 +190,8 @@ CLI 不会自行拉起 HTTP 服务。runtime 缺失或连不上时立即 fail-op
 | 想打开拦截 | 确认 `config.json` 里 `"interceptor": { "mode": "all" }`后**重启 collector** |
 | stdout 被吃掉 | Windows 拦截 hook 禁止 `Out-Null`；不要复用采集 processor |
 | 端口冲突 | daemon 优先绑定 `127.0.0.1:18791`，占用则改绑 `0` 并把实际端口写入 runtime |
+
+
+### Qoder 提示裁决与采集事件关联
+
+先按会话、提示摘要、产品和原生请求 ID 精确关联。对于 Hook 明确缺失请求 ID 的 Qoder 记录，只有在五秒窗口内存在唯一候选时才允许绑定到采集到的原生请求。Hook 缺失产品字段时可与 Qoder IDE、CLI 或 App 匹配。安全拒绝、失败和仍在评估的候选不能被当成可靠裁决，也会参与歧义判断。归属随私有裁决检查点保留，因此续采时重复读取同一请求能够得到原结果。

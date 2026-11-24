@@ -49,6 +49,7 @@ str_enum!(ClientType {
     QwenWorkCN = "qwen-work-cn",
     Kiro = "kiro",
     KiroCli = "kiro-cli",
+    TraeCn = "trae-cn",
     Antigravity = "antigravity",
     AntigravityCli = "antigravity-cli",
     Lingma = "lingma",

@@ -18,6 +18,7 @@ mod qoder_wakeup;
 mod qoder_work;
 mod qwen_code_cli;
 mod qwen_work_cn;
+pub(crate) mod trae_cn;
 mod workbuddy;
 
 pub use qoder::{
@@ -57,14 +58,17 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
-        if bounded_qoder {
+        if bounded_qoder || agent == "trae-cn" {
+            let limit = if bounded_qoder {
+                1024 * 1024
+            } else {
+                4 * 1024 * 1024
+            };
             let (send, receive) = std::sync::mpsc::sync_channel(1);
             std::thread::spawn(move || {
                 let mut payload = Vec::new();
-                let result = std::io::stdin()
-                    .take(1024 * 1024 + 1)
-                    .read_to_end(&mut payload);
-                let _ = send.send(if result.is_ok() && payload.len() <= 1024 * 1024 {
+                let result = std::io::stdin().take(limit + 1).read_to_end(&mut payload);
+                let _ = send.send(if result.is_ok() && payload.len() as u64 <= limit {
                     payload
                 } else {
                     Vec::new()
@@ -175,6 +179,7 @@ pub(crate) fn dispatch(
         "grok-build" => grok_build::run(&mut request),
         "qoder" | "qoder-cn" => qoder::run(&mut request),
         "kiro-cli" => kiro_cli::run(&mut request),
+        "trae-cn" => trae_cn::run(&mut request),
         "qoderwork" | "qoder-work" | "qoder-work-cn" => qoder_work::run(&mut request),
         "workbuddy" => workbuddy::run(&mut request),
         _ => {

@@ -7,7 +7,7 @@
 //! }
 //! ```
 
-use super::prompt_verdict::{PromptKey, PromptLookup, MATCH_WINDOW_MS};
+use super::prompt_verdict::{is_qoder, valid_digest, PromptKey, PromptLookup, MATCH_WINDOW_MS};
 use crate::interceptor::types::HookEventName;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,7 @@ use std::time::Duration;
 
 pub const TOOL_VERDICT_TTL_MS: i64 = 30 * 60 * 1000;
 pub const TOOL_VERDICT_CHECKPOINT_INTERVAL_MS: u64 = 15_000;
+const TOOL_VERDICT_MAX_RECORDS: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolVerdictAction {
@@ -190,9 +191,37 @@ struct StoredVerdict {
     recorded_at_ms: i64,
 }
 
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptBinding {
+    request_id: String,
+    agent_type: String,
+    at: i64,
+}
+
+impl PromptBinding {
+    fn matches(&self, request_id: &str, agent_type: &str) -> bool {
+        self.request_id == request_id && self.agent_type == agent_type
+    }
+}
+
+struct StoredPrompt {
+    recorded_at: i64,
+    guardrail: Option<GuardrailMetadata>,
+    binding: Option<PromptBinding>,
+}
+
+impl StoredPrompt {
+    fn observable(&self) -> Option<&GuardrailMetadata> {
+        self.guardrail
+            .as_ref()
+            .filter(|guardrail| guardrail.action != Some(crate::types::GuardrailAction::Block))
+    }
+}
+
 struct StoreInner {
     tool_verdicts: IndexMap<String, StoredVerdict>,
-    prompt_verdicts: IndexMap<PromptKey, (i64, Option<GuardrailMetadata>)>,
+    prompt_verdicts: IndexMap<PromptKey, StoredPrompt>,
     checkpoint_path: PathBuf,
 }
 
@@ -296,9 +325,26 @@ impl ToolVerdictStore {
             return;
         }
         let mut inner = self.inner.lock().expect("verdict store");
-        inner.prompt_verdicts.shift_remove(&key);
-        inner.prompt_verdicts.insert(key, (now_ms, value));
-        if inner.prompt_verdicts.len() > 10_000 {
+        if inner.prompt_verdicts.get(&key).is_some_and(|old| {
+            old.recorded_at > now_ms
+                || (old.recorded_at == now_ms && old.guardrail.is_some() && value.is_none())
+        }) {
+            return;
+        }
+        let binding = inner
+            .prompt_verdicts
+            .shift_remove(&key)
+            .filter(|old| old.recorded_at == now_ms)
+            .and_then(|old| old.binding);
+        inner.prompt_verdicts.insert(
+            key,
+            StoredPrompt {
+                recorded_at: now_ms,
+                guardrail: value,
+                binding,
+            },
+        );
+        if inner.prompt_verdicts.len() > TOOL_VERDICT_MAX_RECORDS {
             inner.prompt_verdicts.shift_remove_index(0);
         }
     }
@@ -308,35 +354,75 @@ impl ToolVerdictStore {
         lookup: PromptLookup,
         now_ms: i64,
     ) -> Option<GuardrailMetadata> {
-        let inner = self.inner.lock().expect("verdict store");
+        let mut inner = self.inner.lock().expect("verdict store");
         let fresh = |at: i64| now_ms.saturating_sub(at) <= TOOL_VERDICT_TTL_MS;
-        let stored = if let Some(request_id) = lookup.request_id {
-            inner.prompt_verdicts.get(&PromptKey {
-                session_id: lookup.session_id,
+        let request_id = lookup.request_id.as_deref();
+        if let Some(id) = request_id {
+            let exact = PromptKey {
+                session_id: lookup.session_id.clone(),
                 agent_type: lookup.agent_type.into(),
-                prompt_hash: lookup.prompt_hash,
-                request_id,
-            })?
-        } else {
-            let mut matching = inner.prompt_verdicts.iter().filter(|(key, (recorded, _))| {
-                fresh(*recorded)
-                    && recorded.abs_diff(lookup.at) <= MATCH_WINDOW_MS
-                    && key.session_id == lookup.session_id
-                    && key.agent_type == lookup.agent_type
-                    && key.prompt_hash == lookup.prompt_hash
-            });
-            let (_, first) = matching.next()?;
-            if matching.next().is_some() {
+                prompt_hash: lookup.prompt_hash.clone(),
+                request_id: id.into(),
+                missing_request_id: false,
+                missing_agent_type: false,
+            };
+            if let Some(stored) = inner.prompt_verdicts.get(&exact) {
+                return stored
+                    .observable()
+                    .filter(|_| fresh(stored.recorded_at))
+                    .cloned();
+            }
+        }
+        let candidates = inner
+            .prompt_verdicts
+            .iter()
+            .enumerate()
+            .filter(|(_, (key, stored))| fresh(stored.recorded_at) && key.matches_source(&lookup));
+        let mut exact = None;
+        let mut nearby = None;
+        let mut ambiguous = false;
+        for (index, (key, stored)) in candidates {
+            if request_id.is_some_and(|id| {
+                key.request_id == id
+                    || stored
+                        .binding
+                        .as_ref()
+                        .is_some_and(|binding| binding.matches(id, lookup.agent_type))
+            }) && exact.replace(stored).is_some()
+            {
                 return None;
             }
-            first
-        };
-        if !fresh(stored.0)
-            || stored.1.as_ref()?.action == Some(crate::types::GuardrailAction::Block)
-        {
+            if stored.recorded_at.abs_diff(lookup.at) > MATCH_WINDOW_MS
+                || request_id.is_some_and(|id| {
+                    stored
+                        .binding
+                        .as_ref()
+                        .is_some_and(|binding| !binding.matches(id, lookup.agent_type))
+                })
+            {
+                continue;
+            }
+            ambiguous |= nearby.replace(index).is_some();
+        }
+        if let Some(stored) = exact {
+            return stored.observable().cloned();
+        }
+        if ambiguous {
             return None;
         }
-        stored.1.clone()
+        let (key, stored) = inner.prompt_verdicts.get_index_mut(nearby?)?;
+        if stored.binding.is_some() || (request_id.is_some() && !key.missing_request_id) {
+            return None;
+        }
+        let result = stored.observable()?.clone();
+        if let Some(id) = request_id {
+            stored.binding = Some(PromptBinding {
+                request_id: id.into(),
+                agent_type: lookup.agent_type.into(),
+                at: lookup.at,
+            });
+        }
+        Some(result)
     }
 
     pub fn restore(&self, now_ms: i64) {
@@ -371,10 +457,33 @@ impl ToolVerdictStore {
                         } else {
                             serde_json::from_value::<GuardrailMetadata>(item.clone()).ok()
                         };
-                        if inner.prompt_verdicts.len() == 10_000 {
+                        if inner.prompt_verdicts.len() == TOOL_VERDICT_MAX_RECORDS {
                             inner.prompt_verdicts.shift_remove_index(0);
                         }
-                        inner.prompt_verdicts.insert(key, (recorded, snapshot));
+                        let binding = item
+                            .get("binding")
+                            .and_then(|row| {
+                                serde_json::from_value::<PromptBinding>(row.clone()).ok()
+                            })
+                            .filter(|binding| {
+                                key.missing_request_id
+                                    && is_qoder(&binding.agent_type)
+                                    && (key.missing_agent_type
+                                        || binding.agent_type == key.agent_type)
+                                    && valid_digest(&binding.request_id)
+                                    && binding.at.abs_diff(recorded) <= MATCH_WINDOW_MS
+                            });
+                        if item.get("binding").is_some() && binding.is_none() {
+                            continue;
+                        }
+                        inner.prompt_verdicts.insert(
+                            key,
+                            StoredPrompt {
+                                recorded_at: recorded,
+                                guardrail: snapshot,
+                                binding,
+                            },
+                        );
                     }
                 }
                 continue;
@@ -424,14 +533,17 @@ impl ToolVerdictStore {
                 recorded_at: iso_from_millis(value.recorded_at_ms),
             })?);
         }
-        for (key, (at, snapshot)) in &inner.prompt_verdicts {
-            if now_ms.saturating_sub(*at) > TOOL_VERDICT_TTL_MS {
+        for (key, stored) in &inner.prompt_verdicts {
+            if now_ms.saturating_sub(stored.recorded_at) > TOOL_VERDICT_TTL_MS {
                 continue;
             }
             let mut row = serde_json::to_value(key)?;
             row["phase"] = Value::from("UserPromptSubmit");
-            row["recordedAt"] = Value::from(iso_from_millis(*at));
-            let fields = snapshot.as_ref().map_or_else(
+            row["recordedAt"] = Value::from(iso_from_millis(stored.recorded_at));
+            if let Some(binding) = &stored.binding {
+                row["binding"] = serde_json::to_value(binding)?;
+            }
+            let fields = stored.guardrail.as_ref().map_or_else(
                 || Ok(serde_json::json!({"action":"unknown"})),
                 serde_json::to_value,
             )?;

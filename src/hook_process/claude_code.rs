@@ -35,6 +35,14 @@ const INITIAL_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb924";
 const MAX_TRANSCRIPT_BYTES: u64 = 50 * 1024 * 1024;
 
 pub fn run(request: &mut HookRequest<'_>) -> i32 {
+    if request
+        .env
+        .get("TRAE_PROJECT_DIR")
+        .is_some_and(|value| !value.is_empty())
+    {
+        write_empty(request.stdout);
+        return 0;
+    }
     let subcommand = request
         .args
         .first()

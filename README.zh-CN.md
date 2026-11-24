@@ -81,6 +81,7 @@ Pilot 主要帮助回答这些问题：
 | Qwen Code CLI | Hook | No | No | No | No |
 | Qwen Work CN | Hook / 本地数据轮询 | No | No | No | No |
 | Wukong | CLI API 轮询 | No | No | No | No |
+| TRAE CN | 原生 Hook / 本地会话数据 | No | No | No | No |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | No | No | No | No |
 | [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | No | No | No | No |
 

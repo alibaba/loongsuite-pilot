@@ -1980,8 +1980,9 @@ impl OtlpInner {
                 crate::normalization::agent_content_policy::strip_agent_message_content(record);
             }
         }
+        // TRAE native rounds reparent spans after the entire turn is available.
         if converter.supports_streaming()
-            && !matches!(agent_type, "doubao" | "doubao-work")
+            && !matches!(agent_type, "doubao" | "doubao-work" | "trae-cn")
             && !(agent_type == "qwen-code-cli"
                 && sanitized.iter().any(|record| {
                     record.get("gen_ai.agent.scope").and_then(Value::as_str) == Some("subagent")
@@ -2866,6 +2867,8 @@ fn route_convert(
         convert_delegated_turn(records, &options, converter)
     } else if matches!(agent_type, "antigravity" | "antigravity-cli") {
         convert_antigravity(records, &options, converter)
+    } else if agent_type == "trae-cn" {
+        super::trae_cn_history::convert(records, &options, converter)
     } else if agent_type == "copilot" {
         let mut result = converter.convert(records, &options)?;
         if let Some(error) = records

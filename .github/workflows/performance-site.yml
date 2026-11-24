@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 60
     permissions:
       contents: read
+      actions: read
       pages: write
       id-token: write
     environment:
@@ -54,9 +55,31 @@ jobs:
         if: steps.tip.outputs.current == 'true'
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         if: steps.tip.outputs.current == 'true'
+        id: upload
         with:
           name: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/site
+      - name: Wait for the uploaded Pages artifact
+        if: steps.tip.outputs.current == 'true'
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ steps.upload.outputs.artifact_id }}
+          ARTIFACT_NAME: github-pages-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
+          # The upload can return before the artifact becomes visible to the deploy action.
+          for attempt in {1..12}; do
+            sleep 5
+            if name=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID" \
+              --jq 'select(.expired == false and .size_in_bytes > 0) | .name') &&
+              [[ "$name" = "$ARTIFACT_NAME" ]]; then
+              exit 0
+            fi
+          done
+          echo "::error::Pages artifact $ARTIFACT_ID did not become visible"
+          exit 1
       - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
         if: steps.tip.outputs.current == 'true'
         id: deployment

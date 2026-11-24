@@ -488,12 +488,12 @@ mod tests {
     }
 
     #[test]
-    fn fixed_six_platform_matrix_has_150_baselines_plus_required_scenarios() {
+    fn fixed_six_platform_matrix_has_156_baselines_plus_required_scenarios() {
         let matrix = Matrix::load(root()).unwrap();
         let (index, reports) = fixtures(&matrix);
         let summary = matrix.validate(&index, &reports, &index.commit).unwrap();
-        assert_eq!(summary["baselineResults"], 150);
-        assert!(summary["scenarioResults"].as_u64().unwrap() > 150);
+        assert_eq!(summary["baselineResults"], 156);
+        assert!(summary["scenarioResults"].as_u64().unwrap() > 156);
         assert_eq!(summary["noInjection"][0]["id"], "wukong");
     }
 

@@ -14,6 +14,10 @@ pub(crate) struct PromptKey {
     pub agent_type: String,
     pub prompt_hash: String,
     pub request_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_request_id: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub missing_agent_type: bool,
 }
 
 pub(crate) struct PromptLookup {
@@ -28,7 +32,7 @@ pub(crate) fn digest(text: &str) -> String {
     hex::encode(Sha256::digest(text))
 }
 
-fn valid_digest(text: &str) -> bool {
+pub(super) fn valid_digest(text: &str) -> bool {
     text.len() == 64
         && text
             .bytes()
@@ -46,6 +50,10 @@ fn prompt_agent(agent: &str) -> Option<&'static str> {
     })
 }
 
+pub(super) fn is_qoder(agent: &str) -> bool {
+    matches!(agent, "qoder" | "qoder-cli" | "qoder-app")
+}
+
 impl PromptKey {
     pub(crate) fn for_request(request: &HookRequest) -> Option<Self> {
         if request.event != HookEventName::UserPromptSubmit {
@@ -53,20 +61,19 @@ impl PromptKey {
         }
         let session = request.session_id.as_deref().filter(|s| !s.is_empty())?;
         let text = request.prompt.as_deref().filter(|s| !s.is_empty())?;
-        let mut product = request.agent.as_str();
-        if matches!(product, "qoder" | "qodercli")
-            && request
-                .raw
-                .get("parent_business_info")
-                .and_then(|value| value["product"].as_str())
-                == Some("app")
-        {
-            product = "qoder-app";
-        }
-        let agent = prompt_agent(product)?;
-        let request_id = request
+        let source = request.agent.as_str();
+        let product = request
             .raw
-            .get("request_set_id")
+            .get("parent_business_info")
+            .and_then(|value| value.get("product"));
+        let qoder = matches!(source, "qoder" | "qodercli" | "qoder-cli");
+        let agent = prompt_agent(match (qoder, product.and_then(Value::as_str)) {
+            (true, Some("cli")) => "qoder-cli",
+            (true, Some("app")) => "qoder-app",
+            _ => source,
+        })?;
+        let raw_id = request.raw.get("request_set_id");
+        let request_id = raw_id
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty() && id.len() <= 512)
             .map_or_else(|| uuid::Uuid::new_v4().to_string(), digest);
@@ -75,12 +82,23 @@ impl PromptKey {
             agent_type: agent.into(),
             prompt_hash: digest(text),
             request_id,
+            missing_request_id: qoder && raw_id.is_none(),
+            missing_agent_type: source == "qoder" && product.is_none(),
         })
+    }
+
+    pub(super) fn matches_source(&self, lookup: &PromptLookup) -> bool {
+        self.session_id == lookup.session_id
+            && self.prompt_hash == lookup.prompt_hash
+            && (self.agent_type == lookup.agent_type
+                || (self.missing_agent_type && is_qoder(lookup.agent_type)))
     }
 
     pub(super) fn valid(&self) -> bool {
         !self.session_id.is_empty()
             && prompt_agent(&self.agent_type).is_some()
+            && (!self.missing_request_id || is_qoder(&self.agent_type))
+            && (!self.missing_agent_type || self.agent_type == "qoder")
             && valid_digest(&self.prompt_hash)
             && (valid_digest(&self.request_id) || uuid::Uuid::parse_str(&self.request_id).is_ok())
     }
@@ -178,6 +196,93 @@ mod tests {
     use crate::interceptor::{GuardrailMetadata, ToolVerdictStore};
 
     #[test]
+    fn missing_qoder_metadata_binds_once_and_keeps_ownership_after_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("verdicts.json");
+        let at = 1_795_168_801_000;
+        let store = ToolVerdictStore::new(&path);
+        let key = PromptKey {
+            session_id: "shared".into(),
+            agent_type: "qoder".into(),
+            prompt_hash: digest("duplicate wording"),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            missing_request_id: true,
+            missing_agent_type: true,
+        };
+        let verdict = GuardrailMetadata::from_verdict(&json!({
+            "action":"allow","matched":true,"ruleId":"test"
+        }));
+        let lookup = |request_id: &str, agent_type, delta| PromptLookup {
+            session_id: key.session_id.clone(),
+            agent_type,
+            prompt_hash: key.prompt_hash.clone(),
+            request_id: Some(digest(request_id)),
+            at: at + delta,
+        };
+        store.put_prompt(key.clone(), Some(verdict.clone()), at);
+        let unresolved = PromptKey {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            ..key.clone()
+        };
+        store.put_prompt(unresolved, None, at + 200);
+        assert!(store
+            .get_prompt(lookup("first", "qoder-cli", 0), at + 200)
+            .is_none());
+        // The pending attempt is outside a nearby join by the time the first request is observed.
+        assert_eq!(
+            store.get_prompt(lookup("first", "qoder-cli", -4900), at + 200),
+            Some(verdict.clone())
+        );
+        assert!(store
+            .get_prompt(lookup("other", "qoder-app", -4900), at + 200)
+            .is_none());
+        store.stop_checkpoint_loop(at + 300).unwrap();
+        let restored = ToolVerdictStore::new(path);
+        restored.restore(at + 350);
+        assert_eq!(
+            restored.get_prompt(lookup("first", "qoder-cli", 7000), at + 350),
+            Some(verdict)
+        );
+        assert!(restored
+            .get_prompt(lookup("other", "qoder-cli", -4900), at + 350)
+            .is_none());
+    }
+
+    #[test]
+    fn historical_uuid_without_missing_metadata_never_binds_an_explicit_native_id() {
+        let root = tempfile::tempdir().unwrap();
+        let store = ToolVerdictStore::new(root.path().join("verdicts.json"));
+        let at = 1_795_168_801_000;
+        let key = PromptKey {
+            session_id: "shared".into(),
+            agent_type: "qoder-cli".into(),
+            prompt_hash: digest("duplicate wording"),
+            request_id: uuid::Uuid::new_v4().to_string(),
+            missing_request_id: false,
+            missing_agent_type: false,
+        };
+        store.put_prompt(
+            key.clone(),
+            Some(GuardrailMetadata::from_verdict(&json!({
+                "action":"allow","matched":true,"ruleId":"test"
+            }))),
+            at,
+        );
+        assert!(store
+            .get_prompt(
+                PromptLookup {
+                    session_id: key.session_id,
+                    agent_type: "qoder-cli",
+                    prompt_hash: key.prompt_hash,
+                    request_id: Some(digest("unknown request")),
+                    at,
+                },
+                at
+            )
+            .is_none());
+    }
+
+    #[test]
     fn exact_prompt_identity_survives_restart_and_ambiguous_text_stays_unlinked() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("verdicts.json");
@@ -187,6 +292,8 @@ mod tests {
             agent_type: "qoder-cli".into(),
             prompt_hash: digest("same prompt"),
             request_id: digest("real-request"),
+            missing_request_id: false,
+            missing_agent_type: false,
         };
         let store = ToolVerdictStore::new(&path);
         let verdict = GuardrailMetadata::from_verdict(&json!({
