@@ -294,21 +294,35 @@ export async function startInterceptorWorker(opts: InterceptorWorkerOptions): Pr
         if (retryTimer) clearTimeout(retryTimer);
         retryTimer = null;
         const current = worker;
-        if (!current) {
-          await Promise.all(retiring);
-          await eventSink.close();
-          return;
-        }
-        try {
-          await command('stop', 5000);
-        } finally {
+        const errors: unknown[] = [];
+        if (current) {
+          try { await command('stop', 5000); }
+          catch (error) { errors.push(error); }
           if (!finalStatusReceived) cachedStatus = { ...cachedStatus, collection_status: 'unavailable' };
-          // terminate also closes an HTTP listener stuck in a slow request/shutdown.
-          await current.terminate();
-          await Promise.all(retiring);
-          await eventSink.close();
-          failPending(new Error('interceptor worker stopped'));
         }
+        let writerExited = false;
+        try {
+          // An absent worker has already emitted exit. A present writer must
+          // finish termination before the collector may take over its checkpoint.
+          if (current) await current.terminate();
+          writerExited = true;
+        } catch (error) { errors.push(error); }
+        try { await Promise.all(retiring); }
+        catch (error) { writerExited = false; errors.push(error); }
+        try { await eventSink.close(); }
+        catch (error) { errors.push(error); }
+        failPending(new Error('interceptor worker stopped'));
+        mirror.onPromptBinding = undefined;
+        if (writerExited) {
+          try {
+            // Runtime has one Worker writer. After all writers exit, normal
+            // shutdown takes exclusive ownership so bindings made during a
+            // restart gap (or not acknowledged by the old writer) also survive.
+            await mirror.checkpointAfterWriterExit();
+          } catch (error) { errors.push(error); }
+        }
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) throw new AggregateError(errors, 'interceptor shutdown failed');
       })();
       return stopPromise;
     },

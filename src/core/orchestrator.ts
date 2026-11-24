@@ -603,7 +603,7 @@ export class Orchestrator extends EventEmitter {
       this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
       logger.warn('final interceptor status unavailable');
     }
-    // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
+    // The runtime writer has exited; stop has also saved any unconfirmed mirror bindings.
     this.interceptorService = null;
     this.verdictStore = null;
     // The final dataflow window must observe the last serialized collect and

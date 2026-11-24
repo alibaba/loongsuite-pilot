@@ -63,7 +63,7 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）。单个文件超过 10MB 时切到 `access.log.1` … `access.log.5`，更旧的丢弃。
-- 裁决缓存：工具按 `session id + tool call id + phase` 关联；放行的提示词关联原生 `llm.request`（见下方“提示词关联与 Agent 身份”），缓存不保存提示词正文。两类裁决共用最近 30 分钟、最多 10000 条的容量（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。Worker 是唯一写入者，主线程镜像负责采集关联（输出字段见 [输出事件 Schema](output-event-schema.md)）。
+- 裁决缓存：工具按 `session id + tool call id + phase` 关联；放行的提示词关联原生 `llm.request`（见下方“提示词关联与 Agent 身份”），缓存不保存提示词正文。两类裁决共用最近 30 分钟、最多 10000 条的容量（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。运行期间 Worker 是唯一写入者，主线程镜像负责采集关联（输出字段见 [输出事件 Schema](output-event-schema.md)）。
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/worker.cjs`；`dist/interceptor/daemon.cjs` 保留为独立兼容入口，collector 不再直接调用它。
 - 规则开关：`config.json` 的 `interceptor.mode` 在 collector **启动时读一次**；`configs/managed/interceptor.json` 的本地规则每 3 秒热更新（见 [本地文件规则](#本地文件规则)）
 
@@ -357,6 +357,8 @@ Hook 的 `parent_business_info.product=app` 时，Qoder 被拒 Prompt 使用 `qo
 提示词关联使用 session、提示词 SHA-256 摘要及请求身份。有可比较的请求 ID 时优先精确匹配；原生 `requestSetId` 和 Hook `request_set_id` 均只传递 SHA-256 摘要，私有关联字段在输出前移除，不改写 `gen_ai.request.id`。两侧都有明确 ID 且不相同时，不回退到其他请求。
 
 新收到的 Qoder Hook 缺少请求 ID 时，缓存会显式记录缺失来源；原生事件即使有 ID，也只能在同 session、兼容产品、同提示词摘要、原生提示词时间前后 5 秒内寻找唯一候选。旧记录不会仅因 ID 看起来像 UUID 就被视为缺失身份。规则执行前登记的检查中、失败和阻断尝试也参与歧义判断。首次成功关联后，匿名裁决绑定到该原生请求，重复输出可重用，其他请求不能复用；绑定通过 IPC 回传唯一写入者并随 checkpoint 恢复。存在歧义时不回填。
+
+正常停机时，collector 先确认所有 Worker 写入者已经退出并排空已接收输出，再独占接管 checkpoint。镜像含提示词绑定时，会异步读取最新磁盘记录、合并镜像并原子保存，保留旧 Worker 已落盘而镜像尚未收到的记录，也覆盖 Worker 崩溃后、重启前才创建的绑定。未确认 Worker 退出时禁止接管；读取、校验或写入失败会使停机操作报错，不会静默丢弃绑定。
 
 如果提示词在提交前被阻止，且 Hook 未提供产品信息，就没有原生提示词或后续 Stop 上下文可用于证明 App/CLI。此时合成阻断事件仍使用既有 `qoder-cli` 回退类型，不能据此认定具体产品；明确 `product=app` 时才使用 `qoder-app`。
 

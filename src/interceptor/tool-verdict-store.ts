@@ -158,6 +158,35 @@ export class ToolVerdictStore {
     this.persistedRevision = this.revision;
   }
 
+  /** Caller must confirm every previous checkpoint writer has exited. */
+  async checkpointAfterWriterExit(): Promise<void> {
+    const records = this.records();
+    if (!records.some(record => 'binding' in record && record.binding)) return;
+    const finalWriter = new ToolVerdictStore(this.checkpointPath);
+    await finalWriter.mergeCheckpoint();
+    finalWriter.merge(records);
+    await finalWriter.checkpoint();
+  }
+
+  /** Import the last writer's checkpoint during an exclusive shutdown handoff.
+   * Unlike best-effort startup restore, unreadable/corrupt data must not be overwritten.
+   */
+  private async mergeCheckpoint(now = new Date()): Promise<void> {
+    let text: string;
+    try {
+      text = await fsp.readFile(this.checkpointPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const body = JSON.parse(text) as { schema?: unknown; records?: unknown } | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || body.schema !== 1 || !Array.isArray(body.records) || body.records.some(record => !parseRecord(record))) {
+      throw new Error('invalid interceptor verdict checkpoint during shutdown');
+    }
+    this.mergeRecords(body.records, now.getTime());
+  }
+
   records(now = new Date()): InterceptorVerdictRecord[] {
     this.prune(now.getTime());
     return Array.from(this.toolVerdicts, ([key, value]) => ({
@@ -215,7 +244,7 @@ export class ToolVerdictStore {
     this.merge(bindings);
   }
 
-  /** Serialized, dirty-only asynchronous checkpoint; the worker owns the file. */
+  /** Serialized, dirty-only checkpoint; callers must hold exclusive writer ownership. */
   checkpoint(): Promise<void> {
     if (this.checkpointPromise) return this.checkpointPromise;
     this.checkpointPromise = (async () => {
