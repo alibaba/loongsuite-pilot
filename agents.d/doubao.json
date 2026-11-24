@@ -1,6 +1,6 @@
 {
   "id": "doubao",
-  "displayName": "Doubao App work mode (experimental)",
+  "displayName": "Doubao App (experimental)",
   "deployMode": "detection-only",
   "detection": {
     "paths": ["$DOUBAO_APP_LOG_DIR"],

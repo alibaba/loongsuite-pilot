@@ -18,6 +18,7 @@ import {
   ensureDir,
 } from '../utils/fs-utils.js';
 import { detectAgent } from './detect-utils.js';
+import { reconcileQoderTokenUsageDefaults } from './qoder-token-usage.js';
 import { createLogger } from '../utils/logger.js';
 import { INTERCEPTOR_EVENT_TIMEOUT_SEC } from '../interceptor/types.js';
 import {
@@ -187,7 +188,7 @@ export class HookStrategy implements DeployStrategy {
     if (await this.needsTrustRepairForCodex(def)) {
       return true;
     }
-    return false;
+    return reconcileQoderTokenUsageDefaults(def, false);
   }
 
   private isTomlAgent(def: AgentDefinition): boolean {
@@ -390,6 +391,8 @@ export class HookStrategy implements DeployStrategy {
           }
         }
       }
+
+      await reconcileQoderTokenUsageDefaults(def, true);
 
       logger.info('hooks deployed', { agentId: def.id, events: hookConfig.events.length });
 
