@@ -116,6 +116,7 @@ fn fixture(root: &Path) -> PathBuf {
     for file in [
         "qwen-code-cli-loongsuite-pilot-hook.sh",
         "qwen-code-cli-loongsuite-pilot-hook.ps1",
+        "trae-cn-loongsuite-pilot-hook.sh",
         "shared/native.sh",
         "shared/native.ps1",
     ] {
@@ -187,6 +188,62 @@ fn shell_preserves_raw_bom_unicode_and_bound_install_without_runtimes() {
         &hooks,
         &hooks.join("qwen-code-cli-loongsuite-pilot-hook.sh"),
         "stop",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn trae_native_wrapper_emits_one_turn_with_paired_tools() {
+    let root = tempfile::tempdir().unwrap();
+    let hooks = fixture(root.path());
+    let script = hooks.join("trae-cn-loongsuite-pilot-hook.sh");
+    let fixtures = workspace().join("tests/unit/hooks/trae-cn/fixtures");
+    for event in [
+        "user-prompt-submit",
+        "pre-tool-use",
+        "post-tool-use",
+        "stop",
+    ] {
+        let mut command = Command::new("/bin/bash");
+        command.arg(&script).arg(event);
+        let payload = fs::read(fixtures.join(format!("{event}.json"))).unwrap();
+        let output = execute(command, root.path(), &payload);
+        assert!(
+            output.status.success() && output.stderr.is_empty(),
+            "{event}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "{}");
+    }
+
+    let logs = hooks.parent().unwrap().join("logs/trae-cn/history");
+    let records: Vec<Value> = fs::read_dir(logs)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+        .flat_map(|path| {
+            fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect::<Vec<Value>>()
+        })
+        .filter(|record: &Value| record["event.name"] != "other")
+        .collect();
+    let events: Vec<_> = records
+        .iter()
+        .map(|row| row["event.name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        events,
+        ["llm.request", "tool.call", "tool.result", "llm.response"]
+    );
+    assert!(records
+        .iter()
+        .all(|record| record["gen_ai.turn.id"] == records[0]["gen_ai.turn.id"]));
+    assert_eq!(
+        records[1]["gen_ai.tool.call.id"],
+        records[2]["gen_ai.tool.call.id"]
     );
 }
 

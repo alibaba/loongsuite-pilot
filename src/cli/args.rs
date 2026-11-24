@@ -104,6 +104,7 @@ pub(crate) fn command() -> Command {
                     "qoder",
                     "qoder-cn",
                     "kiro-cli",
+                    "trae-cn",
                     "qoderwork",
                     "qoder-work",
                     "qoder-work-cn",

@@ -1001,11 +1001,23 @@ fn packaged_trae_native_hooks_preserve_foreign_handlers_on_reinstall_and_cleanup
         "{}",
         String::from_utf8_lossy(&status.stdout)
     );
-    let removed = run("uninstall");
+    let removed = invoke(
+        &binary,
+        &root,
+        &[
+            "installer-helper",
+            "cleanup-agents",
+            "--data-dir",
+            root.join("data").to_str().unwrap(),
+            "--pilot-dir",
+            package.to_str().unwrap(),
+        ],
+    );
     assert!(
         removed.status.success(),
-        "{}",
-        String::from_utf8_lossy(&removed.stdout)
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
     );
     let remaining: Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
     assert_eq!(remaining, existing);
