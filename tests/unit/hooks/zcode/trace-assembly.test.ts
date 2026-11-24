@@ -135,17 +135,41 @@ it('releases a hook-only turn without suppressing subsequent rollout', async () 
   await vi.waitFor(() => expect(spansOf('LLM')).toHaveLength(4));
 });
 
-it('does not seal a turn when a failed attempt arrives after its hook and before a retry', async () => {
+it('exports an explicit cancellation with no Stop hook and no fabricated usage', async () => {
+  const last = lines.at(-1)!;
+  const cancelled = {
+    ...last, requestId: 'cancelled-model-attempt',
+    error: { name: 'Error', message: 'CLI received SIGINT' },
+    response: { toolCalls: [] },
+  };
+  const records = input.buildEntriesFromRolloutLines([cancelled]);
+  const response = records.find(record => record['event.name'] === 'llm.response');
+  expect(response?.['gen_ai.response.finish_reasons']).toEqual(['cancelled']);
+  expect(response?.['gen_ai.usage.total_tokens']).toBeUndefined();
+  await flusher.sendBatch(records);
+  await vi.advanceTimersByTimeAsync(1_000);
+  await vi.waitFor(() => expect(spansOf('LLM')).toHaveLength(1));
+  expect(spansOf('LLM')[0]?.status.code).toBe(2);
+  expect(spansOf('LLM')[0]?.attributes['error.type']).toBe('zcode.model_cancelled');
+});
+
+it('keeps the turn open after a native connection failure and retains the successful retry', async () => {
   const last = lines.at(-1)!;
   const failed = {
-    ...last, requestId: 'failed-attempt', response: { ...(last.response as object), finishReason: 'error' },
+    ...last, requestId: 'failed-attempt',
+    error: { name: 'TypeError', message: 'terminated' }, response: { toolCalls: [] },
   };
+  const failedRecords = input.buildEntriesFromRolloutLines([failed]);
+  expect(failedRecords.find(record => record['event.name'] === 'llm.response')
+    ?.['gen_ai.response.finish_reasons']).toEqual(['error']);
   await flusher.sendBatch(envelope());
-  await flusher.sendBatch(input.buildEntriesFromRolloutLines([failed]));
+  await flusher.sendBatch(failedRecords);
   expect(spans).toHaveLength(0);
   await flusher.sendBatch(input.buildEntriesFromRolloutLines(lines));
   expect(spansOf('LLM')).toHaveLength(5);
   expect(spansOf('TOOL')).toHaveLength(3);
+  expect(spansOf('LLM').filter(span => span.status.code === 2).map(span => span.attributes['error.type']))
+    .toEqual(['zcode.model_error']);
 });
 
 it.each(['stop', 'tool-calls'])('keeps a tool request reporting %s open until the final response', async finishReason => {

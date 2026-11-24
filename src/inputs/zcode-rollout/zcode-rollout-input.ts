@@ -7,6 +7,7 @@ import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
+import { classifyZCodeRolloutFailure } from '../../normalization/zcode-rollout-outcome.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 // Import the shared helpers from the .mjs file so the AGENT span_id (derived
@@ -470,7 +471,9 @@ export class ZCodeRolloutInput extends BaseInput {
 
     const response = (record.response && typeof record.response === 'object' ? record.response : {}) as Record<string, unknown>;
     const responseText = str(response.text) ?? '';
-    const finishReason = str(response.finishReason) ?? str(response.finish_reason) ?? 'stop';
+    const rawFinishReason = str(response.finishReason) ?? str(response.finish_reason);
+    const failure = classifyZCodeRolloutFailure(rawFinishReason, record.error ?? response.error);
+    const finishReason = failure?.finishReason ?? rawFinishReason ?? 'stop';
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
     const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
@@ -623,6 +626,7 @@ export class ZCodeRolloutInput extends BaseInput {
           ? 'tool_call'
           : finishReason,
       ],
+      ...(failure ? { 'error.type': failure.errorType } : {}),
       ...(inputTokens !== undefined ? { 'gen_ai.usage.input_tokens': inputTokens } : {}),
       ...(outputTokens !== undefined ? { 'gen_ai.usage.output_tokens': outputTokens } : {}),
       ...(cacheReadTokens !== undefined ? { 'gen_ai.usage.cache_read.input_tokens': cacheReadTokens } : {}),
