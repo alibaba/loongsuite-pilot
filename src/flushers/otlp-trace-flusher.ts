@@ -1845,6 +1845,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (agentType === 'dsh') this.enrichDshSettledToolSpans(records, spans);
     if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
       const start = records.find(record => record['gen_ai.turn.start'] === true);
       const terminal = records.find(record => record['gen_ai.turn.end'] === true);
@@ -1902,6 +1903,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
 
     spans = await this.spanEnrichers.enrich(spans, { agentType, serviceName });
     this.patchCopilotCustomAttributes(spans, records);
+    this.patchToolResultCustomAttributes(spans, records);
 
     // Enrichers can reattach source fields after conversion. Apply the same
     // schema and content opt-out to final attributes and events before debug or export.
@@ -2164,17 +2166,22 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+  }
 
+  private patchToolResultCustomAttributes(
+    spans: ReadableSpan[],
+    records: AgentActivityEntry[],
+  ): void {
     // TOOL: copy gen_ai.tool.success / error.code / error.message /
     // permission.* from tool.result records onto the matching TOOL span
     // (matched by gen_ai.tool.call.id). The converter's
     // applyExecuteToolFinishAttributes only sets standard fields
     // (gen_ai.tool.call.id / gen_ai.tool.name / gen_ai.tool.call.arguments /
-    // gen_ai.tool.call.result) — it does not propagate Copilot's
-    // permission/denied-state fields. Without this patch, scenario B
-    // (permission denied) TOOL spans lose success/error context.
+    // gen_ai.tool.call.result) — it does not propagate Copilot's permission
+    // fields or DSH's explicit tool success flag.
     const toolResultRecords = records.filter(r =>
       (r as Record<string, unknown>)['event.name'] === 'tool.result'
+      && (r['gen_ai.agent.type'] === 'copilot' || r['gen_ai.agent.type'] === 'dsh')
     );
     if (toolResultRecords.length > 0) {
       const toolSpans = spans.filter(s => s.kind === SpanKind.INTERNAL
@@ -2647,6 +2654,53 @@ export class OtlpTraceFlusher extends BaseFlusher {
       llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
         metadata.systemInstructions,
       );
+    }
+  }
+
+  /**
+   * Keep observed closure intervals distinct from native tool timings. Only
+   * DSH's marked cancellation/recovery records participate; the common orphan
+   * guard and completed LLM/tool semantics remain unchanged.
+   */
+  private enrichDshSettledToolSpans(
+    records: AgentActivityEntry[],
+    spans: ReadableSpan[],
+  ): void {
+    const settlementByCallId = new Map<string, AgentActivityEntry>();
+    const terminal = records.find(record => record['agent.dsh.turn_status'] === 'cancelled');
+    for (const record of records) {
+      if (record['event.name'] !== 'tool.result') continue;
+      const settledBy = record['agent.dsh.tool.settled_by'];
+      if (typeof settledBy !== 'string' || settledBy.length === 0) continue;
+      const callId = record['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string' || callId.length === 0) continue;
+      settlementByCallId.set(callId, record);
+    }
+    const turnStatus = terminal ? 'cancelled'
+      : [...settlementByCallId.values()].some(record => record['tool.result.status'] === 'unknown')
+        ? 'incomplete' : undefined;
+    for (const span of spans) {
+      if (turnStatus && ['AGENT', 'ENTRY'].includes(String(span.attributes['gen_ai.span.kind']))) {
+        span.attributes['agent.dsh.turn_status'] = turnStatus;
+        if (turnStatus === 'cancelled') Object.assign(span.status, { code: SpanStatusCode.ERROR, message: 'DSH turn cancelled' });
+      }
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL') continue;
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (typeof callId !== 'string') continue;
+      const settlement = settlementByCallId.get(callId);
+      if (!settlement) continue;
+      for (const key of ['tool.result.status', 'agent.dsh.tool.settled_by',
+        'agent.dsh.tool.end_time_known', 'agent.dsh.tool.timing', 'agent.dsh.tool.result_missing']) {
+        const value = settlement[key];
+        if (typeof value === 'string' || typeof value === 'boolean') span.attributes[key] = value;
+      }
+      if (settlement['agent.dsh.tool.end_time_known'] === false) {
+        delete span.attributes['gen_ai.tool.call.duration'];
+      }
+      if (settlement['tool.result.status'] === 'cancelled') {
+        Object.assign(span.status, { code: SpanStatusCode.ERROR, message: 'DSH tool call cancelled' });
+        if (settlement['agent.dsh.tool.settled_by'] === 'native-tool-result') span.attributes['error.type'] = 'AbortError';
+      }
     }
   }
 

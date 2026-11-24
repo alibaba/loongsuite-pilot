@@ -268,6 +268,36 @@ Pilot derives LLM TTFT from the native request boundary to the first reasoning,
 text, or tool-call stream delta and reports it in nanoseconds as
 `gen_ai.response.time_to_first_token`.
 
+When a DSH turn is interrupted mid-tool — for example a parent process kills
+the DSH process tree while a foreground Shell call is running — Pilot settles
+in-flight tool calls whose native result never arrived at the first reliable
+observed turn boundary. A native `turn/end` with a cancelled-family reason
+(`cancelled`, `aborted`) settles them with
+`tool.result.status=cancelled`; a successor `turn/start` in the same session,
+or a `turn/end` whose reason is missing, unrecognized, or inconsistent with
+the unmatched calls, settles them with `tool.result.status=unknown` instead of
+claiming cancellation. DSH's synthetic resume reason `interrupted` also means
+unknown; its reused stored timestamp is not an execution finish time.
+Settled `tool.result` events keep the interrupted
+turn's identity, never fabricate a tool result or duration, and carry the
+observed boundary record's time — not a native tool completion time;
+`agent.dsh.tool.settled_by` (`turn-end` or `successor-turn-start`) names the
+boundary that settled the call, and the exported TOOL span repeats both
+attributes, plus `agent.dsh.tool.end_time_known=false` and
+`agent.dsh.tool.timing=observed_upper_bound`. The displayed interval ends at
+an observation upper bound and must not be interpreted as execution duration.
+A real `tool/result` with error code `ABORTED` records cancellation with native
+timing. Other failed-tool status handling remains unchanged.
+A cancelled `turn/end` additionally emits a message-less
+turn-terminal marker (`gen_ai.response.finish_reasons` `["cancelled"]`,
+`agent.dsh.turn_status=cancelled`) so the interrupted trace exports without
+waiting for a successor turn. ENTRY/AGENT spans carry `agent.dsh.turn_status`
+(`cancelled` or `incomplete`); individual completed LLM calls retain their
+native outcome. Calls with no observed turn boundary at all keep
+the pre-existing safeguard: the common OTLP flusher still drops unmatched
+`tool.call` events rather than emitting zero-duration spans with missing
+results.
+
 The normal `agent-control.json` and `config.json` gates use the ID `dsh`.
 Disabling collection removes an enable marker first, so an already-loaded
 plugin stops writing, then removes only Pilot's marked YAML block. The runtime
