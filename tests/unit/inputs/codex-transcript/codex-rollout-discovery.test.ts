@@ -81,3 +81,33 @@ it.each(['root', 'leaf'])('retries a failed %s scan without requiring a director
   expect(await list()).toEqual([transcript]);
   expect(vi.mocked(fs.readdir).mock.calls.length).toBe(reads);
 });
+
+it('invalidates a cached rollout listing when a directory is replaced with the same mtime', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-rollout-directory-replacement-'));
+  tempDirs.push(root);
+  const sessionDir = path.join(root, 'sessions');
+  const leaf = path.join(sessionDir, 'day');
+  const stamp = new Date('2026-01-01T00:00:00.000Z');
+  await fs.mkdir(leaf, { recursive: true });
+  const oldRollout = path.join(leaf, 'rollout-original.jsonl');
+  await fs.writeFile(oldRollout, '{}\n');
+  await fs.utimes(leaf, stamp, stamp);
+  await fs.utimes(sessionDir, stamp, stamp);
+  const original = await fs.stat(leaf);
+
+  const input = new CodexTranscriptInput({ stateStore: new StateStore(path.join(root, 'state.json')), sessionDir });
+  const listFiles = () => (input as unknown as { listDefaultRolloutFiles(): Promise<string[]> }).listDefaultRolloutFiles();
+  expect(await listFiles()).toEqual([oldRollout]);
+
+  await fs.rename(leaf, path.join(root, 'previous-day'));
+  await fs.mkdir(leaf);
+  const newRollout = path.join(leaf, 'rollout-replacement.jsonl');
+  await fs.writeFile(newRollout, '{}\n');
+  await fs.utimes(leaf, stamp, stamp);
+  await fs.utimes(sessionDir, stamp, stamp);
+  const replacement = await fs.stat(leaf);
+  expect(replacement.ino).not.toBe(original.ino);
+  expect(replacement.mtimeMs).toBe(original.mtimeMs);
+
+  expect(await listFiles()).toEqual([newRollout]);
+});
