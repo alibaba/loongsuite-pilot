@@ -67,6 +67,8 @@ export interface AtomicTextWriteOptions {
   mode?: number;
   /** Retain an existing user file's exact mode, without applying umask again. */
   preserveMode?: boolean;
+  /** Retain the POSIX owner and group of a managed file on replacement. */
+  owner?: { uid: number; gid: number };
 }
 
 async function assertExpectedFileState(
@@ -113,10 +115,19 @@ export async function writeTextFileAtomic(
     }
   }
 
+  const prepare = async (temporary: string) => {
+    const owner = options.owner;
+    await fsp.writeFile(temporary, text, { encoding: 'utf8', mode: owner ? 0o600 : options.mode });
+    if (owner) {
+      const { uid, gid } = await fsp.stat(temporary);
+      if (owner.uid !== uid || owner.gid !== gid) await fsp.chown(temporary, owner.uid, owner.gid);
+    }
+    if ((options.preserveMode || owner) && options.mode !== undefined) await fsp.chmod(temporary, options.mode);
+  };
+
   const tmp = atomicTmpPath(path);
   try {
-    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
-    if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp, options.mode);
+    await prepare(tmp);
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -132,8 +143,7 @@ export async function writeTextFileAtomic(
       await ensureDir(dir);
       const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
-        if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp2, options.mode);
+        await prepare(tmp2);
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }

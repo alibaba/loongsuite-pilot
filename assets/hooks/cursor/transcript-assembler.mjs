@@ -49,15 +49,35 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   const turn = parseCursorTranscript(transcriptPath);
   if (!turn) return null;
 
-  const runtimeConfig = options.runtimeConfig || {};
   const stopConversationId = options.stopConversationId;
-  const variant = options.variant || 'cursor';
 
   const promptEvent = stopConversationId
     ? journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt' && e.conversation_id === stopConversationId)
     : journalEvents.find(e => e.hook_event === 'beforeSubmitPrompt');
   if (!promptEvent) return null;
+  return buildTranscriptRecords(turn, journalEvents, promptEvent, options);
+}
 
+export function buildCursorCliRecordsFromCompletedTurn(turn, events, endEvent, runtimeConfig) {
+  const transcript = parseTranscriptEntries(turn.entries);
+  if (!transcript?.userText || !transcript.assistantEntries.some(entry => entry.text || entry.toolUseCount)) return [];
+  const startEvent = {
+    ...endEvent,
+    _journal_ts: new Date(turn.startMs).toISOString(),
+    generation_id: turn.turnId,
+  };
+  const records = buildTranscriptRecords(transcript, events, startEvent, {
+    variant: 'cursor-cli', runtimeConfig, endEvent,
+  }) ?? [];
+  return records.map((record, index) => ({
+    ...record, 'event.id': deriveTraceId(turn.turnId + ':event:' + index),
+  }));
+}
+
+function buildTranscriptRecords(turn, journalEvents, promptEvent, options) {
+  const runtimeConfig = options.runtimeConfig || {};
+  const variant = options.variant || 'cursor';
+  const endEvent = options.endEvent;
   const parentConvId = promptEvent.conversation_id;
   const turnId = promptEvent.generation_id || parentConvId;
   const traceId = deriveTraceId(turnId);
@@ -70,9 +90,10 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
   const workspacePath = resolveWorkspacePath(parentEvents);
 
   // T5: Resolve model from journal events (afterAgentThought/Response carry real model)
-  const model = parentEvents.find(e =>
-    e.model && e.model !== 'unknown' && e.model !== ''
-  )?.model || promptEvent?.model || 'unknown';
+  const reportedModels = endEvent ? new Set(parentEvents.map(event => cliModel(event.model)).filter(Boolean)) : null;
+  const model = endEvent
+    ? cliModel(endEvent.model) || (reportedModels.size === 1 ? [...reportedModels][0] : undefined)
+    : parentEvents.find(e => e.model && e.model !== 'unknown')?.model || promptEvent?.model || 'unknown';
 
   // T2: baseFields includes gen_ai.agent.id
   const baseFields = {
@@ -83,6 +104,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     'gen_ai.agent.id': parentConvId,
     'user.id': userId,
     ...cursorWorkspaceFields(variant, workspacePath),
+    ...(endEvent ? { 'agent.cursor.transcript_recovery': true } : {}),
   };
 
   const records = [];
@@ -96,18 +118,19 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
       ...baseFields,
-      'gen_ai.provider.name': inferProvider(model),
+      'gen_ai.provider.name': model && inferProvider(model),
       'gen_ai.input.messages_delta': [
         { role: 'user', parts: [{ type: 'text', content: userText }] },
       ],
-      'agent.cursor.hook_event_name': 'beforeSubmitPrompt',
+      'agent.cursor.hook_event_name': endEvent ? 'sessionEnd' : 'beforeSubmitPrompt',
+      ...(endEvent ? { 'gen_ai.turn.start': true } : {}),
       'agent.cursor.composer_mode': promptEvent.composer_mode,
     }, runtimeConfig));
   }
 
   // Build per-step records
-  const steps = alignSteps(turn.assistantEntries, parentEvents, turnId);
-  const stopEvent = parentEvents.find(e => e.hook_event === 'stop');
+  const steps = alignSteps(turn.assistantEntries, parentEvents, turnId, Boolean(endEvent));
+  const stopEvent = endEvent ?? parentEvents.find(e => e.hook_event === 'stop');
   const cumulativeInputMessages = userText
     ? [{ role: 'user', parts: [{ type: 'text', content: userText }] }]
     : [];
@@ -120,7 +143,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     const isLast = i === steps.length - 1;
 
     // T2: shared responseId between llm.request and llm.response
-    const responseId = crypto.randomUUID();
+    const responseId = endEvent ? deriveTraceId(stepId + ':response') : crypto.randomUUID();
 
     // T4: Precise request timestamp
     // s1: prefer thought event duration backtrack (actual LLM start); fallback to prompt time
@@ -142,7 +165,9 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
     }
 
     // llm.request.model from step events
-    const stepModel = step.thoughtEvent?.model || step.responseEvent?.model || model;
+    const stepModel = endEvent
+      ? cliModel(step.responseEvent?.model) || cliModel(step.thoughtEvent?.model) || model
+      : step.thoughtEvent?.model || step.responseEvent?.model || model;
 
     const inputMessageDelta = [];
     if (i === 0 && userText) {
@@ -178,7 +203,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       ...baseFields,
       'gen_ai.step.id': stepId,
       'gen_ai.response.id': responseId,
-      'gen_ai.provider.name': inferProvider(stepModel),
+      'gen_ai.provider.name': stepModel && inferProvider(stepModel),
       'gen_ai.request.model': stepModel,
       'gen_ai.input.messages_delta': inputMessageDelta.length > 0
         ? inputMessageDelta.map(cloneMessage)
@@ -231,13 +256,14 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
 
     // ── llm.response ──
     // T1: finish_reason is 'tool_calls' when this step has tool calls
-    const finishReason = step.toolCalls.length > 0 ? 'tool_calls' : 'stop';
+    const finishReason = step.toolCalls.length > 0 ? 'tool_calls' : (endEvent ? undefined : 'stop');
 
     // T4: Response timestamp from thoughtEvent or responseEvent
     const respSource = isLast
       ? (step.responseEvent || stopEvent)
       : (step.thoughtEvent || null);
     const respTs = respSource ? eventTs(respSource) : reqTs;
+    const respModel = (endEvent ? cliModel(respSource?.model) : respSource?.model) || stepModel;
 
     // T1: Build output.messages parts: text + tool_call parts for each tool
     // Non-final steps use 'reasoning' type (matches react-assembler afterAgentThought behavior)
@@ -261,29 +287,29 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       ...baseFields,
       'gen_ai.step.id': stepId,
       'gen_ai.response.id': responseId,
-      'gen_ai.provider.name': inferProvider(respSource?.model || stepModel),
-      'gen_ai.request.model': respSource?.model || stepModel,
-      'gen_ai.response.model': respSource?.model || stepModel,
+      'gen_ai.provider.name': respModel && inferProvider(respModel),
+      'gen_ai.request.model': respModel,
+      'gen_ai.response.model': respModel,
       'gen_ai.output.messages': [{
         role: 'assistant',
         parts: outputParts,
         finish_reason: finishReason,
       }],
-      'gen_ai.response.finish_reasons': [finishReason],
+      'gen_ai.response.finish_reasons': finishReason ? [finishReason] : undefined,
       'agent.cursor.hook_event_name': respSource?.hook_event
         || (isLast ? 'afterAgentResponse' : 'afterAgentThought'),
       'agent.cursor.llm_response_time_source': respSource?.hook_event === 'afterAgentThought'
         ? 'after_agent_thought'
         : respSource?.hook_event === 'afterAgentResponse'
         ? 'after_agent_response'
-        : undefined,
+        : respSource?.hook_event === 'sessionEnd' ? 'session_end' : undefined,
     }, runtimeConfig);
 
     // T3: Only the last step carries real tokens; intermediate steps are set to 0
     // This prevents AGENT span double-counting (EVENT_LOG_TO_TRACE_SPEC §3.4)
     if (isLast) {
       mergeTokens(respRecord, step.responseEvent || stopEvent);
-    } else {
+    } else if (!endEvent) {
       respRecord['gen_ai.usage.input_tokens'] = 0;
       respRecord['gen_ai.usage.output_tokens'] = 0;
       respRecord['gen_ai.usage.cache_read.input_tokens'] = 0;
@@ -291,6 +317,7 @@ export function buildCursorRecordsFromTranscript(transcriptPath, journalEvents, 
       respRecord['gen_ai.usage.total_tokens'] = 0;
     }
 
+    if (endEvent && isLast) respRecord['gen_ai.turn.end'] = true;
     records.push(respRecord);
     const assistantToolParts = outputParts.filter(part => part.type === 'tool_call');
     previousAssistantToolMessage = assistantToolParts.length > 0
@@ -399,41 +426,45 @@ function parseCursorTranscript(transcriptPath) {
       currentTurnEnd = lines.length;
     }
 
-    let userText = null;
-    const assistantEntries = [];
-
+    const entries = [];
     for (let i = currentTurnStart; i < currentTurnEnd; i++) {
-      let entry;
-      try { entry = JSON.parse(lines[i]); } catch { continue; }
-
-      if (entry.role === 'user' && entry.message?.content) {
-        const parts = entry.message.content.filter(p => p.type === 'text' && p.text);
-        const text = parts
-          .map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim())
-          .filter(Boolean)
-          .join('');
-        if (text) userText = text;
-      }
-
-      if (entry.role === 'assistant' && entry.message?.content) {
-        const textParts = entry.message.content.filter(p => p.type === 'text' && p.text);
-        const toolUseParts = entry.message.content.filter(p => p.type === 'tool_use');
-        const rawText = textParts.map(p => p.text).join('');
-        const text = isUsableText(rawText) ? rawText : null;
-        // Extract tool_use details: name and input (transcript has no tool IDs)
-        const toolUses = toolUseParts.map(p => ({
-          name: p.name || '',
-          input: p.input || {},
-        }));
-        assistantEntries.push({ text, toolUseCount: toolUseParts.length, toolUses });
-      }
+      try { entries.push(JSON.parse(lines[i])); } catch {}
     }
-
-    if (!userText && assistantEntries.length === 0) return null;
-    return { userText, assistantEntries };
+    return parseTranscriptEntries(entries);
   } catch {
     return null;
   }
+}
+
+function parseTranscriptEntries(entries) {
+  let userText = null;
+  const assistantEntries = [];
+  for (const entry of entries) {
+    if (entry?.role === 'user' && Array.isArray(entry.message?.content)) {
+      const parts = entry.message.content.filter(p => p?.type === 'text' && typeof p.text === 'string' && p.text);
+      const text = parts
+        .map(p => p.text.replace(/<\/?user_query>\n?/g, '').trim())
+        .filter(Boolean)
+        .join('');
+      if (text) userText = text;
+    }
+
+    if (entry?.role === 'assistant' && Array.isArray(entry.message?.content)) {
+      const textParts = entry.message.content.filter(p => p?.type === 'text' && typeof p.text === 'string' && p.text);
+      const toolUseParts = entry.message.content.filter(p => p?.type === 'tool_use');
+      const rawText = textParts.map(p => p.text).join('');
+      const text = isUsableText(rawText) ? rawText : null;
+      // Extract tool_use details: name and input (transcript has no tool IDs)
+      const toolUses = toolUseParts.map(p => ({
+        name: p.name || '',
+        input: p.input || {},
+      }));
+      assistantEntries.push({ text, toolUseCount: toolUseParts.length, toolUses });
+    }
+  }
+
+  if (!userText && assistantEntries.length === 0) return null;
+  return { userText, assistantEntries };
 }
 
 /** Text is usable if non-empty after stripping [REDACTED] markers */
@@ -458,8 +489,8 @@ function isUsableText(text) {
  * subsequent steps may get misaligned tool assignments. This is an inherent
  * tradeoff — Cursor transcript lacks tool IDs for reliable matching.
  */
-function alignSteps(assistantEntries, parentEvents, turnId) {
-  const sortedJournalCalls = parentEvents
+function alignSteps(assistantEntries, parentEvents, turnId, recoveringCli) {
+  let sortedJournalCalls = parentEvents
     .filter(e => e.hook_event === 'preToolUse')
     .sort((a, b) => tsMs(a) - tsMs(b));
   const sortedToolResults = parentEvents
@@ -480,6 +511,16 @@ function alignSteps(assistantEntries, parentEvents, turnId) {
       thoughtEvent: thoughtEvents[0] || null,
       responseEvent: responseEvents[0] || null,
     }];
+  }
+
+  if (recoveringCli) {
+    // Match real tool IDs only when the ordered names corroborate the native
+    // transcript. A missing callback must not attach another tool's result.
+    const nativeTools = assistantEntries.flatMap(entry => entry.toolUses);
+    if (nativeTools.length !== sortedJournalCalls.length || nativeTools.some((tool, index) =>
+      tool.name !== sortedJournalCalls[index].tool_name || !sortedJournalCalls[index].tool_use_id)) {
+      sortedJournalCalls = [];
+    }
   }
 
   let journalCallIdx = 0;
@@ -519,14 +560,20 @@ function alignSteps(assistantEntries, parentEvents, turnId) {
     }
     journalCallIdx += count;
 
-    const stepToolResults = sortedToolResults.slice(toolResultIdx, toolResultIdx + count);
+    const stepToolResults = recoveringCli
+      ? stepToolCalls.filter(call => !call._synthetic).map(call =>
+        sortedToolResults.find(result => result.tool_use_id === call.tool_use_id)
+      ).filter(Boolean)
+      : sortedToolResults.slice(toolResultIdx, toolResultIdx + count);
     toolResultIdx += count;
 
     steps.push({
       text: entry.text,
       toolCalls: stepToolCalls,
       toolResults: stepToolResults,
-      thoughtEvent: !isFinal ? (thoughtEvents[i] || null) : null,
+      thoughtEvent: recoveringCli
+        ? (thoughtEvents.length === assistantEntries.length ? thoughtEvents[i] : null)
+        : (!isFinal ? (thoughtEvents[i] || null) : null),
       responseEvent: isFinal ? (responseEvents[0] || null) : null,
     });
   }
@@ -567,6 +614,12 @@ function durationStartMs(ev) {
   const durationMs = Number(ev?.duration_ms);
   if (!Number.isFinite(durationMs) || durationMs < 0) return endMs;
   return endMs - durationMs;
+}
+
+function cliModel(model) {
+  return typeof model === 'string' && model && !['unknown', 'default', 'auto'].includes(model.toLowerCase())
+    ? model
+    : undefined;
 }
 
 function inferProvider(model) {

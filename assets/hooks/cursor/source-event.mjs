@@ -5,13 +5,28 @@
  * and produces a flat internal event object for the event journal.
  */
 
+const DESKTOP_VERSION_PATTERN = /^v?\d{1,3}\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?$/i;
+const CLI_VERSION_PATTERN = /^v?\d{4}\.(?:0[1-9]|1[0-2])\.(?:0[1-9]|[12]\d|3[01])(?:-[\w.-]+)?(?:\+[\w.-]+)?$/i;
+
+export function cursorVariantFromVersion(version) {
+  if (typeof version !== 'string') return undefined;
+  if (CLI_VERSION_PATTERN.test(version)) return 'cursor-cli';
+  if (DESKTOP_VERSION_PATTERN.test(version)) return 'cursor';
+  return undefined;
+}
+
 export function sanitizeToolCallId(raw) {
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
   const idx = raw.indexOf('\n');
   return (idx >= 0 ? raw.slice(0, idx) : raw).trim() || undefined;
 }
 
-export function toInternalEvent(payload) {
+export function omitCursorEventContent(event) {
+  const { prompt, attachments, text, tool_input, tool_output, error_message, task, description, ...metadata } = event;
+  return { ...metadata, content_omitted: true };
+}
+
+export function toInternalEvent(payload, captureContent = true) {
   const hookEvent = payload.hook_event_name || payload.hookEvent || payload.hookEventName || 'unknown';
   const conversationId = payload.conversation_id || payload.session_id || '';
   const sessionId = payload.session_id || payload.conversation_id || '';
@@ -111,18 +126,23 @@ export function toInternalEvent(payload) {
       event.composer_mode = payload.composer_mode || undefined;
       break;
 
+    case 'sessionEnd':
+      event.reason = payload.reason === 'completed' ? 'completed' : undefined;
+      event.duration_ms = toFiniteNumber(payload.duration_ms);
+      break;
+
     default:
       break;
   }
 
   // common metadata
-  event.cursor_version = payload.cursor_version || undefined;
+  event.cursor_version = cursorVariantFromVersion(payload.cursor_version) ? payload.cursor_version : undefined;
   event.user_email = payload.user_email || undefined;
   event.cwd = payload.cwd || event.cwd || undefined;
   event.workspace_roots = payload.workspace_roots || undefined;
   event.transcript_path = payload.transcript_path || undefined;
 
-  return stripUndefined(event);
+  return stripUndefined(captureContent ? event : omitCursorEventContent(event));
 }
 
 function toFiniteNumber(val) {

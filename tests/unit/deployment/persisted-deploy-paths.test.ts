@@ -19,7 +19,7 @@ describe('persisted deploy paths', () => {
       .toBe(path.resolve('/tmp/pi-agent'));
   });
 
-  it('records Grok and Pi absolute paths and ignores other agents', () => {
+  it('records absolute paths for supported shared installations', () => {
     expect(lifecycleFieldsForDeploy({
       id: 'grok-build',
       displayName: 'Grok',
@@ -75,9 +75,12 @@ describe('persisted deploy paths', () => {
         settingsPath: '/home/user/.cursor/hooks.json',
         events: ['Stop'],
         hookCommand: '/pilot/hooks/cursor.sh',
-        format: 'nested',
+        format: 'flat',
       },
-    })).toEqual({});
+    })).toEqual({
+      hookSettingsPath: path.resolve('/home/user/.cursor/hooks.json'),
+      hookScope: 'user',
+    });
   });
 
   it('overlays persisted Grok/Pi paths ahead of the current definition', () => {

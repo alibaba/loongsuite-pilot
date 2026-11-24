@@ -48,7 +48,7 @@ function grokDefinition(): AgentDefinition {
 
 function targets(orchestrator: Orchestrator) {
   return (orchestrator as unknown as {
-    buildGrokBuildInterceptTargets: () => Array<{
+    buildSystemHookInterceptTargets: () => Array<{
       id: string;
       enabled?: () => boolean;
       precondition: () => Promise<boolean>;
@@ -56,7 +56,7 @@ function targets(orchestrator: Orchestrator) {
       repair: () => Promise<void>;
       cleanup?: () => Promise<void>;
     }>;
-  }).buildGrokBuildInterceptTargets();
+  }).buildSystemHookInterceptTargets();
 }
 
 describe('Grok Build watchdog target', () => {
@@ -154,7 +154,7 @@ describe('Grok Build watchdog target', () => {
       vi.mocked(areSystemHookAssetsHealthy).mockResolvedValue(true);
       const userConfig = JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ command: '/opt/pilot/codex-hook.sh' }] }] } });
       await fs.writeFile(userPath, userConfig);
-      o.hookWatchdog = new HookWatchdog(o.config.hookWatchdog, o.buildHookWatchdogTargets(), o.buildGrokBuildInterceptTargets());
+      o.hookWatchdog = new HookWatchdog(o.config.hookWatchdog, o.buildHookWatchdogTargets(), o.buildSystemHookInterceptTargets());
       await o.hookWatchdog.runCheck();
 
       // A separate hook install migrates registration and signals the live collector.

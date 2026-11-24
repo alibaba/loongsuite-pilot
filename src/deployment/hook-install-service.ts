@@ -7,9 +7,10 @@ import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
 import { withDeployedStateLock } from './deployed-state-merge.js';
 import { createLogger } from '../utils/logger.js';
 import { DeploymentManager } from './deployment-manager.js';
+import { detectsCursorAgentAlias } from './detect-utils.js';
 import { resolveDeployInterceptorHooks } from '../interceptor/config.js';
 import { postAlarm } from '../internal/post-alarm.js';
-import { systemTomlDefinition, supportsSystemTomlHooks } from './system-toml-hooks.js';
+import { systemHookDefinition, supportsSystemHooks } from './system-hook-config.js';
 import { areSystemHookAssetsHealthy } from './system-hook-assets.js';
 
 const logger = createLogger('HookInstall');
@@ -365,10 +366,36 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
   const byId = new Map(defs.map(def => [def.id, def]));
   // An unqualified status/install follows the persisted target after restart.
   for (const [id, def] of byId) {
-    if (supportsSystemTomlHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
+    if (supportsSystemHooks(id) && opts.deploymentScope === undefined) byId.set(id, manager.effectiveDefinition(def));
   }
-  const homes = opts.homes ?? {};
+  const homes = { ...opts.homes };
   const enabled = opts.enabled ?? (() => true);
+  const cursor = byId.get('cursor');
+  const cursorCli = byId.get('cursor-cli');
+  const cursorInstalledSystem = manager.isSystemInstallation('cursor');
+  const cursorSelected = selection.kind !== 'named' || selection.ids.some(id => id === 'cursor' || id === 'cursor-cli');
+  const cursorSystem = opts.deploymentScope === 'system' && cursorSelected && cursor && cursorCli && enabled('cursor-cli')
+    && (cursorInstalledSystem || await manager.isAgentDetected(cursorCli) || await detectsCursorAgentAlias());
+
+  // Cursor CLI reuses the Cursor hook and Input. Route scoped installs through
+  // that record so there is only one registration and one cleanup owner.
+  if (cursor && cursorCli && enabled('cursor-cli')
+    && (cursorSystem || opts.deploymentScope === 'user' || cursorInstalledSystem)) {
+    byId.delete('cursor-cli');
+    if (selection.kind === 'named') {
+      selection.ids = [...new Set(selection.ids.map(id => id === 'cursor-cli' ? 'cursor' : id))];
+    }
+    if (homes['cursor-cli']) {
+      if (homes.cursor && path.resolve(homes.cursor) !== path.resolve(homes['cursor-cli'])) {
+        throw new Error('Cursor and cursor-cli share one hook registration; select one home');
+      }
+      homes.cursor = homes['cursor-cli'];
+      delete homes['cursor-cli'];
+    }
+  }
+  const scopeFor = (id: string) => supportsSystemHooks(id)
+    && (id !== 'cursor' || opts.deploymentScope !== 'system' || cursorSystem)
+    ? opts.deploymentScope : undefined;
   const euid = opts.euid ?? (typeof process.geteuid === 'function' ? process.geteuid() : process.getuid?.() ?? 0);
   const homeOwner = opts.homeOwner ?? defaultHomeOwner;
   const statusOnly = opts.mode === 'status';
@@ -399,14 +426,15 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
     }
     // Scope changes choose a deployment strategy; they must not turn automatic
     // discovery into installation of agents that are absent from this machine.
-    if (selection.kind === 'detect' && !(await manager.isAgentDetected(def))) continue;
-    const scope = supportsSystemTomlHooks(def.id) ? opts.deploymentScope : undefined;
+    const scope = scopeFor(def.id);
+    if (selection.kind === 'detect' && !(def.id === 'cursor' && cursorSystem)
+      && !(await manager.isAgentDetected(def))) continue;
     const home = homes[def.id];
     if (home && manager.isSystemInstallation(def.id) && opts.deploymentScope === undefined) {
       throw new Error('An existing system hook installation requires explicit --scope user before --home');
     }
     const targeted = scope === 'system'
-      ? systemTomlDefinition(def, opts.systemConfigPath)
+      ? systemHookDefinition(def, opts.systemConfigPath)
       : home ? definitionAtInstallHome(def, home) : scope === 'user'
         ? { ...def, hook: def.hook ? { ...def.hook, scope: 'user' as const } : undefined } : def;
     if (home && !targeted) {
@@ -450,7 +478,7 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
           agents.push({ id: def.id, status: 'ok', reason: null, hint: null, settingsPath, deployMode: active.deployMode });
           continue;
         }
-        const known = supportsSystemTomlHooks(def.id) && settingsPath
+        const known = supportsSystemHooks(def.id) && settingsPath
           ? manager.recordedSettingsPaths(def.id).includes(path.resolve(settingsPath))
           : manager.hasRecord(def.id);
         agents.push(failed(def.id, known ? 'overwritten' : 'not-detected', active.deployMode, settingsPath));
@@ -470,12 +498,16 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
 
   for (const agent of agents) {
     const definition = byId.get(agent.id);
-    const system = Boolean(definition && supportsSystemTomlHooks(definition.id))
-      && (opts.deploymentScope === 'system' || (opts.deploymentScope === undefined && manager.isSystemInstallation(agent.id)));
+    const system = Boolean(definition && supportsSystemHooks(definition.id))
+      && (scopeFor(agent.id) === 'system' || (scopeFor(agent.id) === undefined && manager.isSystemInstallation(agent.id)));
     if (system) {
       agent.hookScope = 'system';
       agent.runtimeHealthy = await areSystemHookAssetsHealthy(agent.id, opts.pilotDir, opts.dataDir);
       agent.collectionStatus = 'not-verified';
+      if (agent.id === 'cursor') {
+        const requirement = 'Requires Cursor Enterprise and CLI access to the shared config and runtime.';
+        agent.hint = agent.hint ? agent.hint + ' ' + requirement : requirement;
+      }
     } else if (opts.deploymentScope === 'system' && (agent.id === 'pi-coding-agent' || agent.id === 'dsh')
       && (agent.status === 'ok' || agent.status === 'up-to-date')) {
       agent.settingsPath = manager.recordedConfigPath(agent.id) ?? agent.settingsPath;

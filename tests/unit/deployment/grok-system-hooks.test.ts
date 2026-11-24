@@ -5,7 +5,8 @@ import * as os from 'node:os';
 import { parse } from 'smol-toml';
 import { spawnSync } from 'node:child_process';
 import type { AgentDefinition } from '../../../src/types/deployment.js';
-import { systemTomlDefinition, systemTomlHooksInstalled, renderSystemTomlHooks, updateSystemTomlHooks } from '../../../src/deployment/system-toml-hooks.js';
+import { systemHookDefinition } from '../../../src/deployment/system-hook-config.js';
+import { systemTomlHooksInstalled, renderSystemTomlHooks, updateSystemTomlHooks } from '../../../src/deployment/system-toml-hooks.js';
 import { runHookInstall } from '../../../src/deployment/hook-install-service.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
@@ -28,7 +29,7 @@ const unrelated = '# organization policy must remain byte-identical\n[models]\nd
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'grok-system-'));
   restoreHome = isolateAgentHome(root);
-  def = systemTomlDefinition({
+  def = systemHookDefinition({
     id: 'grok-build', displayName: 'Grok Build', deployMode: 'hook', detection: { paths: [], commands: [] },
     hook: { settingsPath: '', hookCommand: path.join(root, "pilot's data", 'hooks/grok-build-loongsuite-pilot-hook.sh'),
       events: ['user_prompt_submit', 'stop', 'stop_failure', 'session_end'], format: 'nested' },

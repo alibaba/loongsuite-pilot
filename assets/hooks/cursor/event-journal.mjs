@@ -12,36 +12,68 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 function pilotDataDir() {
-  return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  if (configured) return configured;
+  // The deployed Hook lives in <dataDir>/hooks even when the agent did not
+  // inherit the environment of the installer or service.
+  const deployedDataDir = fileURLToPath(new URL('../../', import.meta.url));
+  if (fs.existsSync(new URL('../cursor-config-path', import.meta.url))
+    || fs.existsSync(path.join(deployedDataDir, 'config.json'))) return deployedDataDir;
+  return path.join(os.homedir(), '.loongsuite-pilot');
 }
 
-const JOURNAL_DIR = path.join(pilotDataDir(), 'state', 'cursor');
+export const CURSOR_DATA_DIR = pilotDataDir();
+const JOURNAL_DIR = path.join(CURSOR_DATA_DIR, 'state', 'cursor');
 const JOURNAL_FILE = path.join(JOURNAL_DIR, 'event-journal.jsonl');
 const JOURNAL_LOCK_FILE = path.join(JOURNAL_DIR, 'event-journal.lock');
 const JOURNAL_LOCK_TIMEOUT_MS = 3000;
 const JOURNAL_LOCK_STALE_MS = 2000;
 const JOURNAL_LOCK_RETRY_MS = 10;
+const SYSTEM_SCOPE = process.env.LOONGSUITE_PILOT_CURSOR_SYSTEM_SCOPE === '1';
+
+if (SYSTEM_SCOPE) process.umask(0o077);
 
 function ensureJournalDir() {
-  fs.mkdirSync(JOURNAL_DIR, { recursive: true });
+  fs.mkdirSync(JOURNAL_DIR, { recursive: true, mode: SYSTEM_SCOPE ? 0o700 : undefined });
+  if (!SYSTEM_SCOPE) return;
+
+  // The system registration shares this directory only across HOMEs of the
+  // same UID. Tighten an existing owned journal before reading or writing it.
+  const owner = process.geteuid();
+  const directory = fs.lstatSync(JOURNAL_DIR);
+  if (!directory.isDirectory() || directory.uid !== owner || (directory.mode & 0o022) !== 0) {
+    throw new Error('Untrusted Cursor system journal directory');
+  }
+  if ((directory.mode & 0o077) !== 0) fs.chmodSync(JOURNAL_DIR, 0o700);
+
+  const file = fs.lstatSync(JOURNAL_FILE, { throwIfNoEntry: false });
+  if (!file) return;
+  if (!file.isFile() || file.nlink !== 1 || file.uid !== owner || (file.mode & 0o022) !== 0) {
+    throw new Error('Untrusted Cursor system journal file');
+  }
+  if ((file.mode & 0o077) !== 0) fs.chmodSync(JOURNAL_FILE, 0o600);
 }
 
-export function appendEvent(event) {
+export function appendEvent(event, prepareForAppend) {
   ensureJournalDir();
-  withJournalLock(() => {
-    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(event) + '\n', 'utf-8');
+  return withJournalLock(() => {
+    const stored = prepareForAppend ? prepareForAppend(event, readJournal()) : event;
+    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(stored) + '\n', 'utf-8');
+    return stored;
   });
+}
+
+function readJournal() {
+  if (!fs.existsSync(JOURNAL_FILE)) return [];
+  return parseJournalContent(fs.readFileSync(JOURNAL_FILE, 'utf-8'));
 }
 
 export function readAllEvents() {
   ensureJournalDir();
-  return withJournalLock(() => {
-    if (!fs.existsSync(JOURNAL_FILE)) return [];
-    const content = fs.readFileSync(JOURNAL_FILE, 'utf-8');
-    return parseJournalContent(content);
-  });
+  return withJournalLock(readJournal);
 }
 
 export function rewriteJournal(remainingEvents, snapshotEvents = null) {
@@ -113,7 +145,8 @@ function parseJournalContent(content) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      events.push(JSON.parse(trimmed));
+      const event = JSON.parse(trimmed);
+      if (event && typeof event === 'object' && !Array.isArray(event)) events.push(event);
     } catch {
       // skip corrupted lines
     }
