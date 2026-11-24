@@ -1845,6 +1845,17 @@ export class OtlpTraceFlusher extends BaseFlusher {
     }
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
+    if (agentType === 'qwen-work-cn') {
+      const withoutResponseModel = new Set(records.filter(record => record['event.name'] === 'llm.response'
+        && record['gen_ai.response.id'] && !record['gen_ai.response.model']).map(record => record['gen_ai.response.id']));
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] === 'LLM'
+          && withoutResponseModel.has(span.attributes['gen_ai.response.id'] as string)) {
+          // The shared converter falls back to the requested model when the response model is absent.
+          delete span.attributes['gen_ai.response.model'];
+        }
+      }
+    }
     if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
       const start = records.find(record => record['gen_ai.turn.start'] === true);
       const terminal = records.find(record => record['gen_ai.turn.end'] === true);
