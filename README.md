@@ -64,6 +64,7 @@ Pilot is designed to answer practical questions:
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | Yes | Yes | Yes | Yes | No |
 | Grok Build    | Hook + local session logs | Yes          | Yes        | Yes         | Yes                       | No         |
 | Hermes Agent  | Native directory plugin   | Yes          | Yes        | Yes         | Yes                       | No         |
+| Kimi Code (CLI verified) | Native session polling    | Yes          | Yes        | Yes         | Main agent                 | No |
 | Kiro CLI      | Hook / session polling    | Yes          | Yes        | No          | Yes                       | No         |
 | MiMo Code     | Plugin injection          | Yes          | Yes        | Yes         | Yes                       | No         |
 | OpenClaw      | Plugin injection          | Yes          | Yes        | Yes         | Yes                       | No         |

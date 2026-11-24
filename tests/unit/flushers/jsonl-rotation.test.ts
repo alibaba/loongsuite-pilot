@@ -7,8 +7,13 @@ import { getTodayDateString } from '../../../src/utils/fs-utils.js';
 import { buildTestEntry } from '../../helpers/fixture-builder.js';
 import { LOCAL_LOG_EMERGENCY_FILE_BYTES } from '../../../src/utils/segmented-jsonl-writer.js';
 
+vi.mock('node:fs/promises', async importOriginal => {
+  const original = await importOriginal<typeof fs>();
+  return { ...original, open: vi.fn(original.open) };
+});
+
 const dirs: string[] = [];
-afterEach(async () => { vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); await Promise.all(dirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true }))); });
 async function setup(rotateDaily = true) {
   const outputDir = await fs.mkdtemp(path.join(os.tmpdir(), 'jsonl-rotation-')); dirs.push(outputDir);
   const options = { enabled: true, outputDir, rotateDaily, maxFileSizeMb: 1024 / (1024 * 1024) };
@@ -87,6 +92,110 @@ it('does not reuse a segment name after retention removes previously closed file
   const newNames = (await fs.readdir(outputDir)).filter(file => file.includes('.part-'));
   expect(newNames.length).toBeGreaterThan(0);
   expect(newNames.some(file => oldNames.includes(file))).toBe(false);
+});
+
+it.each([false, true])('repairs the active Kimi tail before appending and preserves its accepted prefix (daily=%s)', async rotateDaily => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(2026, 10, 20, 12));
+  const { outputDir, options, flusher } = await setup(rotateDaily);
+  const first = { ...entry('kimi-a'), 'gen_ai.agent.type': 'kimi-code-cli' };
+  const second = { ...entry('kimi-b'), 'gen_ai.agent.type': 'kimi-code-cli' };
+  await flusher.send(first);
+  await flusher.shutdown();
+  const file = path.join(outputDir, `kimi-code-cli-${rotateDaily ? getTodayDateString() : 'all'}.jsonl`);
+  const complete = await fs.readFile(file, 'utf8');
+  // Simulate termination in the middle of a UTF-8 payload. The event ID is
+  // already present, but there is no committed record ending in a newline.
+  await fs.appendFile(file, '{"event.id":"kimi-b","gen_ai.agent.type":"kimi-code-cli","text":"');
+  await fs.appendFile(file, Buffer.from([0xe7, 0x95]));
+  const restarted = new JsonlFlusher(options);
+  await restarted.sendBatch([first, second]);
+  await restarted.shutdown();
+  const { records } = await readAll(outputDir);
+  expect(records.map(record => record['event.id']).sort()).toEqual(['kimi-a', 'kimi-b']);
+  expect(JSON.stringify(records.find(record => record['event.id'] === 'kimi-a')) + '\n').toBe(complete);
+});
+
+it.each(['kimi-code-cli-2026-11-20.jsonl', `kimi-code-cli.part-${'a'.repeat(32)}-2026-11-20.jsonl`])(
+  'recovers complete Kimi receipts from the read-only archive %s', async filename => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 21, 12));
+    const { outputDir, flusher } = await setup(true);
+    const archived = path.join(outputDir, filename);
+    const active = path.join(outputDir, `kimi-code-cli-${getTodayDateString()}.jsonl`);
+    const accepted = { ...entry('kimi-accepted'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    const interrupted = { ...entry('kimi-interrupted'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    const bytes = JSON.stringify(accepted) + '\n' + JSON.stringify(interrupted);
+    await fs.writeFile(archived, bytes, { mode: 0o444 });
+
+    await flusher.createBatchDelivery([accepted, interrupted], undefined, undefined, { requireAcceptance: true })();
+
+    expect(await fs.readFile(archived, 'utf8')).toBe(bytes);
+    expect(JSON.parse((await fs.readFile(active, 'utf8')).trim())['event.id']).toBe('kimi-interrupted');
+    await flusher.shutdown();
+  },
+);
+
+it('rejects a failed Kimi write and accepts a single record once the active output is writable', async () => {
+  const { outputDir, flusher } = await setup(false);
+  const active = path.join(outputDir, 'kimi-code-cli-all.jsonl');
+  const kimi = { ...entry('kimi-failed-append'), 'gen_ai.agent.type': 'kimi-code-cli' };
+  await fs.mkdir(active);
+  const deliver = flusher.createBatchDelivery([kimi], undefined, undefined, { requireAcceptance: true });
+  await expect(deliver()).rejects.toThrow('not a regular file');
+  await fs.rmdir(active);
+  await deliver();
+  await deliver();
+  expect((await readAll(outputDir)).records.map(record => record['event.id'])).toEqual(['kimi-failed-append']);
+  await flusher.shutdown();
+});
+
+it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  'rejects an unreadable Kimi archive until its receipt can be checked', async () => {
+    const { outputDir, flusher } = await setup(false);
+    const archived = path.join(outputDir, `kimi-code-cli.part-${'b'.repeat(32)}-all.jsonl`);
+    const kimi = { ...entry('kimi-unreadable-receipt'), 'gen_ai.agent.type': 'kimi-code-cli' };
+    await fs.writeFile(archived, JSON.stringify(kimi) + '\n');
+    const deliver = flusher.createBatchDelivery([kimi], undefined, undefined, { requireAcceptance: true });
+    await fs.chmod(archived, 0o000);
+    try {
+      await expect(deliver()).rejects.toMatchObject({ code: 'EACCES' });
+    } finally {
+      await fs.chmod(archived, 0o600);
+    }
+    await deliver();
+    expect(await fs.readdir(outputDir)).toEqual([path.basename(archived)]);
+    await flusher.shutdown();
+  },
+);
+
+it('finds a retained Kimi receipt beyond the recent cache and avoids archive reads for new IDs', async () => {
+  const { outputDir, options } = await setup(false);
+  const old = 'kimi-retained-event';
+  const archive = path.join(outputDir, `kimi-code-cli.part-${'a'.repeat(32)}-all.jsonl`);
+  const active = path.join(outputDir, 'kimi-code-cli-all.jsonl');
+  const otherAgent = path.join(outputDir, 'codex-all.jsonl');
+  const line = (id: string) => JSON.stringify({ 'event.id': id, 'gen_ai.agent.type': 'kimi-code-cli' }) + '\n';
+  await fs.writeFile(archive, line(old));
+  await fs.utimes(archive, 1, 1);
+  await fs.writeFile(active, Array.from({ length: 65_536 }, (_, index) => line(`kimi-recent-${index}`)).join(''));
+  await fs.writeFile(otherAgent, line('kimi-new-event-after-restart'));
+  const flusher = new JsonlFlusher({ ...options, maxFileSizeMb: 100 });
+  const open = vi.mocked(fs.open);
+  open.mockClear();
+  const deliver = (id: string) => flusher.createBatchDelivery([
+    { ...entry(id), 'gen_ai.agent.type': 'kimi-code-cli' },
+  ], undefined, undefined, { requireAcceptance: true })();
+
+  await deliver(old);
+  expect(open.mock.calls.filter(([file]) => file === archive)).toHaveLength(2);
+  expect(open.mock.calls.some(([file]) => file === otherAgent)).toBe(false);
+  expect((await fs.readFile(active, 'utf8')).includes(old)).toBe(false);
+  open.mockClear();
+  await deliver('kimi-new-event-after-restart');
+  expect(open.mock.calls.some(([file]) => file === archive)).toBe(false);
+  expect((await fs.readFile(active, 'utf8')).includes('kimi-new-event-after-restart')).toBe(true);
+  await flusher.shutdown();
 });
 
 it('serializes two writer instances sharing the same active file', async () => {

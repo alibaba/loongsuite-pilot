@@ -82,6 +82,14 @@ export class HttpFlusher extends BaseFlusher {
     }
   }
 
+  protected override async sendAcceptedBatch(
+    entries: AgentActivityEntry[], _logicalBytes?: readonly number[], signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    if (this.stopped) throw new Error('HTTP output has stopped');
+    if (entries.length) await this.postBatch(entries.map(entry => serialiseLogEntry(entry)), signal);
+  }
+
   async flush(): Promise<void> {
     await Promise.all([this.flushBuffered(), this.flushCodex()]);
   }

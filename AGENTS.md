@@ -62,6 +62,7 @@
 | Claude Code | `claude-code` | Hook | `BaseHookInput` | `inputs/claude-code-log/` | `agents.d/claude-code.json` |
 | Codex | `codex` | Hook | `BaseInput` | `inputs/codex-transcript/` | `agents.d/codex.json` |
 | DeepSeek Harness | `dsh` | DSH YAML Patch | `BaseSessionInput` | `inputs/dsh-log/` | `agents.d/dsh.json` |
+| Kimi Code CLI | `kimi-code-cli` | Detection-only（原生会话轮询） | `BaseInput` | `inputs/kimi-code-cli/` | `agents.d/kimi-code-cli.json` |
 | Kiro CLI | `kiro-cli` | Hook | `BaseHookInput` / `BaseInput` | `inputs/kiro-cli-*/` | `agents.d/kiro-cli.json` |
 | OpenCode | `opencode` | Plugin-Inject | `BaseHookInput` | `inputs/opencode-log/` | `agents.d/opencode.json` |
 | MiMo Code | `mimo-code` | Plugin-Inject | `BaseHookInput` | `inputs/mimo-code-log/` | `agents.d/mimo-code.json` |

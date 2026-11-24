@@ -30,6 +30,12 @@ import {
   removeTrustBlock,
   verifyTrustHashes,
 } from './codex-trust-writer.js';
+import {
+  installKimiHooks,
+  uninstallKimiHooks,
+  isKimiHookInstalled,
+  listOwnedKimiEntries,
+} from './kimi-config-writer.js';
 
 const logger = createLogger('HookStrategy');
 
@@ -148,6 +154,9 @@ export class HookStrategy implements DeployStrategy {
       const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
       return !(await systemTomlHooksInstalled(def));
     }
+    if (this.isTomlAgent(def)) {
+      return this.needsDeployToml(def);
+    }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
     }
@@ -180,6 +189,42 @@ export class HookStrategy implements DeployStrategy {
       return true;
     }
     return reconcileQoderTokenUsageDefaults(def, false);
+  }
+
+  private isTomlAgent(def: AgentDefinition): boolean {
+    return def.hook?.settingsFormat === 'toml';
+  }
+
+  /**
+   * TOML-format agent (Kimi CLI ~/.kimi/config.toml) 的 needsDeploy 分支。
+   * 跳过 HookManager 的 JSON 路径，改用 kimi-config-writer 检查 [[hooks]] 段。
+   */
+  private async needsDeployToml(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook!;
+    const configPath = resolveHome(cfg.settingsPath);
+    const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
+    const replaceCmds = cfg.replaceHookCommands ?? [];
+
+    // 任一当前 event 缺失 → 需要部署
+    for (const event of cfg.events) {
+      const installed = await isKimiHookInstalled({
+        configPath,
+        hookCommand,
+        event,
+        replaceHookCommands: replaceCmds,
+      });
+      if (!installed) return true;
+    }
+
+    // 检查 retiredEvents 残留 / replaceHookCommands 残留：
+    // listOwnedKimiEntries 返回所有 command 匹配 hookCommand 或 replaceHookCommands
+    // 的条目。如果其中存在 event 不在当前 events 列表里，说明有 retired 残留。
+    const owned = await listOwnedKimiEntries(configPath, hookCommand, replaceCmds);
+    const currentEvents = new Set(cfg.events);
+    for (const entry of owned) {
+      if (!currentEvents.has(entry.event)) return true;
+    }
+    return false;
   }
 
   private async needsSettingsRepairForCodex(def: AgentDefinition): Promise<boolean> {
@@ -217,6 +262,10 @@ export class HookStrategy implements DeployStrategy {
     const hookConfig = def.hook;
     if (!hookConfig) {
       return { success: false, agentId: def.id, deployMode: 'hook', error: 'missing hook config' };
+    }
+
+    if (this.isTomlAgent(def)) {
+      return this.deployToml(def);
     }
 
     try {
@@ -410,6 +459,10 @@ export class HookStrategy implements DeployStrategy {
   }
 
   async undeploy(def: AgentDefinition): Promise<boolean> {
+    if (this.isTomlAgent(def)) {
+      return this.undeployToml(def);
+    }
+
     if (def.hook?.scope === 'system') {
       try {
         const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
@@ -463,6 +516,49 @@ export class HookStrategy implements DeployStrategy {
     }
 
     return allOk;
+  }
+
+  /**
+   * TOML-format agent (Kimi CLI) 的 deploy 分支。绕过 HookManager JSON 路径，
+   * 调用 kimi-config-writer 在 ~/.kimi/config.toml 的 [[hooks]] 段写入 pilot 拥有的
+   * 条目。installKimiHooks 内部已幂等：先清除 pilot 拥有的所有旧条目（包括
+   * retiredEvents 残留 + replaceHookCommands 残留），再追加当前 events。
+   */
+  private async deployToml(def: AgentDefinition): Promise<DeployResult> {
+    const cfg = def.hook!;
+    try {
+      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
+      const ok = await installKimiHooks({
+        configPath: resolveHome(cfg.settingsPath),
+        hookCommand,
+        events: cfg.events,
+        matcher: cfg.matcher ?? '*',
+        timeout: 30,
+        replaceHookCommands: cfg.replaceHookCommands ?? [],
+      });
+      if (!ok) {
+        return { success: false, agentId: def.id, deployMode: 'hook', error: 'kimi-config-writer install returned false' };
+      }
+      logger.info('kimi hooks deployed', { agentId: def.id, events: cfg.events.length });
+      return { success: true, agentId: def.id, deployMode: 'hook' };
+    } catch (err) {
+      return { success: false, agentId: def.id, deployMode: 'hook', error: String(err) };
+    }
+  }
+
+  private async undeployToml(def: AgentDefinition): Promise<boolean> {
+    const cfg = def.hook!;
+    try {
+      const hookCommand = wrapPs1Command(resolveHome(cfg.hookCommand), def.id);
+      return await uninstallKimiHooks({
+        configPath: resolveHome(cfg.settingsPath),
+        hookCommand,
+        replaceHookCommands: cfg.replaceHookCommands ?? [],
+      });
+    } catch (err) {
+      logger.warn('kimi hooks undeploy failed (non-blocking)', { error: String(err) });
+      return false;
+    }
   }
 
   /** Resolve each exact installed Pilot handler. Ambiguity is unsafe for trust. */

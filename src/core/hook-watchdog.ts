@@ -9,6 +9,7 @@ import type { HookWatchdogConfig } from '../types/index.js';
 import { HOOK_ASSET_MANIFEST } from './hook-asset-manifest.js';
 import { directoryExists, fileExists } from '../utils/fs-utils.js';
 import { readJsonDocument, type JsonSyntax } from '../utils/json-document.js';
+import { listInstalledKimiEvents } from '../deployment/kimi-config-writer.js';
 import { createLogger } from '../utils/logger.js';
 import {
   classifyPath,
@@ -47,6 +48,17 @@ export interface PluginCheckTarget {
   expectedHooks: string[];
   /** Substrings that identify our hook command in settings.json */
   markers: string[];
+  /**
+   * Settings file format. Defaults to 'json'. When 'toml', the watchdog uses
+   * kimi-config-writer to verify installed events instead of readJsonFile +
+   * settings.hooks[event] lookup (TOML files are not JSON-parseable).
+   */
+  settingsFormat?: 'json' | 'toml';
+  /**
+   * For TOML agents: the resolved pilot hook command used to identify our
+   * [[hooks]] entries in config.toml. Required when settingsFormat === 'toml'.
+   */
+  tomlHookCommand?: string;
 
   /** External command binary path (for plugin-type repair). Required if repairFn is not set. */
   binPath?: string;
@@ -464,22 +476,10 @@ export class HookWatchdog {
       }
     }
 
-    const document = await readJsonDocument<Record<string, unknown>>(
-      target.settingsPath,
-      target.settingsSyntax ?? 'json',
-    );
-    if (document.status === 'error') {
-      return this.reportInvalidConfig(target, document.error.message);
-    }
-    if (
-      document.status === 'ok'
-      && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
-    ) {
-      return this.reportInvalidConfig(target, 'settings root must be a JSON object');
-    }
-    this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
-    const settings = document.status === 'ok' ? document.data : null;
-    const missing = this.findMissingHooks(settings, target);
+    const missing = target.settingsFormat === 'toml'
+      ? await this.findMissingTomlHooks(target)
+      : await this.findMissingJsonHooks(target);
+    if (!Array.isArray(missing)) return missing;
     const found = target.expectedHooks.length - missing.length;
     let pendingChangeSignature: { key: string; value: string } | undefined;
 
@@ -646,6 +646,37 @@ export class HookWatchdog {
     }
 
     return missing;
+  }
+
+  private async findMissingJsonHooks(target: PluginCheckTarget) {
+    const document = await readJsonDocument<Record<string, unknown>>(
+      target.settingsPath,
+      target.settingsSyntax ?? 'json',
+    );
+    if (document.status === 'error') {
+      return this.reportInvalidConfig(target, document.error.message);
+    }
+    if (
+      document.status === 'ok'
+      && (!document.data || typeof document.data !== 'object' || Array.isArray(document.data))
+    ) {
+      return this.reportInvalidConfig(target, 'settings root must be a JSON object');
+    }
+    this.lastInvalidConfigByTarget.delete(this.invalidConfigTargetKey(target));
+    return this.findMissingHooks(document.status === 'ok' ? document.data : null, target);
+  }
+
+  /**
+   * TOML-format agent (Kimi CLI) 的 missing-hooks 检查。
+   * 用 kimi-config-writer.listInstalledKimiEvents 读 config.toml 的 [[hooks]] 段，
+   * 比对 expectedHooks 与已安装 events（command === tomlHookCommand）。
+   */
+  private async findMissingTomlHooks(target: PluginCheckTarget): Promise<string[]> {
+    if (!target.tomlHookCommand) return [...target.expectedHooks];
+    const installed = new Set(
+      await listInstalledKimiEvents(target.settingsPath, target.tomlHookCommand),
+    );
+    return target.expectedHooks.filter((event) => !installed.has(event));
   }
 
   private entryContainsMarker(entry: unknown, markers: string[]): boolean {

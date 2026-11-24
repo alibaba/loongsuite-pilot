@@ -63,6 +63,7 @@ import { CursorHookInput } from '../inputs/cursor-hook/cursor-hook-input.js';
 import { ClaudeCodeLogInput } from '../inputs/claude-code-log/claude-code-log-input.js';
 import { GrokBuildLogInput } from '../inputs/grok-build-log/grok-build-log-input.js';
 import { CodexTranscriptInput } from '../inputs/codex-transcript/codex-transcript-input.js';
+import { KimiCodeCliInput } from '../inputs/kimi-code-cli/kimi-code-cli-input.js';
 import { KiroCliLogInput } from '../inputs/kiro-cli-log/kiro-cli-log-input.js';
 import { KiroCliSessionInput } from '../inputs/kiro-cli-session/kiro-cli-session-input.js';
 import { CopilotLogInput } from '../inputs/copilot-log/copilot-log-input.js';
@@ -75,6 +76,7 @@ import { TraeCnLogInput } from '../inputs/trae-cn-log/trae-cn-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
+import { KimiLogInput } from '../inputs/kimi-log/kimi-log-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, type DoubaoClient } from '../utils/doubao-work-paths.js';
@@ -153,6 +155,7 @@ export class Orchestrator extends EventEmitter {
     'claude-code-log': 'claude-code',
     'grok-build-log': 'grok-build',
     'codex-transcript': 'codex',
+    'kimi-code-cli': 'kimi-code-cli',
     'kiro-cli-log': 'kiro-cli',
     'kiro-cli-session': 'kiro-cli',
     'copilot-log': 'copilot',
@@ -164,6 +167,7 @@ export class Orchestrator extends EventEmitter {
     'openclaw-plugin-log': 'openclaw',
     'trae-cn-log': 'trae-cn',
     'wukong': 'wukong',
+    'kimi-log': 'kimi',
     'workbuddy': 'workbuddy',
     'doubao-work': 'doubao-work',
     doubao: 'doubao',
@@ -856,7 +860,7 @@ export class Orchestrator extends EventEmitter {
       if (def.id === 'grok-build' || this.deploymentManager.effectiveDefinition(def).hook?.scope === 'system') continue;
 
       const scriptName = path.basename(def.hook.hookCommand.split(' ')[0]);
-      targets.push({
+      const target: PluginCheckTarget = {
         agentId: def.id,
         settingsPath: def.hook.settingsPath,
         settingsSyntax: def.hook.settingsSyntax,
@@ -873,7 +877,12 @@ export class Orchestrator extends EventEmitter {
           // watchdog only decides when to run it; it owns no TOML logic.
           needsRepairOnChange: () => this.deploymentManager.needsRedeploy(def),
         } : {}),
-      });
+      };
+      if (def.hook.settingsFormat === 'toml') {
+        target.settingsFormat = 'toml';
+        target.tomlHookCommand = def.hook.hookCommand;
+      }
+      targets.push(target);
     }
 
     return targets;
@@ -1095,7 +1104,7 @@ export class Orchestrator extends EventEmitter {
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw', 'antigravity', 'antigravity-cli']),
+            ['codex', 'hermes', 'openclaw', 'antigravity', 'antigravity-cli', 'kimi-code-cli']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
@@ -1757,6 +1766,24 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- Kimi Code CLI (native session journal) ---
+    const kimiCodeInput = new KimiCodeCliInput({
+      stateStore: this.stateStore,
+      captureMessageContent: this.config.agents['kimi-code-cli']?.captureMessageContent ?? true,
+      pollIntervalMs: listenerCfg['kimi-code-cli']?.pollInterval,
+    });
+    this.inputManager.registerInput(kimiCodeInput);
+    entries.push(this.inputManager.buildDetectionEntry(kimiCodeInput, {
+      watchPaths: kimiCodeInput.getWatchPaths(),
+      isAvailable: () => kimiCodeInput.checkAvailability(),
+      enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kimi-code-cli']) &&
+        this.agentControlManager.resolveEnabled(
+          'kimi-code-cli',
+          listenerCfg['kimi-code-cli']?.enabled ?? true,
+        ),
+      pollIntervalMs: listenerCfg['kimi-code-cli']?.pollInterval,
+    }));
+
     // --- Copilot CLI (session events.jsonl polling) ---
     const copilotLogInput = new CopilotLogInput({
       stateStore: this.stateStore,
@@ -1981,6 +2008,27 @@ export class Orchestrator extends EventEmitter {
           ),
         pollIntervalMs: listenerCfg['wukong']?.pollInterval,
         unavailableThreshold: 3,
+      }),
+    );
+
+    // --- Kimi CLI Log (wire.jsonl-driven hook JSONL) ---
+    const kimiLogDir = path.join(this.dataDir, 'logs', 'kimi');
+    await ensureDir(kimiLogDir);
+    const kimiLogInput = new KimiLogInput({
+      stateStore: this.stateStore,
+      logDir: kimiLogDir,
+    });
+    this.inputManager.registerInput(kimiLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(kimiLogInput, {
+        watchPaths: [kimiLogDir],
+        isAvailable: async () => directoryExists(kimiLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['kimi-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'kimi-log',
+            listenerCfg['kimi-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['kimi-log']?.pollInterval,
       }),
     );
 

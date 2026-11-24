@@ -1,0 +1,38 @@
+{
+  "id": "kimi",
+  "displayName": "Kimi CLI",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.kimi"],
+    "commands": ["kimi"]
+  },
+  "hook": {
+    "settingsPath": "~/.kimi/config.toml",
+    "settingsFormat": "toml",
+    "events": ["Stop", "StopFailure"],
+    "retiredEvents": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "PostToolUseFailure",
+      "SubagentStart",
+      "SubagentStop",
+      "PreCompact",
+      "PostCompact",
+      "Notification",
+      "SessionEnd"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/kimi-cli-loongsuite-pilot-hook.sh",
+    "format": "flat",
+    "matcher": "",
+    "replaceHookCommands": [
+      "otel-kimi-hook",
+      ".cache/opentelemetry.instrumentation.kimi"
+    ]
+  },
+  "input": {
+    "type": "hook-jsonl",
+    "logDir": "$PILOT_DATA/logs/kimi"
+  }
+}

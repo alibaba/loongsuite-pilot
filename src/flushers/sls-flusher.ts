@@ -1,7 +1,7 @@
 import ALY from '@alicloud/log';
 import * as os from 'node:os';
 import { Agent as UndiciAgent } from 'undici';
-import { BaseFlusher, CodexOutputDurabilityError } from './base-flusher.js';
+import { BaseFlusher, CodexOutputDurabilityError, type BatchDeliveryOptions } from './base-flusher.js';
 import {
   serialiseLogEntry,
   redactCodeGenerationFields,
@@ -228,6 +228,58 @@ export class SlsFlusher extends BaseFlusher {
       else await this.send(entry);
     }
     if (codex.length) await this.sendCodexBatch(codex, signal);
+  }
+
+  override createBatchDelivery(
+    entries: AgentActivityEntry[], logicalBytes?: readonly number[], signal?: AbortSignal, options?: BatchDeliveryOptions,
+  ): () => Promise<void> {
+    if (!options?.requireAcceptance) return super.createBatchDelivery(entries, logicalBytes, signal);
+    const destinations = this.config.endpoints.map(endpoint => ({
+      endpoint, accepted: this.acceptanceReceipt(options, endpoint) ?? new Set<string>(),
+    }));
+    return async () => {
+      let failure: { error: unknown } | undefined;
+      await this.runWithConcurrency(destinations.map(({ endpoint, accepted }) => async () => {
+        try {
+          await this.sendAcceptedEndpoint(endpoint, entries, accepted, signal);
+        } catch (error) {
+          failure ??= { error };
+        }
+      }), this.resolvedFlushConcurrency);
+      if (failure) throw failure.error;
+    };
+  }
+
+  private async sendAcceptedEndpoint(
+    endpoint: SlsEndpoint, entries: AgentActivityEntry[], accepted: Set<string>, signal?: AbortSignal,
+  ): Promise<void> {
+    signal?.throwIfAborted();
+    const logs = entries.filter(entry => !accepted.has(entry['event.id'])).map(entry => {
+      const content = { ...serialiseLogEntry(entry, { dropAgentScopedFields: true }), version: this.pilotVersion };
+      const agent = normalizeAgentType(String(entry['gen_ai.agent.type'] ?? 'unknown'));
+      return {
+        ...this.createQueuedLog(endpoint, endpoint.redact ? redactCodeGenerationFields(content) : content, agent),
+        eventId: entry['event.id'],
+      };
+    });
+    if (!logs.length) return;
+    const chunks = endpoint.mode === 'webtracking' ? this.splitForWebtracking(logs) : [logs];
+    const counter = this.endpointCounters.get(endpoint.name);
+    for (const chunk of chunks) {
+      signal?.throwIfAborted();
+      const start = Date.now();
+      const outcome = endpoint.mode === 'webtracking'
+        ? await this.postWebtracking(endpoint, chunk, signal) : await this.flushEndpoint(endpoint, chunk, signal);
+      if (counter) {
+        counter.outEntries += outcome.sentEntries;
+        counter.outBytes += outcome.sentBytes;
+        counter.outFailed += outcome.failedEntries;
+        counter.totalDelayMs += Date.now() - start;
+        if (outcome.sentEntries > 0) counter.lastFlushTime = formatTime(new Date());
+      }
+      if (outcome.failedEntries > 0) throw new Error(`SLS endpoint ${endpoint.name} did not acknowledge events`);
+      for (const log of chunk) accepted.add(log.eventId);
+    }
   }
 
   private async sendCodexBatch(entries: AgentActivityEntry[], signal?: AbortSignal): Promise<void> {
@@ -548,9 +600,9 @@ export class SlsFlusher extends BaseFlusher {
     return flushFailed(logs);
   }
 
-  private splitForWebtracking(logs: QueuedLog[]): QueuedLog[][] {
-    const chunks: QueuedLog[][] = [];
-    let current: QueuedLog[] = [];
+  private splitForWebtracking<T extends QueuedLog>(logs: T[]): T[][] {
+    const chunks: T[][] = [];
+    let current: T[] = [];
     let currentSize = 0;
 
     for (const log of logs) {

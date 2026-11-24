@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Context } from '@opentelemetry/api';
 import {
   RandomIdGenerator,
@@ -31,11 +32,24 @@ export class ReservedSpanIdGenerator implements IdGenerator {
   private readonly fallback = new RandomIdGenerator();
   private reserved?: string;
   private reservedTrace?: string;
+  private stableIds?: { seed: string; trace: number; span: number };
+
+  /** Scope deterministic fallback IDs to one conversion of a durable turn. */
+  setStableIdSeed(seed?: string): void {
+    this.stableIds = seed === undefined ? undefined : { seed, trace: 0, span: 0 };
+  }
+
+  private stableId(kind: 'trace' | 'span', length: number): string | undefined {
+    const state = this.stableIds;
+    if (!state) return undefined;
+    const id = createHash('sha256').update(`${state.seed}:${kind}:${state[kind]++}`).digest('hex').slice(0, length);
+    return /^0+$/.test(id) ? `${id.slice(1)}1` : id;
+  }
 
   generateTraceId = (): string => {
     const reserved = this.reservedTrace;
     this.reservedTrace = undefined;
-    return reserved ?? this.fallback.generateTraceId();
+    return reserved ?? this.stableId('trace', 32) ?? this.fallback.generateTraceId();
   };
 
   reserveTraceId(traceId: string): void {
@@ -52,7 +66,7 @@ export class ReservedSpanIdGenerator implements IdGenerator {
   generateSpanId = (): string => {
     const reserved = this.reserved;
     this.reserved = undefined;
-    return reserved ?? this.fallback.generateSpanId();
+    return reserved ?? this.stableId('span', 16) ?? this.fallback.generateSpanId();
   };
 
   reserve(spanId: unknown): boolean {

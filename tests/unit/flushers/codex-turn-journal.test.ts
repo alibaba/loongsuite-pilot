@@ -83,6 +83,45 @@ describe('CodexTurnJournal', () => {
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
 
+  it('retains Kimi tool records before the terminal response so a torn append cannot finish the turn', async () => {
+    const agents = ['kimi-code-cli'];
+    const request = entry('request', { 'gen_ai.agent.type': 'kimi-code-cli' });
+    const response = entry('response', {
+      ...request, 'event.id': 'response', 'event.name': 'llm.response', 'gen_ai.turn.end': true,
+    });
+    const call = entry('call', { ...request, 'event.id': 'call', 'event.name': 'tool.call' });
+    const result = entry('result', { ...request, 'event.id': 'result', 'event.name': 'tool.result' });
+    const turn = [request, response, call, result];
+    const journal = new CodexTurnJournal(directory, 100, agents);
+    await journal.append(turn);
+    const file = filename(directory, request);
+    const records = (await fs.readFile(file, 'utf8')).trimEnd().split('\n');
+    await fs.writeFile(file, records.slice(0, 2).join('\n') + '\n' + records[2].slice(0, 25));
+
+    const reopened = new CodexTurnJournal(directory, 100, agents);
+    expect(await readJournal(reopened)).toEqual([[request, call]]);
+    await reopened.append(turn);
+    expect(await readJournal(reopened)).toEqual([[request, call, result, response]]);
+  });
+
+  it('keeps Codex and Hermes replay available when stale Kimi receipt cleanup fails', async () => {
+    const agents = ['codex', 'hermes', 'kimi-code-cli'];
+    const kimi = entry('kimi-acked', { 'gen_ai.agent.type': 'kimi-code-cli' });
+    const codex = entry('codex-pending');
+    const hermes = entry('hermes-pending', { 'gen_ai.agent.type': 'hermes' });
+    const journal = new CodexTurnJournal(directory, 100, agents);
+    await journal.append([kimi, codex, hermes]);
+    await journal.acknowledge([kimi]);
+    const receipt = path.join(directory, `kimi-otlp-receipts-${codexTurnJournalGroupKey(kimi)}.json`);
+    // Whole-turn ACK was durable before the next startup finds this stale path.
+    await fs.mkdir(receipt);
+    const reopened = new CodexTurnJournal(directory, 100, agents);
+    expect(await reopened.isAcknowledged(kimi)).toBe(true);
+    expect((await readJournal(reopened)).flat().map(record => record['event.id']).sort())
+      .toEqual(['codex-pending', 'hermes-pending']);
+    expect((await fs.lstat(receipt)).isDirectory()).toBe(true);
+  });
+
   it('keeps late OpenClaw cron sender identity in its execution while preserving older journal keys', async () => {
     const early = entry('early', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });
     const later = entry('later', { ...early, 'event.id': 'later', 'user.id': 'native-sender' });

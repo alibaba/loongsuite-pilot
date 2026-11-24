@@ -28,6 +28,7 @@ import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.
 import type { InterceptResultLinker } from './intercept-result-linker.js';
 
 const logger = createLogger('InputManager');
+const ACKNOWLEDGED_INPUTS = new Set(['qwen-work-cn-collaboration', 'kimi-code-cli']);
 
 export interface InputCounter {
   /** Fixed, bounded source classification for this Input. */
@@ -84,6 +85,7 @@ export class InputManager extends EventEmitter {
   private readonly counters: Map<string, InputCounter> = new Map();
   private readonly entryQueues: Map<string, Promise<void>> = new Map();
   private readonly entryAbortControllers = new Map<string, AbortController>();
+  private readonly kimiOutputReceipts = new Map<object, Set<string>>();
   private flusher: BaseFlusher | null = null;
   private alarmManager: AlarmManager | null = null;
   private userId: string = '';
@@ -170,8 +172,9 @@ export class InputManager extends EventEmitter {
     input.setWorkspacePolicy(this.workspacePolicy);
     this.inputs.set(input.id, input);
     const isAntigravity = resolveAgentSystem(input.agentType) === 'antigravity';
+    const acknowledged = ACKNOWLEDGED_INPUTS.has(input.id);
     if (input.agentType === ClientType.CodexCliHook || input.agentType === ClientType.Hermes ||
-        isAntigravity || input.id === 'qwen-work-cn-collaboration') {
+        isAntigravity || acknowledged) {
       this.entryAbortControllers.set(input.id, new AbortController());
     }
     this.counters.set(input.id, {
@@ -208,7 +211,7 @@ export class InputManager extends EventEmitter {
       const handling = previous
         .catch(() => undefined)
         .then(() => this.handleEntries(input.id, entries));
-      if (input.id === 'qwen-work-cn-collaboration') {
+      if (acknowledged) {
         const controller = this.entryAbortControllers.get(input.id);
         const retained = handling.catch(error => {
           if (!controller?.signal.aborted) throw error;
@@ -551,6 +554,7 @@ export class InputManager extends EventEmitter {
   }
 
   private async dispatchEntries(inputId: string, entries: AgentActivityEntry[], batchBytes: number, logicalBytes?: readonly number[], signalOverride?: AbortSignal): Promise<void> {
+    const acknowledged = ACKNOWLEDGED_INPUTS.has(inputId);
     if (!this.flusher) {
       logger.warn('no flusher set, dropping entries', { count: entries.length });
       this.alarmManager?.record(
@@ -558,26 +562,29 @@ export class InputManager extends EventEmitter {
         `dropped ${entries.length} entries from ${inputId}: no flusher`,
         { input_name: inputId },
       );
-      if (inputId === 'qwen-work-cn-collaboration') throw new Error('no flusher for collaboration input');
+      if (acknowledged) throw new Error(`no flusher for ${inputId}`);
       return;
     }
 
     const counter = this.counters.get(inputId);
     const signal = signalOverride ?? this.entryAbortControllers.get(inputId)?.signal;
     try {
-      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal);
+      const receipts = inputId === 'kimi-code-cli' ? this.kimiOutputReceipts : undefined;
+      const options = receipts ? { requireAcceptance: true, receipts } : undefined;
+      const deliver = this.flusher.createBatchDelivery(entries, logicalBytes, signal, options);
       let quotaAlarmed = false;
-      let collaborationRetryMs = 1000;
+      let retryMs = 1000;
       while (true) {
         try {
+          if (acknowledged) signal?.throwIfAborted();
           await deliver();
           break;
         } catch (error) {
-          if (inputId === 'qwen-work-cn-collaboration' && !signal?.aborted) {
+          if (acknowledged && !signal?.aborted) {
             // Keep the source checkpoint behind this same fan-out delivery.
             // Its already-accepted destinations are not sent the batch again.
-            await delay(collaborationRetryMs, undefined, signal ? { signal } : undefined);
-            collaborationRetryMs = Math.min(collaborationRetryMs * 2, 30_000);
+            await delay(retryMs, undefined, signal ? { signal } : undefined);
+            retryMs = Math.min(retryMs * 2, 30_000);
             continue;
           }
           const quota = (error as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
@@ -590,13 +597,19 @@ export class InputManager extends EventEmitter {
           await delay(1000, undefined, signal ? { signal } : undefined);
         }
       }
+      if (receipts) {
+        for (const [target, receipt] of receipts) {
+          for (const entry of entries) receipt.delete(entry['event.id']);
+          if (!receipt.size) receipts.delete(target);
+        }
+      }
       if (counter) counter.outEvents += entries.length;
       this.emit('flushed', { count: entries.length, bytes: batchBytes });
     } catch (err) {
       if (counter) counter.outFailed += entries.length;
       if (signal?.aborted) throw err;
       logger.error('dispatch failed', { count: entries.length, error: String(err) });
-      if (inputId === 'qwen-work-cn-collaboration') throw err;
+      if (acknowledged) throw err;
       if (['CodexTurnJournalError', 'CodexOutputDurabilityError'].includes((err as Error)?.name)) {
         const quota = (err as Error & { cause?: Error }).cause?.name === 'CodexTurnJournalCapacityError';
         this.alarmManager?.record(quota ? 'FLUSH_QUOTA_ALARM' : 'FLUSH_SEND_ALARM', '3',

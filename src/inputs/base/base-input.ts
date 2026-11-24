@@ -143,6 +143,9 @@ export abstract class BaseInput extends EventEmitter {
   /** Commit source progress only after the batch has entered the shared output queue. */
   protected onEntriesQueued(): void | Promise<void> {}
 
+  /** Commit completed reads after accepted entries are queued or excluded by policy. */
+  protected onCollectionProcessed(): void | Promise<void> {}
+
   /** Request a serialized collection cycle, optionally retaining one wake-up while busy. */
   protected requestCollection(queueIfBusy = false): void {
     if (!this._running) return;
@@ -179,6 +182,7 @@ export abstract class BaseInput extends EventEmitter {
         await this.onEntriesQueued();
         this.logger.debug('cycle produced entries', { count: entries.length });
       }
+      await this.onCollectionProcessed();
       if (this.pendingOutputs.size) {
         await Promise.race([
           Promise.all([...this.pendingOutputs]),

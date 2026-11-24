@@ -2579,6 +2579,32 @@ try {
 NODE
 }
 
+remove_kimi_hook_config() {
+    local config="$HOME/.kimi/config.toml"
+    [ -f "$config" ] || return 0
+    if ! grep -Fq 'kimi-cli-loongsuite-pilot-hook.' "$config"; then
+        return 0
+    fi
+
+    local cache="${PILOT_CACHE_DIR:-$HOME/.loongsuite-pilot}"
+    local version
+    version="$(cat "$cache/current" 2>/dev/null || true)"
+    local node_bin="${NODE_BIN:-}"
+    if [ ! -x "$node_bin" ] && [ -f "$DATA_DIR/node-bin" ]; then
+        node_bin=$(tr -d '\r\n' < "$DATA_DIR/node-bin")
+    fi
+    if [ ! -x "$node_bin" ]; then node_bin=$(command -v node) || node_bin=""; fi
+    local helper
+    for helper in "$DATA_DIR/dist/scope-cleanup.cjs" "$cache/versions/$version/dist/scope-cleanup.cjs" "${PERMANENT_DIR:-$cache/package}/dist/scope-cleanup.cjs"; do
+        if [ -n "$node_bin" ] && [ -f "$helper" ]; then
+            "$node_bin" "$helper" --kimi "$config"
+            return $?
+        fi
+    done
+    echo "Kimi hook cleanup helper unavailable; Pilot assets retained for retry" >&2
+    return 1
+}
+
 remove_grok_build_hook_config() {
     local grok_home="${GROK_HOME:-$HOME/.grok}"
     local cfg="$grok_home/hooks/loongsuite-pilot.json"
@@ -3311,6 +3337,9 @@ cmd_uninstall() {
         return 1
     fi
     remove_hook_configs
+    if ! remove_kimi_hook_config; then
+        return 1
+    fi
     if ! remove_grok_build_hook_config; then
         return 1
     fi
