@@ -1,3 +1,4 @@
+import { buildTraces, validateTime } from '../../../../scripts/validate-trace.mjs';
 import { expect, it } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
@@ -128,10 +129,11 @@ it.each([
 ])('exports the final answer once when an attributable tool round precedes a %s terminal stream', (_label, shared) => {
   const span = (kind: string, id: string, parentSpanId?: string) => ({
     name: kind, spanContext: () => ({ spanId: id, traceId: 'a'.repeat(32) }), parentSpanId,
-    startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind },
+    startTime: [1, 0], endTime: [4, 0], attributes: { 'gen_ai.span.kind': kind, 'gen_ai.agent.name': 'trae-cn' },
   }) as unknown as ReadableSpan;
   const agent = span('AGENT', 'agent'), step = span('STEP', 'step', 'agent');
   const llm = span('LLM', 'model', 'step'), tool = span('TOOL', 'tool', 'step');
+  Object.assign(tool, { startTime: [2, 100], endTime: [2, 500000000] });
   tool.attributes['gen_ai.tool.call.id'] = 'call_one';
   tool.attributes['gen_ai.tool.call.result'] = 'source found';
   llm.attributes['gen_ai.input.messages'] = JSON.stringify([{ role: 'user', parts: [
@@ -157,6 +159,12 @@ it.each([
     'loongsuite.trae_cn.model_responses': [firstRound, ...terminalRounds] }] as unknown as AgentActivityEntry[];
 
   const result = omitEmptyTraeModelSpans(expandTraeHistory(records, [agent, step, llm, tool]));
+  const nanos = ([seconds, ns]: [number, number]) => String(BigInt(seconds) * 1_000_000_000n + BigInt(ns));
+  const [trace] = buildTraces(result.map(s => ({
+    ...s.spanContext(), parentSpanId: s.parentSpanId, name: s.name, attributes: s.attributes,
+    startTimeUnixNano: nanos(s.startTime), endTimeUnixNano: nanos(s.endTime),
+  })));
+  expect(validateTime(trace, { timeRules: [] }).filter((check: { status: string }) => check.status === 'error')).toEqual([]);
   const models = result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
   const finalModels = models.filter(s => String(s.attributes['gen_ai.output.messages']).includes('report built'));
   expect(finalModels).toHaveLength(1);

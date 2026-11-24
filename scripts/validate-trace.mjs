@@ -481,6 +481,23 @@ function shortKey(key) {
 
 // ─── 5c. Time Validation ────────────────────────────────────────────────────
 
+function isRecordedTraeModel(span) {
+  return span._kind === 'LLM' && isTraeObservation(span, 'response_recorded') &&
+    Boolean(span.attributes['gen_ai.response.id']);
+}
+
+function isInstantTraeResponse(span, childrenMap) {
+  if (isRecordedTraeModel(span)) return true;
+  if (span._kind !== 'STEP' || !isTraeObservation(span, 'response_recorded')) return false;
+  // A tool-free history round and its only model share one recorded instant.
+  const children = childrenMap.get(span.spanId) || [];
+  const model = children[0];
+  return children.length === 1 && isRecordedTraeModel(model) &&
+    span.attributes['gen_ai.step.id'] === model.attributes['gen_ai.response.id'] &&
+    BigInt(model.startTimeUnixNano) === BigInt(span.startTimeUnixNano) &&
+    BigInt(model.endTimeUnixNano) === BigInt(span.endTimeUnixNano);
+}
+
 export function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
@@ -489,9 +506,7 @@ export function validateTime(trace, rules) {
   for (const s of spans) {
     const start = BigInt(s.startTimeUnixNano);
     const end = BigInt(s.endTimeUnixNano);
-    const recordedResponse = s._kind === 'LLM' && isTraeObservation(s, 'response_recorded') &&
-      Boolean(s.attributes['gen_ai.response.id']);
-    if (end < start || (end === start && !recordedResponse)) {
+    if (end < start || (end === start && !isInstantTraeResponse(s, childrenMap))) {
       checks.push(error('time.non_zero_duration', `duration=${Number(end - start) / 1e6}ms`, s.spanId, s.name));
       allNonZero = false;
     }

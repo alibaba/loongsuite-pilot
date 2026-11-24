@@ -220,6 +220,15 @@ describe('TRAE CN native response observations', () => {
     expect(errors(fixture.spans)).toContain(rule);
   });
 
+  test('rejects a zero-duration STEP with a tool or a mismatched model identity', () => {
+    const { spans, step, response, tool } = trace();
+    step.startTimeUnixNano = step.endTimeUnixNano = response.startTimeUnixNano;
+    step.attributes['gen_ai.step.id'] = response.attributes['gen_ai.response.id'];
+    expect(errors(spans)).toContain('time.non_zero_duration');
+    step.attributes['gen_ai.step.id'] = 'other-response';
+    expect(errors(spans.filter(s => s !== tool))).toContain('time.non_zero_duration');
+  });
+
   test('retains a tool-only STEP when model messages are unavailable', () => {
     const { entry, agent, step, tool } = trace();
     const spans = [entry, agent, step, tool];
