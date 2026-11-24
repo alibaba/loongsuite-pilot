@@ -150,7 +150,7 @@ function fillRequestStartTimes(llmCalls, promptTimestamp) {
  *
  * @param {string} transcriptPath - transcript 文件路径
  * @param {number} byteOffset - 增量读取起点(字节偏移)
- * @param {{ promptId: string, sourceIdentity?: string, leadingUnkeyedOnly?: boolean }} [stopBoundary]
+ * @param {{ promptId: string, sourceIdentity?: string, leadingUnkeyedOnly?: boolean, firstPrompt?: boolean }} [stopBoundary]
  *   A queued Stop reads only complete records and cannot consume a later prompt.
  * @returns {{ turns: Array, nextOffset: number, sourceIdentity?: string, sawStopPrompt?: boolean, unkeyedPromptCount?: number }}
  *   turns: 按 promptId 切分的 turn 数组,每个 turn 包含 llmCalls + prompt + timestamps
@@ -166,8 +166,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
     fd = fs.openSync(transcriptPath, 'r');
     const stat = fs.fstatSync(fd);
     sourceIdentity = `${stat.dev}:${stat.ino}`;
-    if (stopBoundary?.leadingUnkeyedOnly && (stopBoundary.sourceIdentity !== sourceIdentity ||
-      byteOffset > stat.size || stat.size - byteOffset > MAX_TRANSCRIPT_BYTES)) {
+    if ((stopBoundary?.leadingUnkeyedOnly || stopBoundary?.firstPrompt) &&
+      (stopBoundary.sourceIdentity !== sourceIdentity || byteOffset > stat.size || stat.size - byteOffset > MAX_TRANSCRIPT_BYTES)) {
       return { turns: [], nextOffset: byteOffset, sourceIdentity };
     }
     if (stopBoundary && (byteOffset > stat.size
@@ -204,13 +204,14 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
   const slashCommandsByPromptId = new Map(); // promptId → { name, timestamp }
   const skillLoads = []; // 从 skill isMeta 注入还原的加载事实
   let currentPromptId = null; // 当前 turn 的 promptId(从 user record 提取)
-  let lineOffset = readFrom;
+  let lineOffset = 0;
   let sawStopPrompt = false;
   let unkeyedPromptCount = 0;
+  let firstPromptId;
 
   for (const line of buffer.toString('utf8').split('\n')) {
-    const lineStart = lineOffset;
-    if (stopBoundary) lineOffset += Buffer.byteLength(line) + 1;
+    const lineStart = readFrom + lineOffset;
+    if (stopBoundary) lineOffset = buffer.indexOf(10, lineOffset) + 1;
     const trimmed = line.trim();
     if (!trimmed) continue;
 
@@ -283,6 +284,15 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
       const isMeta = isMetaRecord(record);
 
       if (stopBoundary && !isMeta && !isToolResultContent(msg.content)) {
+        // An unkeyed StopFailure after a committed turn can only own the
+        // immediately following prompt. A later API error is not its error.
+        if (stopBoundary.firstPrompt) {
+          if (firstPromptId !== undefined && (!promptId || promptId !== firstPromptId)) {
+            nextOffset = lineStart;
+            break;
+          }
+          firstPromptId = promptId;
+        }
         if (stopBoundary.leadingUnkeyedOnly) {
           if (promptId || unkeyedPromptCount) {
             nextOffset = lineStart;

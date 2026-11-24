@@ -106,6 +106,55 @@ describe('Claude Code late Stop transcript', () => {
     expect(await collect()).toEqual([]);
   });
 
+  test.each([false, true])('resumes all unread turns after an established cursor when the current Stop is late=%s', async (late) => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first', 0), answer('response-a', 'first reply', 1)));
+    stop('prompt-a', 'first reply');
+    const responseB = answer('response-b', 'second reply', 3);
+    const responseC = answer('response-c', 'third reply', 5);
+    fs.appendFileSync(transcriptPath, records(user('prompt-b', 'second', 2), responseB, user('prompt-c', 'third', 4)));
+    if (!late) fs.appendFileSync(transcriptPath, records(responseC));
+    stop('prompt-c', 'third reply');
+    if (late) fs.appendFileSync(transcriptPath, records(responseC));
+
+    const entries = await collect();
+    expect(entries.filter((event) => event['event.name'] === 'llm.response').map((event) => event['gen_ai.response.id']))
+      .toEqual(['response-a', 'response-b', 'response-c']);
+    expect(await collect()).toEqual([]);
+  });
+
+  test('a StopFailure without prompt_id recovers the native error following a pending Stop', async () => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first', 0)));
+    stop('prompt-a', 'first reply');
+    fs.appendFileSync(transcriptPath, records(
+      answer('response-a', 'first reply', 1),
+      user('prompt-b', 'trigger failure', 2),
+    ));
+    runHook('stop-failure', {
+      hook_event_name: 'StopFailure', session_id: 'session', transcript_path: transcriptPath,
+      error: 'server_error', last_assistant_message: 'private fixture error',
+    });
+    fs.appendFileSync(transcriptPath, records(
+      {
+        ...answer('response-error', 'private transcript error', 3),
+        isApiErrorMessage: true, apiErrorStatus: 529, error: 'server_error', requestId: 'request-error',
+      },
+      user('prompt-c', 'recover', 4),
+      answer('response-c', 'third reply', 5),
+    ));
+    stop('prompt-c', 'third reply');
+
+    const entries = await collect();
+    const responses = entries.filter((event) => event['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(3);
+    expect(responses[1]).toMatchObject({
+      'gen_ai.request.id': 'request-error', 'gen_ai.response.finish_reasons': ['error'],
+      'http.response.status_code': 529, 'error.type': 'server_error',
+    });
+    expect(responses[2]['gen_ai.response.id']).toBe('response-c');
+    expect(JSON.stringify(entries)).not.toContain('private fixture error');
+    expect(await collect()).toEqual([]);
+  });
+
   test('a full queue falls back to reading the visible calls when this session has no pending Stop', () => {
     fs.mkdirSync(queue, { recursive: true });
     const now = Date.now();

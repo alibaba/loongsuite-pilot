@@ -683,7 +683,7 @@ async function cmdTerminal(eventKind) {
         await waitForTranscriptStable(stop.transcriptPath, state.transcript_offset || 0);
         const receipt = readStopTranscript(state, stop);
         if (matchesStopReply(receipt.turn?.llmCalls.at(-1), stop)) {
-          parsed = { ...receipt.parsed, turns: [receipt.turn] };
+          parsed = receipt.parsed;
         } else if (!receipt.turn && wasCompletedStop(state, stop, receipt.parsed.sourceIdentity)) {
           return;
         }
@@ -764,9 +764,12 @@ function wasCompletedStop(state, stop, sourceIdentity) {
 function readStopTranscript(state, stop) {
   const samePath = !state.transcript_path || state.transcript_path === stop.transcriptPath;
   const offset = samePath ? state.transcript_offset || 0 : 0;
+  const sourceIdentity = samePath ? state.transcript_identity : undefined;
+  const anonymousError = !stop.promptId && stop.stopReason === 'error';
   const boundary = {
     promptId: stop.promptId,
-    sourceIdentity: samePath ? state.transcript_identity : undefined,
+    sourceIdentity,
+    firstPrompt: anonymousError && offset > 0 && Boolean(sourceIdentity),
   };
   let parsed = parseClaudeTranscript(stop.transcriptPath, offset, boundary);
   const onlyTurn = parsed.turns.length === 1 ? parsed.turns[0] : undefined;
@@ -789,6 +792,13 @@ function readStopTranscript(state, stop) {
       turn = first;
     }
   }
+  if (anonymousError && !matchesStopReply(turn?.llmCalls.at(-1), stop)) turn = undefined;
+
+  // The synchronous reader has always recovered intervening turns on an
+  // established transcript. Keep that behavior up to the confirmed Stop.
+  const resumed = offset > 0 && parsed.nextOffset >= offset
+    && (!sourceIdentity || sourceIdentity === parsed.sourceIdentity);
+  if (turn && !(resumed && parsed.sawStopPrompt)) parsed = { ...parsed, turns: [turn] };
   return { parsed, turn, samePath };
 }
 
@@ -840,7 +850,7 @@ async function cmdDrainStops() {
           state.cwd = stop.cwd || state.cwd;
           state.transcript_identity = parsed.sourceIdentity;
           output = await exportSession(state, stop.stopReason, stop.promptId, {
-            parsed: { ...parsed, turns: [turn] },
+            parsed,
             context: stop.context,
           });
           state.transcript_offset = state._next_transcript_offset;
