@@ -23,7 +23,8 @@
       "afterAgentThought"
     ],
     "hookCommand": "$PILOT_DATA/hooks/cursor-loongsuite-pilot-hook.sh",
-    "format": "flat"
+    "format": "flat",
+    "timeout": 30
   },
   "input": {
     "type": "hook-jsonl",

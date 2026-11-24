@@ -42,6 +42,8 @@ function eventToSubcommand(event: string): string {
   return event.replace(/([a-z])([A-Z])/g, '$1-$2').toLowerCase();
 }
 
+const QUOTED_WINDOWS_HOOK_AGENTS = new Set(['codex', 'cursor', 'grok-build']);
+
 /**
  * On Windows, .ps1 scripts must be invoked via `powershell -File` for stdin
  * piping to work correctly.  Bare `.ps1` paths fail to receive stdin when
@@ -58,7 +60,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || !QUOTED_WINDOWS_HOOK_AGENTS.has(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -66,7 +68,12 @@ function wrapPs1Command(cmd: string, agentId: string): string {
   if (!match) return cmd;
   const script = match[1];
   const args = match[2] ?? '';
-  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "${script}"`;
+  // Cursor parses the command in a PowerShell host, where a double-quoted
+  // path would expand variables and backticks before invoking the launcher.
+  const quotedScript = agentId === 'cursor'
+    ? `'${script.replace(/['\u2018\u2019\u201a\u201b]/g, quote => quote + quote)}'`
+    : `"${script}"`;
+  const wrapped = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File ${quotedScript}`;
   return args ? `${wrapped} ${args}` : wrapped;
 }
 
@@ -109,7 +116,7 @@ function legacyHookCommands(
   if (process.platform !== 'win32' && agentId === 'claude-code') {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || !QUOTED_WINDOWS_HOOK_AGENTS.has(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -583,6 +590,7 @@ export class HookStrategy implements DeployStrategy {
       matcher: hookConfig.eventMatchers?.[event] ?? hookConfig.matcher,
       useNestedFormat: hookConfig.format === 'nested',
       shell: process.platform === 'win32' ? hookConfig.winShell : undefined,
+      timeout: hookConfig.timeout,
       replaceHookCommands: [
         ...(hookConfig.replaceHookCommands ?? []),
         ...legacyHookCommands(
