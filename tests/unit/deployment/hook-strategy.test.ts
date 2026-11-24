@@ -24,6 +24,10 @@ vi.mock('../../../src/deployment/detect-utils.js', () => ({
   detectAgent: vi.fn(),
 }));
 
+vi.mock('../../../src/deployment/qoder-token-usage.js', () => ({
+  reconcileQoderTokenUsageDefaults: vi.fn().mockResolvedValue(false),
+}));
+
 vi.mock('../../../src/utils/fs-utils.js', () => ({
   fileExists: vi.fn(),
   readJsonFile: vi.fn(),

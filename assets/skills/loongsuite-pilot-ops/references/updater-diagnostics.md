@@ -56,7 +56,8 @@ tail -30 ~/.loongsuite-pilot/logs/loongsuite-pilot-updater.log
 ```
 
 常见原因：
-- `auto-update disabled via config, exiting` → 更新被禁用，见第 2 步
+- `auto-update disabled, repairing hook assets only` → 版本检查关闭，进程仍留着修 hook。pid 不在仍是故障，见第 2 步
+- `auto-update and hook repair disabled, exiting` → 版本检查和 hook 修复都关了，进程退出。pid 不在是预期状态
 - `updater fatal error` → 启动时发生致命错误，检查日志中的 error 字段
 - `too many consecutive failures, stopping updater` → 连续失败过多（≥10 次），updater 主动停止
 
@@ -261,12 +262,36 @@ git_commit=abc1234
 
 ---
 
+防篡改写在 `hookWatchdog` 下面。`enabled` 是总开关，默认开；`tamperProtection.enabled` 是子开关，默认关。父开关关掉后子开关不生效。
+
+```json
+{
+  "hookWatchdog": {
+    "enabled": true,
+    "tamperProtection": {
+      "enabled": true
+    }
+  }
+}
+```
+
+安装时可以指定，不传则保留已有值：
+
+```bash
+installer.sh install --hook-tamper-protection true
+```
+
+```powershell
+.\installer.ps1 install -HookTamperProtection true
+```
+
 ## 常见问题速查
 
 | 现象 | 解决方法 |
 |------|---------|
-| `loongsuite-pilot status` 显示 updater 未运行 | 查看 updater 日志：可能被禁用（`auto-update disabled`）、可能连续失败过多（`too many consecutive failures`）。重启服务可重置 |
-| `auto-update disabled via config` | `config.json` 的 `autoUpdate.enabled` 为 `false` 或环境变量 `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false`。移除禁用配置后重启 |
+| `loongsuite-pilot status` 显示 updater 未运行 | 查看 updater 日志。防篡改开着且只关版本检查时，进程仍应在（`auto-update disabled, repairing hook assets only`）。两个都关时日志是 `auto-update and hook repair disabled, exiting`，pid 不在是预期状态。其余情况进程不在就重启服务 |
+| `auto-update disabled, repairing hook assets only` | `autoUpdate.enabled` 为 `false` 或 `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false`，同时 hook 修复还开着。版本检查停了，hook 修复还在 |
+| `auto-update and hook repair disabled, exiting` | 自动更新关着，并且防篡改没生效。防篡改要 `hookWatchdog.enabled` 与 `hookWatchdog.tamperProtection.enabled` 同时为 true，子开关默认关。环境变量 `LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED` 只覆盖子开关，父开关关着时进程仍退出。安装可用 `--hook-tamper-protection true` 或 `-HookTamperProtection true` |
 | manifest 拉取失败（`manifest fetch failed`） | 检查网络连通性：`curl -I <manifestUrl>`。常见原因：代理未配置、OSS 域名不可达、DNS 解析失败 |
 | `SHA-256 mismatch` | tarball 下载不完整或 CDN 缓存与 manifest 不一致。等待下一次自动重试（通常 CDN 缓存刷新后恢复） |
 | `npm install` 失败 | 检查 Node.js 和 npm 是否可用：`node --version && npm --version`。常见：PATH 中无 node、npm registry 不可达 |
