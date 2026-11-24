@@ -20,13 +20,13 @@ afterEach(async () => {
 
 it('isolates built-in config targets and restores inherited directory overrides', async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-home-'));
-  for (const key of ['HOME', 'USERPROFILE', 'GROK_HOME', 'HERMES_HOME', 'PI_CODING_AGENT_DIR', 'DSH_HOME', 'OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR']) {
+  for (const key of ['HOME', 'USERPROFILE', 'GROK_HOME', 'HERMES_HOME', 'HERMES_CLI', 'PI_CODING_AGENT_DIR', 'DSH_HOME', 'OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR']) {
     vi.stubEnv(key, path.join(root, 'outside', key));
   }
   vi.stubEnv('XDG_CONFIG_HOME', undefined);
   const keys = [
     'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'XDG_CONFIG_HOME',
-    'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GROK_HOME', 'HERMES_HOME',
+    'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'GROK_HOME', 'HERMES_HOME', 'HERMES_CLI',
     'PI_CODING_AGENT_DIR', 'DSH_HOME',
     'OPENCLAW_CONFIG_PATH', 'OPENCLAW_STATE_DIR',
   ];
@@ -48,6 +48,9 @@ it('isolates built-in config targets and restores inherited directory overrides'
       localDir: path.join(home, 'agents.d.local'),
     }).load();
     expect(definitions.length).toBeGreaterThan(0);
+    const hermesCommand = path.join(home, '.local', 'bin', process.platform === 'win32' ? 'hermes.exe' : 'hermes');
+    expect(process.env.HERMES_CLI).toBe(hermesCommand);
+    expect(definitions.find(def => def.id === 'hermes-agent')?.directoryPlugin?.activation?.command).toBe(hermesCommand);
     for (const def of definitions) {
       const targets = [
         def.hook?.settingsPath, def.hook?.trustToml?.configPath,

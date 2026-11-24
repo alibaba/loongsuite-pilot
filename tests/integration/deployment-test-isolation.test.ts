@@ -38,11 +38,22 @@ it('sets the native user home before worker threads start', () => {
   expect(path.basename(home)).toMatch(/^pilot-test-suite-home-/);
 });
 
-it('deployment tests leave the launching user home unchanged, including legacy plugins', async () => {
+it('deployment tests isolate the launching user home and inherited Hermes CLI', async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-test-isolation-'));
   const home = path.join(root, 'launching-user');
   const temp = path.join(root, 'tmp');
+  const inheritedBin = path.join(root, 'inherited-bin');
+  const hermesCalls = path.join(root, 'hermes-calls');
   await fs.mkdir(temp, { recursive: true });
+  await fs.mkdir(inheritedBin);
+  if (process.platform !== 'win32') {
+    await fs.writeFile(path.join(inheritedBin, 'hermes'), [
+      '#!/bin/sh',
+      'printf "%s\\n" "$*" >> "$PILOT_TEST_HERMES_CALLS"',
+      'printf "%s\\n" "--no-allow-tool-override"',
+      '',
+    ].join('\n'), { mode: 0o755 });
+  }
   const fixtures: Record<string, string> = {
     '.claude/settings.json': JSON.stringify({ hooks: { Stop: [
       { hooks: [{ command: '/legacy/otel-claude-hook stop' }] },
@@ -87,8 +98,12 @@ it('deployment tests leave the launching user home unchanged, including legacy p
     env: {
       ...process.env,
       ...agentHomeEnvironment(home),
+      HERMES_CLI: '',
+      PATH: [inheritedBin, process.env.PATH].filter(Boolean).join(path.delimiter),
+      PILOT_TEST_HERMES_CALLS: hermesCalls,
       TMPDIR: temp, TMP: temp, TEMP: temp,
     },
   });
   expect(await snapshot(home), stdout + stderr).toEqual(before);
+  await expect(fs.stat(hermesCalls)).rejects.toMatchObject({ code: 'ENOENT' });
 }, 45_000);

@@ -870,8 +870,8 @@ describe('CodexTranscriptInput', () => {
       expect(input.running).toBe(true);
 
       await fs.rm(sessionDir, { recursive: true });
-      await waitFor(() => !input.running);
-      expect(svc.getStates()[input.id]).toBe('idle');
+      await waitFor(() => svc.getStates()[input.id] === 'idle');
+      expect(input.running).toBe(false);
 
       await fs.mkdir(sessionDir, { recursive: true });
       await writeTranscript(sessionDir, completedTurn());

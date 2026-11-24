@@ -13,6 +13,8 @@ export function agentHomeEnvironment(homeDir: string): Record<string, string> {
     CODEX_HOME: path.join(homeDir, '.codex'),
     GROK_HOME: path.join(homeDir, '.grok'),
     HERMES_HOME: path.join(homeDir, '.hermes'),
+    // An explicit local executable also prevents falling back to the caller's PATH.
+    HERMES_CLI: path.join(homeDir, '.local', 'bin', process.platform === 'win32' ? 'hermes.exe' : 'hermes'),
     PI_CODING_AGENT_DIR: path.join(homeDir, '.pi', 'agent'),
     DSH_HOME: path.join(homeDir, '.dsh'),
     // Keep explicit test config paths usable instead of inheriting a live profile.

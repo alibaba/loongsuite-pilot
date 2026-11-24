@@ -98,16 +98,31 @@ describe('DirectoryPluginStrategy', () => {
 
   it('detects the resolved native entry before the first configuration directory exists', async () => {
     vi.mocked(detectAgent).mockResolvedValue(false);
-    const entry = path.join(tmpDir, 'hermes');
+    const executable = process.platform === 'win32' ? 'hermes.exe' : 'hermes';
+    const entry = path.join(tmpDir, executable);
     await fs.writeFile(entry, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     const def = withActivation(makeDef());
+    def.detection = { paths: [path.join(tmpDir, '.hermes')], commands: [executable] };
     def.directoryPlugin!.activation!.command = entry;
     expect(await strategy.detect(def)).toBe(true);
     expect(await fs.stat(targetDir).then(() => true, () => false)).toBe(false);
-    await fs.chmod(entry, 0o644);
-    expect(await strategy.detect(def)).toBe(false);
-    def.directoryPlugin!.activation!.command = 'hermes';
-    expect(await strategy.detect(def)).toBe(false);
+    if (process.platform !== 'win32') {
+      await fs.chmod(entry, 0o644);
+      expect(await strategy.detect(def)).toBe(false);
+    }
+    await fs.unlink(entry);
+    // The default command must be absent from every fallback location used by
+    // the fixture, including the test runner's user installs.
+    vi.stubEnv('HOME', tmpDir);
+    vi.stubEnv('USERPROFILE', tmpDir);
+    vi.stubEnv('HERMES_CLI', '');
+    vi.stubEnv('PATH', tmpDir);
+    try {
+      def.directoryPlugin!.activation!.command = executable;
+      expect(await strategy.detect(def)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('requires the activation executable even when the home directory detects Hermes', async () => {
