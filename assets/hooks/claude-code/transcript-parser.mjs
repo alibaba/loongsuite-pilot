@@ -150,7 +150,7 @@ function fillRequestStartTimes(llmCalls, promptTimestamp) {
  *
  * @param {string} transcriptPath - transcript 文件路径
  * @param {number} byteOffset - 增量读取起点(字节偏移)
- * @param {{ promptId: string, sourceIdentity?: string }} [stopBoundary]
+ * @param {{ promptId: string, sourceIdentity?: string, leadingUnkeyedOnly?: boolean }} [stopBoundary]
  *   A queued Stop reads only complete records and cannot consume a later prompt.
  * @returns {{ turns: Array, nextOffset: number, sourceIdentity?: string, sawStopPrompt?: boolean, unkeyedPromptCount?: number }}
  *   turns: 按 promptId 切分的 turn 数组,每个 turn 包含 llmCalls + prompt + timestamps
@@ -166,6 +166,10 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
     fd = fs.openSync(transcriptPath, 'r');
     const stat = fs.fstatSync(fd);
     sourceIdentity = `${stat.dev}:${stat.ino}`;
+    if (stopBoundary?.leadingUnkeyedOnly && (stopBoundary.sourceIdentity !== sourceIdentity ||
+      byteOffset > stat.size || stat.size - byteOffset > MAX_TRANSCRIPT_BYTES)) {
+      return { turns: [], nextOffset: byteOffset, sourceIdentity };
+    }
     if (stopBoundary && (byteOffset > stat.size
       || (stopBoundary.sourceIdentity && stopBoundary.sourceIdentity !== sourceIdentity))) byteOffset = 0;
 
@@ -221,6 +225,7 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
     if (!recordType) continue;
 
     if (recordType === 'assistant') {
+      if (stopBoundary?.leadingUnkeyedOnly && !unkeyedPromptCount) break;
       const apiError = extractApiError(record);
       if (isSyntheticAssistantRecord(record) && !apiError) {
         continue;
@@ -278,6 +283,13 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
       const isMeta = isMetaRecord(record);
 
       if (stopBoundary && !isMeta && !isToolResultContent(msg.content)) {
+        if (stopBoundary.leadingUnkeyedOnly) {
+          if (promptId || unkeyedPromptCount) {
+            nextOffset = lineStart;
+            break;
+          }
+          currentPromptId = null;
+        }
         // A later user prompt can also come from a transcript version that
         // omits its ID. Leave its bytes available for its own Stop.
         if (sawStopPrompt && stopBoundary.promptId !== promptId) {

@@ -161,6 +161,66 @@ describe('Claude Code late Stop transcript', () => {
     expect(await collect()).toEqual([]);
   });
 
+  test.each(['prompt-c', undefined])('an unkeyed prompt still drains from the saved cursor with next prompt ID %s', async (nextId) => {
+    fs.writeFileSync(transcriptPath, records(
+      user('prompt-a', 'first prompt', 0), answer('response-a', 'first reply', 1),
+    ));
+    stop('prompt-a', 'first reply');
+    expect((await collect()).filter((event) => event['event.name'] === 'llm.response')).toHaveLength(1);
+
+    fs.appendFileSync(transcriptPath, records(
+      user(undefined, 'legacy prompt', 2), answer('response-b', 'same reply', 3),
+      user(nextId, 'next prompt', 4), answer('response-c', 'same reply', 5),
+    ));
+    stop('prompt-b', 'same reply');
+    stop('prompt-c', 'same reply');
+    const responses = (await collect()).filter((event) => event['event.name'] === 'llm.response');
+    expect(responses.map((event) => event['gen_ai.response.id'])).toEqual(['response-b', 'response-c']);
+    expect(new Set(responses.map((event) => event.trace_id)).size).toBe(2);
+    expect(await collect()).toEqual([]);
+  });
+
+  test('an unkeyed prefix with a different reply cannot claim the later matching response', async () => {
+    fs.writeFileSync(transcriptPath, records(
+      user('prompt-a', 'first prompt', 0), answer('response-a', 'first reply', 1),
+    ));
+    stop('prompt-a', 'first reply');
+    expect((await collect()).filter((event) => event['event.name'] === 'llm.response')).toHaveLength(1);
+
+    fs.appendFileSync(transcriptPath, records(
+      user(undefined, 'legacy prompt', 2), answer('response-b', 'different reply', 3),
+      user('prompt-c', 'next prompt', 4), answer('response-c', 'matching reply', 5),
+    ));
+    stop('prompt-b', 'matching reply');
+    stop('prompt-c', 'matching reply');
+    expect(await collect()).toEqual([]);
+    expect(fs.readdirSync(queue)).toHaveLength(2);
+  });
+
+  test.each([false, true])('an unkeyed turn keeps the next incomplete prompt available with a saved cursor=%s', async (savedCursor) => {
+    if (savedCursor) {
+      fs.writeFileSync(transcriptPath, records(
+        user('prompt-a', 'first prompt', 0), answer('response-a', 'first reply', 1),
+      ));
+      stop('prompt-a', 'first reply');
+      expect((await collect()).filter((event) => event['event.name'] === 'llm.response')).toHaveLength(1);
+    }
+    fs.appendFileSync(transcriptPath, records(
+      user(undefined, 'legacy prompt', 2), answer('response-b', 'legacy reply', 3),
+      user('prompt-c', 'next prompt', 4),
+    ));
+    stop('prompt-b', 'legacy reply');
+    const first = (await collect()).filter((event) => event['event.name'] === 'llm.response');
+    expect(first.map((event) => event['gen_ai.response.id'])).toEqual(['response-b']);
+
+    fs.appendFileSync(transcriptPath, records(answer('response-c', 'next reply', 5)));
+    stop('prompt-c', 'next reply');
+    const next = (await collect()).filter((event) => event['event.name'] === 'llm.response');
+    expect(next.map((event) => event['gen_ai.response.id'])).toEqual(['response-c']);
+    expect(next[0].trace_id).not.toBe(first[0].trace_id);
+    expect(await collect()).toEqual([]);
+  });
+
   test('keeps the original Stop identity and content policy after an output write fails', async () => {
     fs.writeFileSync(configPath, JSON.stringify({ agents: { 'claude-code': { captureMessageContent: false } } }));
     fs.writeFileSync(transcriptPath, records(user('prompt-a', 'private prompt', 0), answer('response-a', 'private reply', 1)));

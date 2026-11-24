@@ -765,14 +765,32 @@ async function cmdDrainStops() {
         }
 
         const samePath = !state.transcript_path || state.transcript_path === stop.transcriptPath;
-        const parsed = parseClaudeTranscript(stop.transcriptPath, samePath ? state.transcript_offset || 0 : 0, {
+        const offset = samePath ? state.transcript_offset || 0 : 0;
+        const boundary = {
           promptId: stop.promptId,
           sourceIdentity: samePath ? state.transcript_identity : undefined,
-        });
+        };
+        let parsed = parseClaudeTranscript(stop.transcriptPath, offset, boundary);
         const onlyTurn = parsed.turns.length === 1 ? parsed.turns[0] : undefined;
-        const turn = stop.promptId && parsed.sawStopPrompt
+        let turn = stop.promptId && parsed.sawStopPrompt
           ? parsed.turns.find((candidate) => candidate.promptId === stop.promptId)
           : (!stop.promptId || (parsed.unkeyedPromptCount === 1 && !onlyTurn?.promptId) ? onlyTurn : undefined);
+        // Preserve the next prompt's bytes even when it has no response yet.
+        // Only widen the legacy fallback at a committed cursor on the same
+        // source, and never search later prompts for matching reply text.
+        const verifiedCursor = offset > 0 && parsed.sourceIdentity === boundary.sourceIdentity;
+        const singleLegacyAtStart = offset === 0 && turn && !turn.promptId;
+        if (stop.promptId && stop.replyHash && !parsed.sawStopPrompt && parsed.unkeyedPromptCount &&
+          parsed.sourceIdentity && (verifiedCursor || singleLegacyAtStart)) {
+          const prefix = parseClaudeTranscript(stop.transcriptPath, offset, {
+            ...boundary, sourceIdentity: parsed.sourceIdentity, leadingUnkeyedOnly: true,
+          });
+          const first = prefix.turns[0];
+          if (prefix.turns.length === 1 && !first.promptId && (turn || matchesStopReply(first.llmCalls.at(-1), stop))) {
+            parsed = prefix;
+            turn = first;
+          }
+        }
         if (!turn && samePath && parsed.sourceIdentity && parsed.sourceIdentity === state.transcript_identity
           && stop.promptId && stop.promptId === state.last_completed_prompt_id
           && stop.replyHash && stop.replyHash === state.last_completed_reply_hash) {
