@@ -145,6 +145,22 @@ describe('Claude Code late Stop transcript', () => {
     expect(await collect()).toEqual([]);
   });
 
+  test('a later prompt without an ID does not join the earlier turn', async () => {
+    fs.writeFileSync(transcriptPath, records(
+      user('prompt-a', 'first prompt', 0), answer('response-a', 'same reply', 1),
+      user(undefined, 'legacy prompt', 2), answer('response-b', 'same reply', 3),
+    ));
+    stop('prompt-a', 'same reply');
+    stop('prompt-b', 'same reply');
+
+    const entries = await collect();
+    const responses = entries.filter((event) => event['event.name'] === 'llm.response');
+    expect(responses.map((event) => event['gen_ai.response.id'])).toEqual(['response-a', 'response-b']);
+    expect(new Set(responses.map((event) => event.trace_id)).size).toBe(2);
+    expect(fs.readdirSync(queue)).toEqual([]);
+    expect(await collect()).toEqual([]);
+  });
+
   test('keeps the original Stop identity and content policy after an output write fails', async () => {
     fs.writeFileSync(configPath, JSON.stringify({ agents: { 'claude-code': { captureMessageContent: false } } }));
     fs.writeFileSync(transcriptPath, records(user('prompt-a', 'private prompt', 0), answer('response-a', 'private reply', 1)));

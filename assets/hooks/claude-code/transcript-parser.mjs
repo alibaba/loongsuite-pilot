@@ -278,7 +278,9 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
       const isMeta = isMetaRecord(record);
 
       if (stopBoundary && !isMeta && !isToolResultContent(msg.content)) {
-        if (sawStopPrompt && promptId && stopBoundary.promptId !== promptId) {
+        // A later user prompt can also come from a transcript version that
+        // omits its ID. Leave its bytes available for its own Stop.
+        if (sawStopPrompt && stopBoundary.promptId !== promptId) {
           nextOffset = lineStart;
           break;
         }
