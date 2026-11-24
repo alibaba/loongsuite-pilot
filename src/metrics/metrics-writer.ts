@@ -51,7 +51,8 @@ export interface MetricsWriterOptions {
   agentsConfig?: AgentsConfig;
   slsEndpoints?: SlsEndpoint[];
   cmsWorkspace?: string;
-  autoUpdateEnabled?: boolean;
+  /** False only when both version checks and hook repair are off. Omitted means the process is expected. */
+  updaterExpected?: boolean;
   updaterLiveness?: (pidFile: string) => ProcessLiveness;
   hostSn?: string;
   hostIdentityTags?: boolean;
@@ -93,7 +94,7 @@ export class MetricsWriter {
       canaryPolicy: opts.canaryPolicy,
       slsEndpoints: opts.slsEndpoints,
       cmsWorkspace: opts.cmsWorkspace,
-      autoUpdateEnabled: opts.autoUpdateEnabled,
+      updaterExpected: opts.updaterExpected,
       updaterLiveness: opts.updaterLiveness,
       hostSn: opts.hostSn,
       hostIdentityTags: opts.hostIdentityTags,

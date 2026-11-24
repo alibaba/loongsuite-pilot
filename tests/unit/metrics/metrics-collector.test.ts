@@ -784,23 +784,35 @@ describe('MetricsCollector', () => {
       expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
     });
 
-    it('never probes the updater pid when auto-update is disabled', () => {
-      // Auto-update resolves to disabled whenever no package source is configured: nothing
-      // registers a service for the updater, no updater process runs, and the updater
-      // binary exits on sight of that config. Probing anyway would report a permanent
-      // failure and alarm about a process that was never supposed to run.
+    it('probes the updater pid when version checks are disabled', () => {
+      // The updater stays up to repair hooks, so a missing pid is a fault even when
+      // no package source is configured.
       const liveness = vi.fn<[], ProcessLiveness>(() => down('no matching updater command found'));
       const col = new MetricsCollector({
         version: '1.0.0',
         userId: 'test-user',
         dataDir: tmpDir,
-        autoUpdateEnabled: false,
+        updaterLiveness: liveness,
+      });
+      for (let i = 0; i < 5; i++) col.collectL1(buildSnapshot());
+      expect(liveness).toHaveBeenCalled();
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(3);
+      expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(false);
+    });
+
+    it('does not probe the updater pid when version checks and hook repair are both off', () => {
+      const liveness = vi.fn<[], ProcessLiveness>(() => down('no matching updater command found'));
+      const col = new MetricsCollector({
+        version: '1.0.0',
+        userId: 'test-user',
+        dataDir: tmpDir,
+        updaterExpected: false,
         updaterLiveness: liveness,
       });
       for (let i = 0; i < 5; i++) col.collectL1(buildSnapshot());
       expect(liveness).not.toHaveBeenCalled();
-      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
       expect(col.getLastInfraHealth()!.updaterPidAlive).toBe(true);
+      expect(col.getLastInfraHealth()!.updaterConsecutiveFailures).toBe(0);
     });
 
     it('probes the updater pid when the flag is omitted, since a host install has one', () => {

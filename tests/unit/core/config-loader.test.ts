@@ -641,6 +641,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
       expect(config.hookWatchdog.intervalMs).toBe(5 * 60_000);
       expect(config.hookWatchdog.repairCooldownMs).toBe(10 * 60_000);
     });
@@ -666,6 +667,48 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(false);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
+    });
+
+    it.each([
+      [true, true, true],
+      [true, false, false],
+      [false, true, false],
+      [false, false, false],
+    ])('watchdog %s and child %s resolve tamper protection to %s', async (watchdog, child, active) => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: {
+          enabled: watchdog,
+          tamperProtection: { enabled: child },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(watchdog);
+      expect(config.hookWatchdog.tamperProtection).toBe(active);
+      expect(config.autoUpdate?.tamperProtection).toBe(active);
+    });
+
+    it('lets the tamper env override the child switch without turning a disabled watchdog on', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: { enabled: false, tamperProtection: { enabled: false } },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', 'true');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
+      expect(config.autoUpdate?.tamperProtection).toBe(false);
+    });
+
+    it('lets the tamper env turn the child off while the watchdog stays on', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: { enabled: true, tamperProtection: { enabled: true } },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', 'false');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
     });
 
     it('LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS overrides interval', async () => {

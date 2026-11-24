@@ -92,7 +92,6 @@ import {
 } from '../multimodal/index.js';
 import { LegacySlsFailedLogCleanupService } from './legacy-sls-failed-log-cleanup-service.js';
 import { HookWatchdog, type PluginCheckTarget, type InterceptCheckTarget } from './hook-watchdog.js';
-import { redownloadCurrentHookAssets } from '../updater/redownload-hook-assets.js';
 import { UpdaterWatchdog } from './updater-watchdog.js';
 import { PipelineManager } from '../pipeline/pipeline-manager.js';
 import { MetricsWriter } from '../metrics/metrics-writer.js';
@@ -416,8 +415,10 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog.start();
     this.startHookInstallSignalWatch();
 
-    // 11. Start updater watchdog only when resolved auto-update is enabled.
-    if (this.config.autoUpdate?.enabled) {
+    // 11. The process stays up when version checks or hook tamper repair is on.
+    // Both off means it exits, and a missing pid is the expected state.
+    const updaterExpected = (this.config.autoUpdate?.enabled ?? false) || this.config.hookWatchdog.tamperProtection;
+    if (updaterExpected) {
       this.updaterWatchdog = new UpdaterWatchdog({
         enabled: true,
         dataDir: this.dataDir,
@@ -462,12 +463,7 @@ export class Orchestrator extends EventEmitter {
       cmsWorkspace: this.config.cms?.workspace ?? '',
       hostSn: this.config.hostSn,
       hostIdentityTags: this.config.hostIdentityTags,
-      // Same condition as the updater watchdog above, deliberately: whether an updater is
-      // supposed to exist decides both whether we restart it and whether its absence is
-      // worth an alarm. Auto-update resolves to disabled whenever no package source is
-      // configured, and the updater exits immediately on that config — so a missing pid
-      // there is the expected state, not a fault.
-      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
+      updaterExpected: updaterExpected,
     });
     // 14. Always publish runtime health for service managers. The status bar UI
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
@@ -847,12 +843,6 @@ export class Orchestrator extends EventEmitter {
     ], {
       pilotDir,
       dataDir: this.dataDir,
-      redownloadHooks: (expected) => redownloadCurrentHookAssets({
-        pilotDir,
-        manifestUrl: this.config.autoUpdate?.manifestUrl,
-        packageUrl: this.config.autoUpdate?.packageUrl,
-        expected,
-      }),
     });
     this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
     return watchdog;
