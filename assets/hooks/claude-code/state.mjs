@@ -69,12 +69,20 @@ export function loadState(sessionId) {
   };
 }
 
-export function saveState(sessionId, state) {
+export function saveState(sessionId, state, { publish } = {}) {
   const dest = stateFilePath(sessionId);
   const dir = path.dirname(dest);
   const tmp = path.join(dir, `${sanitizeSessionId(sessionId)}.${process.pid}.tmp`);
   try {
+    // A queued Stop retries automatically. Check the destination and stage
+    // the new cursor before publishing so a persistent state-write failure
+    // cannot append another copy on each collector poll.
+    if (publish) {
+      const checkpoint = fs.lstatSync(dest, { throwIfNoEntry: false });
+      if (checkpoint?.isDirectory()) throw new Error('Claude Code checkpoint path is a directory');
+    }
     fs.writeFileSync(tmp, JSON.stringify(state), 'utf-8');
+    publish?.();
     fs.renameSync(tmp, dest);
   } catch (err) {
     try { fs.unlinkSync(tmp); } catch {}

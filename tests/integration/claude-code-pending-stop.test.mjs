@@ -88,7 +88,24 @@ async function exportSpans(entries) {
   return spans;
 }
 
+function rawResponses() {
+  const dir = path.join(dataDir, 'logs', 'claude-code');
+  if (!fs.existsSync(dir)) return [];
+  return fs.readdirSync(dir).filter((name) => name.endsWith('.jsonl')).flatMap((name) =>
+    fs.readFileSync(path.join(dir, name), 'utf8').trimEnd().split('\n').map(JSON.parse)
+      .filter((event) => event['event.name'] === 'llm.response'));
+}
+
 describe('Claude Code late Stop transcript', () => {
+  test('an on-time Stop writes hook JSONL before any collector runs', async () => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'hello', 0), answer('response-a', 'already written', 1)));
+    stop('prompt-a', 'already written');
+    expect(rawResponses().map((event) => event['gen_ai.response.id'])).toEqual(['response-a']);
+    expect(fs.existsSync(queue)).toBe(false);
+    expect((await collect()).filter((event) => event['event.name'] === 'llm.response')).toHaveLength(1);
+    expect(await collect()).toEqual([]);
+  });
+
   test('a user-only snapshot stays pending across collector restarts and an incomplete UTF-8 line', async () => {
     fs.writeFileSync(transcriptPath, records(user('prompt-a', 'hello', 0)));
     stop('prompt-a', 'answer 完成');
@@ -157,14 +174,15 @@ describe('Claude Code late Stop transcript', () => {
     const responses = entries.filter((event) => event['event.name'] === 'llm.response');
     expect(responses.map((event) => event['gen_ai.response.id'])).toEqual(['response-a', 'response-b']);
     expect(new Set(responses.map((event) => event.trace_id)).size).toBe(2);
-    expect(fs.readdirSync(queue)).toEqual([]);
+    expect(fs.existsSync(queue)).toBe(false);
     expect(await collect()).toEqual([]);
   });
 
   test('keeps the original Stop identity and content policy after an output write fails', async () => {
     fs.writeFileSync(configPath, JSON.stringify({ agents: { 'claude-code': { captureMessageContent: false } } }));
-    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'private prompt', 0), answer('response-a', 'private reply', 1)));
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'private prompt', 0)));
     stop('prompt-a', 'private reply', { LOONGSUITE_PILOT_USER_ID: 'stop-user' });
+    fs.appendFileSync(transcriptPath, records(answer('response-a', 'private reply', 1)));
     const stopPath = path.join(queue, fs.readdirSync(queue)[0]);
     expect(fs.readFileSync(stopPath, 'utf8')).not.toContain('private reply');
     fs.writeFileSync(configPath, '{}');
@@ -184,6 +202,25 @@ describe('Claude Code late Stop transcript', () => {
     expect(raw).not.toContain('private prompt');
     expect(raw).not.toContain('private reply');
     expect(await collect()).toEqual([]);
+  });
+
+  test('checkpoint failure before publication cannot duplicate a deferred turn on retry', async () => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first', 0)));
+    stop('prompt-a', 'late response');
+    fs.appendFileSync(transcriptPath, records(answer('response-a', 'late response', 1)));
+
+    const checkpoint = path.join(dataDir, 'state', 'claude-code', 'sessions', 'session.json');
+    fs.mkdirSync(checkpoint, { recursive: true });
+    runHook('drain-stops');
+    runHook('drain-stops');
+    expect(rawResponses()).toEqual([]);
+    expect(fs.readdirSync(queue)).toHaveLength(1);
+    fs.rmdirSync(checkpoint);
+
+    await collect();
+    expect(rawResponses().map((event) => event['gen_ai.response.id'])).toEqual(['response-a']);
+    expect(await collect()).toEqual([]);
+    expect(fs.readdirSync(queue)).toEqual([]);
   });
 
   test('an expired Stop with no model record allows the next prompt to progress', async () => {
@@ -206,8 +243,9 @@ describe('Claude Code late Stop transcript', () => {
   });
 
   test('a repeat Stop after a committed prompt does not block the next prompt', async () => {
-    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first', 0), answer('response-a', 'answer a', 1)));
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first', 0)));
     stop('prompt-a', 'answer a');
+    fs.appendFileSync(transcriptPath, records(answer('response-a', 'answer a', 1)));
     expect((await collect()).filter((event) => event['event.name'] === 'llm.response')).toHaveLength(1);
 
     stop('prompt-a', 'answer a');

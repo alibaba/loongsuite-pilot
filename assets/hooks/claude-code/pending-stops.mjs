@@ -36,6 +36,7 @@ export function hasPendingStop(dataDir, sessionId) {
 }
 
 export function enqueueStop(dataDir, stop) {
+  if (!path.isAbsolute(stop.transcriptPath)) throw new Error('Stop has no absolute transcript path');
   const dir = stopsDir(dataDir);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   if (listNames(dir).filter((name) => STOP_FILE.test(name)).length >= MAX_PENDING_STOPS) {
