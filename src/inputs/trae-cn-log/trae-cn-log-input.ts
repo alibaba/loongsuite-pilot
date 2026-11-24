@@ -97,7 +97,7 @@ export class TraeCnLogInput extends BaseSessionInput {
     if (primary.some(entry => entry['event.name'] === 'llm.response')) {
       await this.native.refresh();
       await this.hub.refresh();
-      for (const entry of primary) this.hub.enrich(entry, this.native);
+      return primary.flatMap(entry => [...(this.hub.enrich(entry, this.native) ?? []), entry]);
     }
     // Aux source is plumbed and structured but currently a no-op: TRAE ai-agent
     // stdout lines do not carry a stable join key back to the hook's

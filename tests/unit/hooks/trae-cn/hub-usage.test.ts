@@ -66,3 +66,33 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it.each([false, true])('joins TodoWrite bodies only on the verified tool call with capture=%s', async capture => {
+  const root = await mkdtemp(join(tmpdir(), 'pilot-trae-todo-'));
+  const hub = new HubUsage(root, capture);
+  const reply = '1'.repeat(24), session = '2'.repeat(24);
+  const args = { todos: [{ id: 'task', status: 'pending' }] };
+  const result = { todo_list: args };
+  try {
+    await mkdir(join(root, 'task'));
+    const rows = [
+      ['metadata', { session_id: session, trace_id: 'a'.repeat(32) }],
+      ['plan_item', { id: 'read', tool_call_info: { meta: { llm_toolcall_id: 'read-call' } } }],
+      ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
+        result: { status: 'success', data: result }, meta: { llm_toolcall_id: 'todo-call' } } }],
+    ] as const;
+    await writeFile(join(root, 'task', reply + '.jsonl'), rows.map(([type, data], seq) =>
+      JSON.stringify({ type, seq, data: JSON.stringify({ ...data, reply_to_message_id: reply }) })).join('\n') + '\n');
+    await hub.refresh();
+    const entry = { 'event.name': 'llm.response', trace_id: 'a'.repeat(32), parent_span_id: '1'.repeat(16),
+      'gen_ai.session.id': session, 'agent.trae-cn.tool_call_ids': ['read-call'], 'gen_ai.output.messages': [] } as unknown as AgentActivityEntry;
+    const events = hub.enrich(entry, { expectedSeqs: () => undefined, complete: () => false,
+      responses: () => [{ id: '3'.repeat(24), at: '100', todos: [{ call: 'todo-call', start: '102', committedAt: '105' }] }] });
+    expect(events?.map(e => e['gen_ai.tool.call.id'])).toEqual(['todo-call', 'todo-call']);
+    expect(events?.[0]['gen_ai.tool.call.arguments']).toEqual(capture ? args : undefined);
+    expect(events?.[1]['gen_ai.tool.call.result']).toEqual(capture ? result : undefined);
+  } finally {
+    await hub.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

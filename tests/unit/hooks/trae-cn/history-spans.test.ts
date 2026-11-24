@@ -119,10 +119,8 @@ it('retains one complete turn when shared history cannot supply a complete model
   const records = [{ 'event.name': 'llm.response', span_id: 'model',
     'loongsuite.trae_cn.model_responses': rounds }] as unknown as AgentActivityEntry[];
   const result = omitEmptyTraeModelSpans(expandTraeHistory(records, [agent, step, llm, tool]));
-  expect(result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toEqual([llm]);
-  expect(llm.attributes['loongsuite.trae_cn.observation']).toBe('turn_summary');
-  expect(llm.attributes['gen_ai.output.messages']).toBe(body('assistant', 'report built'));
-  expect(result.find(s => s.spanContext().spanId === llm.parentSpanId)?.name).toBe('turn summary');
+  expect(result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toEqual([]);
+  expect(agent.attributes['gen_ai.output.messages']).toBe(body('assistant', 'report built'));
   expect(result.find(s => s.spanContext().spanId === tool.parentSpanId)?.attributes['loongsuite.trae_cn.stream_request_id']).toBe('stream');
 });
 
@@ -171,14 +169,10 @@ it.each([
   expect(validateTime(trace, { timeRules: [] }).filter((check: { status: string }) => check.status === 'error')).toEqual([]);
   const models = result.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
   const finalModels = models.filter(s => String(s.attributes['gen_ai.output.messages']).includes('report built'));
-  expect(finalModels).toHaveLength(1);
+  expect(finalModels).toHaveLength(shared ? 0 : 1);
   if (shared) {
-    expect(finalModels[0]).toBe(llm);
-    expect(llm.attributes['loongsuite.trae_cn.observation']).toBe('turn_summary');
-    expect(llm.attributes['gen_ai.usage.input_tokens']).toBeUndefined();
-    expect(llm.attributes['gen_ai.usage.output_tokens']).toBeUndefined();
-    expect(llm.attributes['gen_ai.usage.total_tokens']).toBeUndefined();
-    expect(llm.attributes['agent.trae-cn.hub.total_tokens_observed']).toBeUndefined();
+    expect(agent.attributes['gen_ai.output.messages']).toBe(llm.attributes['gen_ai.output.messages']);
+    expect(models).not.toContain(llm);
   } else {
     expect(models).not.toContain(llm);
     expect(finalModels[0].attributes['gen_ai.response.id']).toBe(terminalRounds[0].id);

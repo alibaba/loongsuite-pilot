@@ -7,6 +7,7 @@ import cbor from 'cbor';
 type ReplyUsage = { reply: string; seq: number };
 type ResponseStream = {
   request: string; headersAt?: string; owner: unknown; histories: Set<string>; tools: Set<string>; reports: Map<string, ReplyUsage>;
+  todoStarts: Map<string, string>; committedAt?: string;
   initial: boolean; terminal?: boolean; continuation?: string; resultCount?: number; closed: boolean;
 };
 type Receipt = { session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
@@ -81,7 +82,7 @@ export class NativeUsageIndex {
         const previous = r.streams.at(-1);
         const continuation = !initial && previous?.closed && !previous.terminal && previous.owner === owner
           ? previous.request : undefined;
-        r.active = { owner, request, headersAt: nativeTimestamp(record), initial, continuation, histories: new Set(), tools: new Set(), reports: new Map(), closed: false };
+        r.active = { owner, request, headersAt: nativeTimestamp(record), initial, continuation, histories: new Set(), tools: new Set(), todoStarts: new Map(), reports: new Map(), closed: false };
         r.streams.push(r.active);
       }
     }
@@ -91,6 +92,10 @@ export class NativeUsageIndex {
       if (message === 'streaming ToolCall dispatch' && f.require_local_execution === true && text(f.toolcall_id)) {
         active.tools.add(text(f.toolcall_id));
       }
+      if (message === 'tool execution started' && text(f.tool_name) === 'TodoWrite') {
+        const id = text(f.toolcall_id), at = nativeTimestamp(record);
+        if (active.tools.has(id) && at) active.todoStarts.set(id, at);
+      }
       if (message === 'routing CommitReady' && f.has_async_child === false && f.has_foreground === false &&
           typeof f.parent_result_count === 'number') active.resultCount = f.parent_result_count;
       if (message === 'commit_results' || message === 'resolving explicit Cloud task completion as terminal') {
@@ -98,6 +103,7 @@ export class NativeUsageIndex {
         active.closed = message === 'commit_results'
           ? text(f.conversation_id) === r.session && active.resultCount === active.tools.size && f.result_count === active.tools.size
           : active.tools.size === 0;
+        if (active.closed && !active.terminal) active.committedAt = nativeTimestamp(record);
         r.active = undefined;
       }
     }
@@ -130,6 +136,7 @@ export class NativeUsageIndex {
       .filter(r => r.session === session && [...calls].some(id => r.calls.has(id)));
     if (matches.length !== 1 || !matches[0].done || !matches[0].history.size) return;
     const receipt = matches[0];
+    const exactTurn = [...calls].every(call => receipt.calls.has(call)) && receipt.expected.size <= 1;
     return [...receipt.history].map(([id, at]) => {
       const owners = receipt.streams.filter(s => s.histories.has(id));
       const s = owners[0];
@@ -140,7 +147,11 @@ export class NativeUsageIndex {
       const uniqueReports = [...s.reports].filter(([key]) => receipt.streams.every(other => other === s || !other.reports.has(key)));
       const shared = s.histories.size > 1;
       const usage = !shared && uniqueReports.length === 1 && s.reports.size === 1 ? uniqueReports[0][1] : undefined;
-      return { id, at, request: s.request, toolIds,
+      const committedAt = s.committedAt;
+      const todos = [...s.todoStarts].flatMap(([call, start]) =>
+        exactTurn && committedAt && toolIds.includes(call) && BigInt(start) <= BigInt(committedAt)
+          ? [{ call, start, committedAt }] : []);
+      return { id, at, ...(todos.length ? { todos } : {}), request: s.request, toolIds,
         ...(!shared && s.headersAt && BigInt(s.headersAt) < BigInt(at) ? { headersAt: s.headersAt } : {}),
         ...(shared ? { shared: true, streamReports: uniqueReports.map(([, usage]) => usage) } : {}),
         ...(s.initial && s === receipt.streams[0] ? { initial: true } : {}),

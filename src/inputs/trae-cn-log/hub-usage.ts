@@ -1,20 +1,46 @@
 import { constants, promises as fs, watch, type FSWatcher } from 'node:fs';
 import type { FileHandle } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import type { AgentActivityEntry } from '../../types/index.js';
 
 import type { NativeUsageIndex } from './native-usage-index.js';
 
 type Usage = { input: number; output: number; cached?: number; reasoning?: number; cacheCreated?: number };
+type TodoBody = { plan: string; args: string; result: string };
 type Turn = {
   reply: string; session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
   timings: Map<string, { start: number; first: number } | null>;
+  todos: Map<string, TodoBody | null>;
   plans: Map<string, { seq: number; content: string; call?: string }>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
 };
 type Cursor = { handle: FileHandle; offset: number; skipping: boolean; turn?: Turn };
 const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
 const windowSize = 4 * 1024 * 1024;
+
+// A confirmed commit includes one result per dispatched call. Its timestamp is
+// the batch acknowledgement, not a measured tool execution end.
+function todoEvents(entry: AgentActivityEntry, todo: {call: string; start: string; committedAt: string}, body?: TodoBody) {
+  const key = [entry.trace_id, 'TodoWrite', todo.call].join('/');
+  const digest = (suffix: string) => createHash('sha256').update(key + suffix).digest('hex');
+  const base = {
+    trace_id: entry.trace_id, span_id: digest('/span').slice(0, 16), parent_span_id: entry.parent_span_id,
+    'gen_ai.turn.id': entry['gen_ai.turn.id'], 'gen_ai.step.id': entry['gen_ai.step.id'],
+    'gen_ai.session.id': entry['gen_ai.session.id'], 'gen_ai.provider.name': entry['gen_ai.provider.name'],
+    'gen_ai.agent.type': entry['gen_ai.agent.type'], 'gen_ai.agent.name': entry['gen_ai.agent.name'],
+    'gen_ai.agent.id': entry['gen_ai.agent.id'], 'user.id': entry['user.id'],
+    'gen_ai.span.kind': 'TOOL', 'gen_ai.operation.name': 'execute_tool',
+    'gen_ai.tool.name': 'TodoWrite', 'gen_ai.tool.call.id': todo.call,
+    'agent.trae-cn.tool_timing_source': 'native_start_to_batch_commit',
+  };
+  return [
+    { ...base, 'event.name': 'tool.call', 'event.id': digest('/call'), time_unix_nano: todo.start,
+      ...(body ? { 'gen_ai.tool.call.arguments': JSON.parse(body.args) } : {}) },
+    { ...base, 'event.name': 'tool.result', 'event.id': digest('/result'), time_unix_nano: todo.committedAt,
+      ...(body ? { 'gen_ai.tool.call.result': JSON.parse(body.result) } : {}) },
+  ] satisfies AgentActivityEntry[];
+}
 
 // The producer unlinks the cache at completion. Keep its descriptor through the
 // final drain, and retain only IDs and numeric observations after parsing.
@@ -99,7 +125,7 @@ export class HubUsage {
             const meta = JSON.parse(row.data);
             if (meta.reply_to_message_id !== reply || !/^[0-9a-f]{24}$/.test(meta.session_id) ||
                 !/^[0-9a-f]{32}$/.test(meta.trace_id)) continue;
-            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(), timings: new Map(),
+            cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(), todos: new Map(), timings: new Map(),
               lastSeq: row.seq - 1, contiguous: row.seq === 0 || row.seq === 1, done: false, touched: Date.now() };
             this.turns.set(reply, cursor.turn);
           }
@@ -125,6 +151,17 @@ export class HubUsage {
             const id = d.tool_call_info?.meta?.llm_toolcall_id;
             const call = typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : undefined;
             if (call) turn.tools.add(call);
+            const info = d.tool_call_info;
+            if (this.captureContent && call && typeof d.id === 'string' && info?.name === 'TodoWrite' &&
+                info.params && info.result?.status && (turn.todos.has(call) || turn.todos.size < 256)) {
+              const args = JSON.stringify(info.params);
+              const result = JSON.stringify(info.result.data ?? info.result);
+              if (args.length + result.length <= 64000) {
+                const prior = turn.todos.get(call);
+                if (prior === undefined) turn.todos.set(call, { plan: d.id, args, result });
+                else if (prior && (prior.plan !== d.id || prior.args !== args || prior.result !== result)) turn.todos.set(call, null);
+              }
+            }
             // The client replaces a plan item's reasoning on updates. A single
             // snapshot may precede dispatch, and later snapshots may omit text.
             if (this.captureContent && typeof d.id === 'string' && d.id.length <= 128 && count(row.seq)) {
@@ -165,11 +202,25 @@ export class HubUsage {
         for (const p of msg.parts) if (p && typeof p === 'object' && 'type' in p && p.type === 'tool_call' && typeof p.id === 'string') ids.add(p.id);
       }
     }
-    const rounds = native?.responses(entry['gen_ai.session.id'], ids);
-    if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
     const matches = [...this.turns.values()].filter(t => t.session === entry['gen_ai.session.id'] &&
       ([...ids].some(id => t.tools.has(id)) || native?.ownsTool?.(t.trace, t.session, t.reply, ids)));
-    if (matches.length !== 1) return;
+    const rounds = native?.responses(entry['gen_ai.session.id'], ids);
+    const recovered: AgentActivityEntry[] = [];
+    for (const round of rounds ?? []) {
+      if (!('todos' in round) || !round.todos || !entry.trace_id || !entry.parent_span_id) continue;
+      for (const todo of round.todos) {
+        if (ids.has(todo.call)) continue;
+        ids.add(todo.call);
+        const body = matches.length === 1 && Array.isArray(messages) ? matches[0].todos.get(todo.call) : undefined;
+        recovered.push(...todoEvents(entry, todo, body ?? undefined));
+        if (this.captureContent && Array.isArray(messages)) {
+          messages.push({ role: 'assistant', parts: [{ type: 'tool_call', name: 'TodoWrite', id: todo.call,
+            ...(body ? { arguments: JSON.parse(body.args) } : {}) }] });
+        }
+      }
+    }
+    if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
+    if (matches.length !== 1) return recovered;
     const turn = matches[0];
     if (this.captureContent && Array.isArray(messages)) {
       const parts = [...turn.plans].filter(([, plan]) => plan.content).map(([id, plan]) => ({
@@ -214,7 +265,7 @@ export class HubUsage {
     }
     const complete = expected ? native!.complete(turn.trace, turn.session, turn.reply, turn.reports) : (turn.contiguous && turn.done) || native?.complete(turn.trace, turn.session, turn.reply, turn.reports) === true;
     entry[prefix + 'complete'] = complete;
-    if (!turn.reports.size) return;
+    if (!turn.reports.size) return recovered;
     entry[prefix + 'total_tokens_observed'] = input + output;
     entry[prefix + 'input_tokens_observed'] = input;
     entry[prefix + 'output_tokens_observed'] = output;
@@ -222,7 +273,7 @@ export class HubUsage {
       entry[prefix + 'cached_tokens_observed'] = cached;
       if (input > 0) entry[prefix + 'cache_hit_ratio_observed'] = cached / input;
     }
-    if (!complete || !turn.reports.size) return;
+    if (!complete || !turn.reports.size) return recovered;
     // Hook fields can arrive independently. Combine sources only when the
     // counters they both report describe the same usage.
     const reports = [...turn.reports.values()];
@@ -238,8 +289,9 @@ export class HubUsage {
         'gen_ai.usage.cache_creation.input_tokens': reports.reduce((n, r) => n + r.cacheCreated!, 0),
       } : {}),
     };
-    if (Object.entries(counts).some(([key, value]) => entry[key] != null && entry[key] !== value)) return;
+    if (Object.entries(counts).some(([key, value]) => entry[key] != null && entry[key] !== value)) return recovered;
     for (const [key, value] of Object.entries(counts)) entry[key] ??= value;
+    return recovered;
   }
 
   async close() {
