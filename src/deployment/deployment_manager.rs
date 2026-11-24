@@ -186,7 +186,8 @@ impl DeploymentManager {
         self.directory = self.directory.with_config_identity(config);
         self.loader = self
             .loader
-            .with_doubao_listener(config.listeners.get("doubao-work"));
+            .with_doubao_listener(config.listeners.get("doubao-work"))
+            .with_doubao_app_listener(config.listeners.get("doubao"));
         self
     }
 

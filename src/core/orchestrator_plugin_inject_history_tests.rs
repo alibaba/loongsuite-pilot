@@ -232,6 +232,7 @@ async fn source_l278_actual_deployment_failure_propagates_to_target_and_watchdog
     let summary = HookWatchdog::new(
         crate::types::HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 1000,
             repair_cooldown_ms: 0,
         },
@@ -455,6 +456,7 @@ async fn source_l245_four_actual_disappearance_races_do_not_spend_daily_repair_b
     let watchdog = HookWatchdog::new(
         crate::types::HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 1000,
             repair_cooldown_ms: 0,
         },
@@ -709,6 +711,7 @@ async fn opencode_selfheal_integration_contract(mode: &str) {
     let result = HookWatchdog::new(
         crate::types::HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 1_000_000,
             repair_cooldown_ms: 0,
         },

@@ -142,6 +142,11 @@ fn read_payload(env: &Env, agent_id: &str, stdin: &[u8]) -> Option<Payload> {
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())
         .unwrap_or("unknown");
+    // QwenWorkCN writes the prompt into its transcript only when a prompt
+    // Hook is registered. Only Stop may consume the completed transcript.
+    if event_name == "UserPromptSubmit" {
+        return None;
+    }
     let logged_session = payload
         .get("session_id")
         .and_then(Value::as_str)
@@ -3012,5 +3017,24 @@ mod tests {
                 "(missing-cursor)"
             }));
         }
+    }
+}
+
+#[cfg(test)]
+mod passive_prompt_tests {
+    #[test]
+    fn registered_prompt_does_not_consume_transcript() {
+        let source = tempfile::NamedTempFile::new().unwrap();
+        let payload = |event| {
+            serde_json::to_vec(&serde_json::json!({
+                "hook_event_name": event,
+                "transcript_path": source.path(),
+                "session_id": "session"
+            }))
+            .unwrap()
+        };
+        let env = super::Env::new();
+        assert!(super::read_payload(&env, "qwen-work-cn", &payload("UserPromptSubmit")).is_none());
+        assert!(super::read_payload(&env, "qwen-work-cn", &payload("Stop")).is_some());
     }
 }

@@ -2,6 +2,8 @@
 
 `doubao-work` 被动读取 macOS / Windows 正式版客户端的日志及本次新会话的原生文件，不安装 Hook、不修改客户端或登录状态。已观察的协议基线为 macOS 2.33.10 / 2.34.1、Windows 2.25.18。根据可见 assistant 消息重建标准 STEP / LLM / TOOL 链路，优先展示输入输出；模型、Token 和完整云端生命周期仍可能缺失。
 
+Rust 采集器通过 `listeners.doubao-work` 和 `listeners.doubao` 分别发现并收集豆包办公和豆包桌面端的工作模式数据。旧配置 `listeners.doubao-work.client = "doubao"` 继续使用原采集身份，并独占该 App 数据源。普通聊天使用独立数据源，仍待 Rust 适配。
+
 ## 数据与语义
 
 | 原生证据 | 输出 |

@@ -55,6 +55,7 @@ impl Fixture {
         HookWatchdog::new(
             HookWatchdogConfig {
                 enabled: true,
+                tamper_protection: false,
                 interval_ms: 60_000,
                 repair_cooldown_ms: 0,
             },
@@ -140,6 +141,7 @@ async fn metadata_io_error_does_not_become_a_healthy_baseline_and_other_target_r
     let wd = HookWatchdog::new(
         HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 60_000,
             repair_cooldown_ms: 0,
         },

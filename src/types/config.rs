@@ -659,6 +659,8 @@ pub struct LogRetentionConfig {
 #[serde(rename_all = "camelCase")]
 pub struct HookWatchdogConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub tamper_protection: bool,
     pub interval_ms: u64,
     pub repair_cooldown_ms: u64,
 }

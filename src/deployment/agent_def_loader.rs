@@ -25,6 +25,7 @@ pub struct AgentDefLoader {
     opts: AgentDefLoaderOptions,
     env: Option<HashMap<String, String>>,
     doubao_listener: Option<crate::types::ListenerConfig>,
+    doubao_app_listener: Option<crate::types::ListenerConfig>,
 }
 
 impl AgentDefLoader {
@@ -33,6 +34,7 @@ impl AgentDefLoader {
             opts,
             env: None,
             doubao_listener: None,
+            doubao_app_listener: None,
         }
     }
 
@@ -42,6 +44,14 @@ impl AgentDefLoader {
 
     pub fn with_env(mut self, env: HashMap<String, String>) -> Self {
         self.env = Some(env);
+        self
+    }
+
+    pub(crate) fn with_doubao_app_listener(
+        mut self,
+        listener: Option<&crate::types::ListenerConfig>,
+    ) -> Self {
+        self.doubao_app_listener = listener.cloned();
         self
     }
 
@@ -345,7 +355,27 @@ impl AgentDefLoader {
             .as_ref()
             .and_then(|listener| listener.log_dir.as_deref())
             .or(doubao_paths.log_dir.as_deref());
+        let app_paths = crate::inputs::doubao_work::resolve_doubao_paths_with(
+            crate::types::DoubaoClient::App,
+            platform,
+            &home,
+            local_app_data.as_deref(),
+        );
+        let app_log = self
+            .doubao_app_listener
+            .as_ref()
+            .and_then(|listener| listener.log_dir.as_deref())
+            .or(app_paths.log_dir.as_deref())
+            .filter(|_| {
+                self.doubao_app_listener
+                    .as_ref()
+                    .is_none_or(|listener| listener.enabled)
+            });
         let mut result = input
+            .replace(
+                "$DOUBAO_APP_LOG_DIR",
+                app_log.unwrap_or("$DOUBAO_APP_LOG_DIR"),
+            )
             .replace(
                 "$DOUBAO_LOG_DIR",
                 doubao_log.filter(|_| enabled).unwrap_or("$DOUBAO_LOG_DIR"),

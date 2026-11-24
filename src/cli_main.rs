@@ -618,7 +618,10 @@ async fn run_probe(args: &[String]) -> i32 {
         pilot_dir,
         data_dir,
     })
-    .with_doubao_listener(Some(&doubao));
+    .with_doubao_listener(Some(&doubao))
+    .with_doubao_app_listener(Some(&crate::core::doubao_app_listener(
+        source_config.as_ref(),
+    )));
     let definitions = loader.load().await;
     if definitions.is_empty() {
         eprintln!("loongsuite-pilot probe: 没有有效的 Agent 声明");

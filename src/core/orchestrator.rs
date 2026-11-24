@@ -554,11 +554,12 @@ impl Orchestrator {
             self.watch_hook_install_signal();
         }
         if self.runtime_options.manage_host_services
-            && self
-                .config
-                .auto_update
-                .as_ref()
-                .is_some_and(|update| update.enabled)
+            && (self.config.hook_watchdog.tamper_protection
+                || self
+                    .config
+                    .auto_update
+                    .as_ref()
+                    .is_some_and(|update| update.enabled))
         {
             let updater = Arc::new(UpdaterWatchdog::new(UpdaterWatchdogOptions {
                 enabled: true,
@@ -1440,7 +1441,11 @@ impl Orchestrator {
         intercepts.extend(self.directory_plugin_intercepts(deployment));
         intercepts.extend(self.copilot_intercepts(deployment));
         intercepts.extend(self.dsh_intercepts(deployment));
-        HookWatchdog::new(self.config.hook_watchdog.clone(), targets, intercepts)
+        let watchdog = HookWatchdog::new(self.config.hook_watchdog.clone(), targets, intercepts);
+        match self.deployment.lock().expect("deploy").as_ref() {
+            Some(manager) => watchdog.with_asset_roots(&self.data_dir, Arc::clone(manager)),
+            None => watchdog,
+        }
     }
 
     fn grok_intercepts(&self, deployment: &DeploymentManager) -> Vec<InterceptCheckTarget> {
@@ -2112,40 +2117,72 @@ impl Orchestrator {
             || WorkBuddyInput::check_availability(None),
         )
         .await;
-        let doubao_listener = self.config.listeners.get("doubao-work");
-        let doubao_client = doubao_listener
+        let work_client = self
+            .config
+            .listeners
+            .get("doubao-work")
             .and_then(|listener| listener.client)
             .unwrap_or_default();
-        let doubao_log_dir = doubao_listener.and_then(|listener| listener.log_dir.clone());
-        let available_log_dir = doubao_log_dir
-            .clone()
-            .or_else(|| crate::inputs::doubao_work::resolve_doubao_paths(doubao_client).log_dir);
-        let doubao_watch_paths = available_log_dir.iter().cloned().collect();
-        let mut doubao_options = DoubaoWorkInputOptions::new(Arc::clone(state_store));
-        doubao_options.log_dir = doubao_log_dir;
-        doubao_options.client = doubao_client;
-        doubao_options.poll_interval_ms = self.poll("doubao-work");
-        self.add_hosted(
-            &mut entries,
-            HostedInputSpec::new(
-                "doubao-work",
-                "doubao-work",
-                CollectionMethod::SessionFilePolling.as_str(),
-                1,
+        let doubao_dual = work_client != crate::types::DoubaoClient::App
+            && self.config.listeners.contains_key("doubao")
+            && {
+                let bits = self.bits.lock().expect("bits");
+                ["doubao", "doubao-work"]
+                    .into_iter()
+                    .all(|id| listener_on(&self.config, &self.agents, &bits, id, id))
+            };
+        for (agent, doubao_client) in [
+            (crate::types::ClientType::DoubaoWork, work_client),
+            (
+                crate::types::ClientType::Doubao,
+                crate::types::DoubaoClient::App,
             ),
-            DoubaoWorkInput::new(doubao_options),
-            doubao_watch_paths,
-            move || {
-                let log_dir = available_log_dir.clone();
-                async move {
-                    match log_dir {
-                        Some(dir) => DoubaoWorkInput::check_availability(Some(&dir)).await,
-                        None => false,
+        ] {
+            if agent == crate::types::ClientType::Doubao
+                && (!self.config.listeners.contains_key("doubao")
+                    || work_client == crate::types::DoubaoClient::App)
+            {
+                continue;
+            }
+            let id = agent.as_str();
+            let doubao_listener = self.config.listeners.get(id);
+            let doubao_log_dir = doubao_listener.and_then(|listener| listener.log_dir.clone());
+            let available_log_dir = doubao_log_dir.clone().or_else(|| {
+                crate::inputs::doubao_work::resolve_doubao_paths(doubao_client).log_dir
+            });
+            let doubao_watch_paths = available_log_dir.iter().cloned().collect();
+            let mut doubao_options = DoubaoWorkInputOptions::new(Arc::clone(state_store));
+            doubao_options.log_dir = doubao_log_dir;
+            doubao_options.client = doubao_client;
+            doubao_options.poll_interval_ms = self.poll(id);
+            if doubao_dual {
+                let mut limits = crate::inputs::doubao_work::DoubaoWorkBudgetOptions::default();
+                limits.bytes /= 2;
+                limits.milliseconds /= 2;
+                limits.records /= 2;
+                doubao_options.work_budget = Some(limits);
+            }
+            self.add_hosted(
+                &mut entries,
+                HostedInputSpec::new(id, id, CollectionMethod::SessionFilePolling.as_str(), 1),
+                if agent == crate::types::ClientType::Doubao {
+                    DoubaoWorkInput::for_app(doubao_options)
+                } else {
+                    DoubaoWorkInput::new(doubao_options)
+                },
+                doubao_watch_paths,
+                move || {
+                    let log_dir = available_log_dir.clone();
+                    async move {
+                        match log_dir {
+                            Some(dir) => DoubaoWorkInput::check_availability(Some(&dir)).await,
+                            None => false,
+                        }
                     }
-                }
-            },
-        )
-        .await;
+                },
+            )
+            .await;
+        }
         self.register_remaining(&mut entries, state_store).await;
         entries
     }

@@ -8,7 +8,7 @@
   },
   "hook": {
     "settingsPath": "~/.qwenworkcn/settings.json",
-    "events": ["Stop"],
+    "events": ["Stop", "UserPromptSubmit"],
     "hookCommand": "$PILOT_DATA/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",

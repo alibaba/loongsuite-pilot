@@ -69,9 +69,22 @@ impl DoubaoWorkInput {
         let paths = resolve_doubao_paths(options.client);
         Self::new_with_paths(options, paths)
     }
+
+    pub(crate) fn for_app(options: DoubaoWorkInputOptions) -> Self {
+        let paths = resolve_doubao_paths(DoubaoClient::App);
+        Self::for_agent(options, paths, ClientType::Doubao)
+    }
     fn new_with_paths(
         options: DoubaoWorkInputOptions,
         defaults: super::paths::DoubaoWorkPaths,
+    ) -> Self {
+        Self::for_agent(options, defaults, ClientType::DoubaoWork)
+    }
+
+    fn for_agent(
+        options: DoubaoWorkInputOptions,
+        defaults: super::paths::DoubaoWorkPaths,
+        input_agent: ClientType,
     ) -> Self {
         let log_dir = options
             .log_dir
@@ -106,6 +119,7 @@ impl DoubaoWorkInput {
             ),
             log_dir,
             client: options.client,
+            input_agent,
             scope,
             has_native: options.sessions_root.is_some() || defaults.user_data_root.is_some(),
             has_snapshots,
@@ -205,6 +219,7 @@ impl DoubaoWorkInput {
 pub struct DoubaoWorkBody {
     log_dir: Option<String>,
     client: DoubaoClient,
+    input_agent: ClientType,
     scope: String,
     has_native: bool,
     has_snapshots: bool,
@@ -294,10 +309,10 @@ impl InputBody for DoubaoWorkBody {
     }
 
     fn id(&self) -> &str {
-        "doubao-work"
+        self.input_agent.as_str()
     }
     fn agent_type(&self) -> ClientType {
-        ClientType::DoubaoWork
+        self.input_agent
     }
     fn collection_method(&self) -> CollectionMethod {
         CollectionMethod::SessionFilePolling
@@ -695,6 +710,14 @@ impl InputBody for DoubaoWorkBody {
         entries
             .into_iter()
             .map(|mut entry| {
+                if self.input_agent == ClientType::Doubao {
+                    for key in ["gen_ai.agent.type", "gen_ai.framework"] {
+                        set(&mut entry, key, json!("doubao"));
+                    }
+                    if entry.get("gen_ai.agent.id").and_then(Value::as_str) == Some("doubao-work") {
+                        set(&mut entry, "gen_ai.agent.id", json!("doubao"));
+                    }
+                }
                 set(
                     &mut entry,
                     "loongsuite.doubao_work.client",

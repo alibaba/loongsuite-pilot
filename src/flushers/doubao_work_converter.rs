@@ -670,8 +670,16 @@ fn label_doubao_client(records: &[Record], spans: &mut [ReadableSpan]) {
         .filter(|client| matches!(*client, "doubao" | "doubao-work"));
     if let Some(client) = clients.next() {
         if clients.all(|other| other == client) {
+            let app = client == "doubao"
+                && records
+                    .iter()
+                    .any(|record| get_str(record, "gen_ai.agent.type") == Some("doubao"));
             for span in spans {
                 span.attributes.insert(KEY.into(), client.into());
+                if app {
+                    span.attributes
+                        .insert("gen_ai.framework".into(), "doubao".into());
+                }
             }
         }
     }

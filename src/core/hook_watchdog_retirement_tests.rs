@@ -249,6 +249,7 @@ fn wd(targets: Vec<InterceptCheckTarget>) -> HookWatchdog {
     HookWatchdog::new(
         crate::types::HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 60_000,
             repair_cooldown_ms: 600_000,
         },
@@ -966,6 +967,7 @@ async fn intercept_l254_unavailable_plugin_does_not_block_intercept_and_real_str
     let watchdog = HookWatchdog::new(
         crate::types::HookWatchdogConfig {
             enabled: true,
+            tamper_protection: false,
             interval_ms: 60_000,
             repair_cooldown_ms: 600_000,
         },

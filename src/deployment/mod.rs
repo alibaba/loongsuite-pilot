@@ -20,7 +20,7 @@ mod dsh_runtime_locator;
 mod dsh_yaml_patch_strategy;
 mod env_agent_dirs;
 mod grok_build_assets;
-mod hook_assets;
+pub(crate) mod hook_assets;
 mod hook_command;
 mod hook_install_alarm;
 mod hook_install_service;
@@ -129,4 +129,5 @@ pub(crate) mod runtime_retirement;
 pub mod eager_injection;
 
 pub(crate) use deployed_state_merge::open_state_lock;
+pub mod qoder_token_usage;
 pub(crate) mod runtime_data_assets;

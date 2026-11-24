@@ -6,6 +6,7 @@
 pub(crate) mod activation_file_targets;
 mod activation_transaction;
 mod auto_update_config;
+pub(crate) mod hook_asset_repair;
 mod package_archive;
 mod release_manifest;
 #[path = "updater.rs"]
@@ -82,8 +83,13 @@ pub async fn run_updater_main() -> i32 {
         }
     };
     let config = build_auto_update_config(Some(&file));
-    if !config.enabled {
-        logger.info("auto-update disabled via config, exiting", None);
+    let (_, repair_hooks) =
+        crate::core::hook_asset_protection(Some(&file), |key| std::env::var(key).ok());
+    if !config.enabled && !repair_hooks {
+        logger.info(
+            "auto-update and Hook asset repair disabled via config, exiting",
+            None,
+        );
         flush_logs_sync();
         return 0;
     }
@@ -151,6 +157,7 @@ pub async fn run_updater_main() -> i32 {
     }));
     metrics.start().await;
     let updater = Updater::new(config, None);
+    updater.set_hook_repair(repair_hooks);
     updater.set_metrics(metrics.clone());
     updater
         .run_until(crate::cli_main::wait_for_shutdown())

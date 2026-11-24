@@ -1015,6 +1015,25 @@ pub(crate) fn doubao_listener(value: Option<&Value>) -> ListenerConfig {
     }
 }
 
+pub(crate) fn doubao_app_listener(file: Option<&Value>) -> ListenerConfig {
+    let app = file.and_then(|value| value.pointer("/listeners/doubao"));
+    let legacy = file.and_then(|value| value.pointer("/listeners/doubao-work"));
+    let legacy_client = legacy.and_then(|value| value.get("client"));
+    let auto_enable = legacy_client.is_none()
+        && json_bool(legacy.and_then(|value| value.get("enabled"))) != Some(false)
+        && json_bool(file.and_then(|value| value.pointer("/agents/doubao-work/enabled"))).is_none();
+    let mut listener = doubao_listener(app);
+    listener.enabled = app
+        .and_then(|value| value.get("client"))
+        .is_none_or(|value| value.as_str() == Some("doubao"))
+        && legacy_client.and_then(Value::as_str) != Some("doubao")
+        && json_bool(app.and_then(|value| value.get("enabled")))
+            .or_else(|| json_bool(file.and_then(|value| value.pointer("/agents/doubao/enabled"))))
+            .unwrap_or(auto_enable);
+    listener.client = Some(crate::types::DoubaoClient::App);
+    listener
+}
+
 fn collaboration_allowlist(value: &Value) -> Vec<String> {
     let valid = value
         .as_array()
@@ -1091,6 +1110,9 @@ fn build_listeners(
                 result.insert(key.clone(), doubao_listener(Some(value)));
                 continue;
             }
+            if key == "doubao" {
+                continue;
+            }
             let previous = result.get(key).cloned();
             result.insert(
                 key.clone(),
@@ -1142,6 +1164,7 @@ fn build_listeners(
             }
         }
     }
+    result.insert("doubao".into(), doubao_app_listener(file));
     let env_poll = env_int(sources, "QODER_ANALYTICS_POLL_INTERVAL", 0);
     if env_poll > 0 {
         if let Some(entry) = result.get_mut("qoder") {
@@ -1208,14 +1231,51 @@ fn build_retention(file: Option<&Value>, sources: &ConfigSources<'_>) -> LogRete
     }
 }
 
+pub(crate) fn hook_asset_protection(
+    file: Option<&Value>,
+    env: impl Fn(&str) -> Option<String>,
+) -> (bool, bool) {
+    let block = file.and_then(|value| value.get("hookWatchdog"));
+    let enabled = env("LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED")
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value != "false" && value != "0")
+        .or_else(|| json_bool(block.and_then(|value| value.get("enabled"))))
+        .unwrap_or(true);
+    let requested = env("LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED")
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value != "false" && value != "0")
+        .or_else(|| json_bool(block.and_then(|value| value.pointer("/tamperProtection/enabled"))))
+        .unwrap_or(false);
+    (enabled, enabled && requested)
+}
+
+#[cfg(test)]
+#[test]
+fn tamper_protection_requires_watchdog() {
+    let env = |_: &str| None;
+    let file =
+        serde_json::json!({"hookWatchdog":{"enabled":false,"tamperProtection":{"enabled":true}}});
+    assert_eq!(hook_asset_protection(Some(&file), env), (false, false));
+    let file =
+        serde_json::json!({"hookWatchdog":{"enabled":true,"tamperProtection":{"enabled":true}}});
+    assert_eq!(hook_asset_protection(Some(&file), env), (true, true));
+    assert_eq!(
+        hook_asset_protection(Some(&file), |name| {
+            (name == "LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED").then(|| "0".to_string())
+        }),
+        (false, false)
+    );
+}
+
 fn build_hook_watchdog(file: Option<&Value>, sources: &ConfigSources<'_>) -> HookWatchdogConfig {
     let block = file.and_then(|value| value.get("hookWatchdog"));
+    let (enabled, tamper_protection) =
+        hook_asset_protection(file, |key| sources.env.get(key).cloned());
     HookWatchdogConfig {
-        enabled: env_bool(
-            sources,
-            "LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED",
-            json_bool(block.and_then(|value| value.get("enabled"))).unwrap_or(true),
-        ),
+        enabled,
+        tamper_protection,
         interval_ms: env_int(
             sources,
             "LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS",
@@ -3339,6 +3399,27 @@ mod migration_config_edge_tests {
 
 #[cfg(test)]
 mod doubao_listener_wiring_tests {
+    #[test]
+    fn doubao_app_respects_legacy_product_selection_and_explicit_independent_configuration() {
+        assert!(doubao_app_listener(None).enabled);
+        for legacy in [
+            serde_json::json!({"listeners":{"doubao-work":{"client":"doubao-work"}}}),
+            serde_json::json!({"listeners":{"doubao-work":{"enabled":false}}}),
+            serde_json::json!({"agents":{"doubao-work":{"enabled":true}}}),
+            serde_json::json!({"listeners":{"doubao":{"client":"doubao-work"}}}),
+            serde_json::json!({"listeners":{"doubao-work":{"client":"doubao"},"doubao":{"enabled":true}}}),
+        ] {
+            assert!(!doubao_app_listener(Some(&legacy)).enabled);
+        }
+        let independent = serde_json::json!({
+            "listeners":{"doubao-work":{"client":"doubao-work"},"doubao":{"enabled":true,"pollInterval":1999}}
+        });
+        let app = doubao_app_listener(Some(&independent));
+        assert!(app.enabled);
+        assert_eq!(app.poll_interval, 1999);
+        assert_eq!(app.client, Some(crate::types::DoubaoClient::App));
+    }
+
     use super::*;
     use serde_json::json;
 

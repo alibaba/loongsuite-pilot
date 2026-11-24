@@ -26,6 +26,10 @@ Use `Get-FileHash -Algorithm SHA256` on Windows and pass `-PackageUrl`; macOS ca
 
 The OSS examples below describe the historical channel and are not guaranteed to return Rust packages. Pass an explicit, verified `--package-url` / `-PackageUrl` for Rust installation. This CI does not publish to OSS or migrate existing installations automatically. `.mjs` Span enrichers require migration to compiled Rust extensions; see [Trace output](trace-output.md#custom-span-enrichment).
 
+## Hook Asset Integrity
+
+Use `--hook-tamper-protection true` on Unix or `-HookTamperProtection true` on Windows at installation to enable managed Hook script integrity checking. This sets `hookWatchdog.tamperProtection.enabled`. The collector reports changes and missing managed scripts. The updater verifies and restores the installed version's assets. Disabling `hookWatchdog.enabled` also disables this check and repair.
+
 ## Install From Public Package On Linux Or macOS
 
 ```bash
