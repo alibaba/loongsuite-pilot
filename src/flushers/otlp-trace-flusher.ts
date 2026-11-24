@@ -1714,7 +1714,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(withCleanParents, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(withCleanParents, { handler, idGenerator })
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(withCleanParents, handler, idGenerator)
-            : agentType === 'trae-cn' ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
+            : (agentType === 'trae-cn' || agentType === 'strands-harness') ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
               : { records: withCleanParents, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           // Existing process-wide OTel env vars may still request content on

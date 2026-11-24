@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher, type TraceExporterLike } from '../../src/flushers/otlp-trace-flusher.js';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
+import { buildCanonicalHookEntry } from '../../src/inputs/base/canonical-hook-record.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -34,6 +35,40 @@ function turn(agent: string, id: string, offset: number, child = false) {
     event('other', 5, { 'gen_ai.turn.end': true, 'agent.openclaw.hook': 'llm_output' }),
   ];
 }
+
+describe('Strands Harness trace identity', () => {
+  it.each([undefined, '0000000000000001'])('retains only a supplied upstream parent (%s)', async parent => {
+    const spans: ReadableSpan[] = [];
+    const exporter: TraceExporterLike = {
+      export(batch, callback) {
+        spans.push(...batch);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'strands-test',
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }],
+    }, undefined, () => exporter);
+    try {
+      const records = turn(ClientType.StrandsHarness, 'strands-turn', 0).map(record => ({
+        ...record,
+        ...(record['event.name'] === 'other' && parent ? { parent_span_id: parent } : {}),
+      }));
+      const entries = records.map(record => buildCanonicalHookEntry(record, ClientType.StrandsHarness));
+      await flusher.sendBatch(entries.filter(entry => entry !== null));
+      await flusher.flush();
+
+      const span = spans.find(item => item.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(span?.spanContext().traceId).toBe(traceId);
+      expect(span?.parentSpanId).toBe(parent);
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+});
 
 describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', agent => {
   it('retains a running child across collector restart and acknowledges its complete trace once', async () => {
