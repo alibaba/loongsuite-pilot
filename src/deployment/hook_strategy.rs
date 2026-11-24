@@ -909,13 +909,43 @@ struct EmbeddedCodexHooks {
     channel: &'static str,
 }
 
-pub(crate) fn reconcile_embedded_codex_hooks(
+pub(crate) struct EmbeddedCodexHookPlan {
+    state: &'static str,
+    config: Option<(HookStrategy, AgentDefinition, bool)>,
+}
+impl EmbeddedCodexHookPlan {
+    pub(crate) fn report(&self) -> Value {
+        serde_json::json!({"state": self.state})
+    }
+
+    pub(crate) fn targets(&self) -> anyhow::Result<BTreeMap<String, PathBuf>> {
+        match &self.config {
+            Some((strategy, definition, _)) => strategy
+                .config_targets(definition)
+                .map_err(anyhow::Error::msg),
+            None => Ok(BTreeMap::new()),
+        }
+    }
+
+    pub(crate) fn write(&self, tx: &mut ActivationTransaction) -> anyhow::Result<()> {
+        if let Some((strategy, definition, uninstall)) = &self.config {
+            let edits = strategy
+                .plan_config_edits(definition, tx, *uninstall, None)
+                .map_err(anyhow::Error::msg)?;
+            for (key, value) in edits {
+                tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn prepare_embedded_codex_hooks(
     home: &Path,
     data_dir: &Path,
     resource_dir: &Path,
     channel: Option<&'static str>,
-    before_commit: impl FnOnce() -> anyhow::Result<()>,
-) -> anyhow::Result<Value> {
+) -> anyhow::Result<EmbeddedCodexHookPlan> {
     use crate::utils::source_access::private_path;
 
     let settings = home.join("hooks.json");
@@ -924,12 +954,15 @@ pub(crate) fn reconcile_embedded_codex_hooks(
     private_path(&config)?;
     let scratch = data_dir.join("codex-hook-deployment");
     private_path(&scratch)?;
-    // Let policy wait for Codex to create its own config directory.
     if !home.is_dir() {
-        before_commit()?;
-        return Ok(
-            serde_json::json!({"state": if channel.is_some() {"waiting"} else {"disabled"}}),
-        );
+        return Ok(EmbeddedCodexHookPlan {
+            state: if channel.is_some() {
+                "waiting"
+            } else {
+                "disabled"
+            },
+            config: None,
+        });
     }
     let binary = resource_dir.join("bin").join(sdk_hook_binary_name());
     if let Some(channel) = channel {
@@ -956,27 +989,50 @@ pub(crate) fn reconcile_embedded_codex_hooks(
         channel.unwrap_or("cloud"),
     )?;
     let targets = strategy.config_targets(&def).map_err(anyhow::Error::msg)?;
-    std::fs::create_dir_all(&scratch)?;
-    let mut tx = ActivationTransaction::begin(&scratch, targets)?;
-    let result = (|| {
-        let edits = strategy
-            .plan_config_edits(&def, &tx, channel.is_none(), None)
-            .map_err(anyhow::Error::msg)?;
-        for (key, value) in edits {
-            tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
-        }
+    // Recover updates interrupted by earlier SDK releases before the shared
+    // policy journal takes responsibility for these paths.
+    ActivationTransaction::recover(&scratch, targets)?;
+    Ok(EmbeddedCodexHookPlan {
+        state: if channel.is_some() {
+            "deployed"
+        } else {
+            "disabled"
+        },
+        config: Some((strategy, def, channel.is_none())),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn reconcile_embedded_codex_hooks(
+    home: &Path,
+    data_dir: &Path,
+    resource_dir: &Path,
+    channel: Option<&'static str>,
+    before_commit: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<Value> {
+    let plan = prepare_embedded_codex_hooks(home, data_dir, resource_dir, channel)?;
+    let targets = plan.targets()?;
+    if targets.is_empty() {
         before_commit()?;
-        tx.commit()
-    })();
-    if let Err(error) = result {
-        return match tx.rollback() {
-            Ok(()) => Err(error),
-            Err(rollback) => Err(error.context(format!(
-                "Codex Hook configuration recovery failed: {rollback:#}"
-            ))),
-        };
+    } else {
+        let scratch = data_dir.join("codex-hook-deployment");
+        std::fs::create_dir_all(&scratch)?;
+        let mut tx = ActivationTransaction::begin(&scratch, targets)?;
+        let result = (|| {
+            plan.write(&mut tx)?;
+            before_commit()?;
+            tx.commit()
+        })();
+        if let Err(error) = result {
+            return match tx.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => Err(error.context(format!(
+                    "Codex Hook configuration recovery failed: {rollback:#}"
+                ))),
+            };
+        }
     }
-    Ok(serde_json::json!({"state":if channel.is_some() {"deployed"} else {"disabled"}}))
+    Ok(plan.report())
 }
 
 fn embedded_codex_definition(

@@ -999,6 +999,56 @@ fn qoder_cli_pre_tool_block_exits_two_and_only_required_checks_refuse_on_failure
 }
 
 #[test]
+fn explicit_offline_deny_survives_stop_and_is_revoked_by_the_next_policy() {
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let data = root.path().join("data");
+    let mut policy = qoder_policy(&source);
+    policy["sdk_options"]["hooks"]["offline_deny"] = json!({"qoder":["PreToolUse"]});
+
+    let run = |channel, event| {
+        sdk_hook_command(
+            &data,
+            channel,
+            "qodercli",
+            event,
+            &json!({
+                "hook_event_name":event,"session_id":"offline-fixture",
+                "tool_use_id":"tool-fixture","tool_name":"Bash","tool_input":{"command":"true"}
+            }),
+        )
+        .wait_with_output()
+        .unwrap()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    let mut invalid = policy.clone();
+    invalid["sdk_options"]["hooks"]["offline_deny"] = json!({"qoder":["Stop"]});
+    assert_eq!(host.apply(invalid).0, BAD_ARGUMENT);
+    assert_eq!(host.snapshot()["effective_version"], "qoder-v1");
+
+    host.stop();
+    let blocked = run("cloud", "PreToolUse");
+    assert_eq!(blocked.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&blocked.stderr).contains("SDK is unavailable"));
+    assert!(run("cloud", "UserPromptSubmit").status.success());
+    assert!(run("observe", "PreToolUse").status.success());
+    assert!(run("local", "PreToolUse").status.success());
+
+    let path = data.join("sdk-offline-deny.json");
+    let saved = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"invalid JSON").unwrap();
+    assert!(run("cloud", "PreToolUse").status.success());
+    std::fs::write(&path, saved).unwrap();
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    assert_eq!(resumed.apply(empty_policy()).0, OK);
+    resumed.stop();
+    assert!(run("cloud", "PreToolUse").status.success());
+}
+
+#[test]
 fn qoder_auto_uses_native_ancestor_and_accepts_event_from_stdin() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().join("data");

@@ -155,6 +155,7 @@ pub struct Policy {
     pub hooks: Value,
     pub(super) codex_recovery: Option<AgentPlan>,
     pub(super) codex_hook_channel: Option<&'static str>,
+    pub(super) offline_deny: super::hook_protocol::OfflineDenyRules,
 }
 
 impl Init {
@@ -233,6 +234,63 @@ pub fn canonical_candidate(path: &Path) -> anyhow::Result<PathBuf> {
             Err(error) => return Err(error.into()),
         }
     }
+}
+
+fn offline_deny_rules(
+    hooks: &Value,
+    agents: &BTreeMap<String, AgentPlan>,
+    codex_channel: Option<&str>,
+) -> anyhow::Result<super::hook_protocol::OfflineDenyRules> {
+    let mut rules = BTreeMap::new();
+    let Some(config) = hooks.get("offline_deny") else {
+        return Ok(rules);
+    };
+    let config = config
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("offline_deny must map Agent IDs to event arrays"))?;
+    for (agent, events) in config {
+        let wire_ids: &[&str] = match agent.as_str() {
+            "qoder" => &["qoder", "qodercli"],
+            "codex" if codex_channel != Some("local") => &["codex"],
+            _ => anyhow::bail!("offline_deny requires a supported cloud Hook Agent"),
+        };
+        anyhow::ensure!(
+            agents.contains_key(agent) && hooks["sync_wait_enabled"].as_bool().unwrap_or(true),
+            "offline_deny requires an enabled Agent and synchronous Hook verdicts"
+        );
+        let events = events
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("offline_deny events must be an array"))?;
+        anyhow::ensure!(
+            (1..=2).contains(&events.len()),
+            "invalid offline_deny event count"
+        );
+        let mut selected = BTreeSet::new();
+        for event in events {
+            let event = event
+                .as_str()
+                .filter(|event| super::hook_protocol::can_deny_offline(event))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("offline_deny supports PreToolUse and UserPromptSubmit")
+                })?;
+            anyhow::ensure!(
+                selected.insert(event.to_owned()),
+                "duplicate offline_deny event"
+            );
+        }
+        let mut allowed = false;
+        for wire in wire_ids {
+            if hooks["blocking_agents"]
+                .as_array()
+                .is_none_or(|ids| ids.iter().any(|id| id == *wire))
+            {
+                rules.insert((*wire).to_owned(), selected.clone());
+                allowed = true;
+            }
+        }
+        anyhow::ensure!(allowed, "offline_deny conflicts with blocking_agents");
+    }
+    Ok(rules)
 }
 
 impl Policy {
@@ -629,6 +687,7 @@ impl Policy {
                 "unsupported blocking agent"
             );
         }
+        let offline_deny = offline_deny_rules(&hooks, &agents, codex_hook_channel)?;
         let version = raw
             .get("version")
             .and_then(Value::as_str)
@@ -644,6 +703,7 @@ impl Policy {
             hooks,
             codex_recovery,
             codex_hook_channel,
+            offline_deny,
         })
     }
 }

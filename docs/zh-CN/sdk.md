@@ -142,6 +142,8 @@ SDK 的自监控包括以下字段与口径：
 
 ## 两条 Hook 与截止
 
+默认情况下 SDK 无法连接时，原生 Hook 快速放行。SDK 公告 `PILOT_CAP_OFFLINE_DENY` 后，需要按 Agent 和事件离线拒绝时，在完整策略加 `"sdk_options": {"hooks": {"offline_deny": {"qoder": ["PreToolUse"], "codex": ["UserPromptSubmit"]}}}`。支持已启用 Agent 的 cloud 通道，事件限 `PreToolUse` 和 `UserPromptSubmit`。正常停机仍执行最后一次成功应用的离线策略。通过下一份完整策略移除对应项即可撤回。SDK 将策略保存在实例私有目录，Hook 在连接不可用时读取。文件缺失、无效或有未恢复事务时采用默认放行。
+
 SDK 分别发布 `sdk-hooks-cloud.json`、`sdk-hooks-local.json` 和 `sdk-hooks-observe.json`，包含进程号、实际 loopback UDP 端口、实例标识和随机 token。两个裁决入口各自最多同时运行 8 个裁决工作。观察入口只唤醒采集，有独立并发额度。
 
 可直接使用原生外壳作为短命 Hook 客户端，此命令不加载采集动态库：

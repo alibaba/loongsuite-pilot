@@ -12,6 +12,68 @@ pub const REPLY_MARGIN_MS: u64 = 100;
 pub const TEMPORARY_DENIAL: &str =
     "Pilot could not complete the security check. Retry the operation.";
 pub const TRACE_LIMIT: u64 = 8 * 1024 * 1024;
+pub const OFFLINE_DENY_FILE: &str = "sdk-offline-deny.json";
+pub const OFFLINE_POLICY_LOCK: &str = "sdk-offline-deny.lock";
+pub const POLICY_FILES_DIR: &str = "sdk-hook-policy";
+pub const OFFLINE_DENY_LIMIT: u64 = 4096;
+
+pub fn can_deny_offline(event: &str) -> bool {
+    matches!(event, "PreToolUse" | "UserPromptSubmit")
+}
+
+pub type OfflineDenyRules = std::collections::BTreeMap<String, std::collections::BTreeSet<String>>;
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfflineDeny {
+    pub schema: u32,
+    pub events: OfflineDenyRules,
+}
+
+pub fn read_offline_deny(root: &std::path::Path) -> Option<OfflineDenyRules> {
+    use std::io::Read;
+    let path = root.join(OFFLINE_DENY_FILE);
+    let lock_path = root.join(OFFLINE_POLICY_LOCK);
+    if !std::fs::symlink_metadata(&lock_path).ok()?.is_file() {
+        return None;
+    }
+    let policy_lock = std::fs::File::open(lock_path).ok()?;
+    policy_lock.try_lock_shared().ok()?;
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.is_file() || meta.len() > OFFLINE_DENY_LIMIT {
+        return None;
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if meta.permissions().mode() & 0o077 != 0 {
+            return None;
+        }
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    let file = options.open(path).ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(OFFLINE_DENY_LIMIT + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > OFFLINE_DENY_LIMIT {
+        return None;
+    }
+    // An interrupted deployment may have written the new file before commit.
+    let journal = root.join(POLICY_FILES_DIR).join("update-recovery.json");
+    if !matches!(std::fs::symlink_metadata(journal), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return None;
+    }
+    let policy: OfflineDeny = serde_json::from_slice(&bytes).ok()?;
+    (policy.schema == 1).then_some(policy.events)
+}
+
 pub const CODEX_OBSERVE_CONTEXT: &str = "_pilot_codex_observe_context";
 pub const QODER_OBSERVE_CONTEXT: &str = "_pilot_qoder_observe_context";
 pub const QODER_OBSERVE_ENV: [&str; 4] = [

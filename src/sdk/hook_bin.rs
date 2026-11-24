@@ -105,6 +105,29 @@ fn block_output(agent: &str, event: &str, reason: &str) -> Option<HookOutput> {
     }
 }
 
+fn offline_block(
+    rules: &OfflineDenyRules,
+    agent: &str,
+    event: &str,
+    trace: &mut RequestTrace,
+) -> Option<HookOutput> {
+    if can_deny_offline(event)
+        && rules
+            .get(agent)
+            .is_some_and(|events| events.contains(event))
+    {
+        trace.status = "offline_block";
+        trace.reply_status = Some("offline_policy".into());
+        block_output(
+            agent,
+            event,
+            "Pilot SDK is unavailable. Retry the operation.",
+        )
+    } else {
+        None
+    }
+}
+
 fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Option<HookOutput> {
     if args.first().map(String::as_str) == Some("interceptor") {
         return legacy?(&args[2..]).map(HookOutput::Json);
@@ -141,8 +164,15 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     };
     let descriptor = descriptor(&data.join(format!("sdk-hooks-{channel}.json")))
         .filter(|item| item.schema == 2 && item.port != 0 && pid_alive(item.pid));
-    let descriptor = descriptor?;
-    trace.instance = Some(descriptor.instance.clone());
+    let unavailable_rules = if descriptor.is_none() {
+        if channel != "cloud" {
+            return None;
+        }
+        Some(read_offline_deny(&data).filter(|rules| !rules.is_empty())?)
+    } else {
+        None
+    };
+    trace.instance = descriptor.as_ref().map(|item| item.instance.clone());
     trace.status = "invalid_input";
     let mut body = Vec::new();
     std::io::stdin()
@@ -174,6 +204,25 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         configured_agent
     }
     .to_owned();
+    let offline = |trace: &mut RequestTrace| {
+        if channel != "cloud" {
+            return None;
+        }
+        let owned = unavailable_rules
+            .is_none()
+            .then(|| read_offline_deny(&data))
+            .flatten();
+        offline_block(
+            unavailable_rules.as_ref().or(owned.as_ref())?,
+            &agent,
+            &event,
+            trace,
+        )
+    };
+    let Some(descriptor) = descriptor else {
+        trace.status = "sdk_unavailable";
+        return offline(&mut trace);
+    };
     let codex_observe = configured_agent == "codex"
         && (channel == "observe" || (channel == "local" && event == "UserPromptSubmit"));
     if (channel == "observe" && configured_agent == "qoder-auto") || codex_observe {
@@ -276,8 +325,12 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     } else {
         "sdk_unreachable"
     };
-    let socket = UdpSocket::bind("127.0.0.1:0").ok()?;
-    socket.connect(("127.0.0.1", descriptor.port)).ok()?;
+    let Ok(socket) = UdpSocket::bind("127.0.0.1:0") else {
+        return offline(&mut trace);
+    };
+    if socket.connect(("127.0.0.1", descriptor.port)).is_err() {
+        return offline(&mut trace);
+    }
     let request = serde_json::to_vec(&request).ok()?;
     let deadline = started + Duration::from_millis(DEADLINE_MS);
     let parse = |bytes: &[u8]| {
@@ -312,7 +365,9 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
         |row: &serde_json::Value| reply_action(row).is_some() || row["received"] == true;
     let first = loop {
         trace.send_attempts += 1;
-        socket.send(&request).ok()?;
+        if socket.send(&request).is_err() {
+            return offline(&mut trace);
+        }
         let until = if descriptor.cloud_capacity {
             first_deadline.min(Instant::now() + Duration::from_millis(50))
         } else {
@@ -338,15 +393,20 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
                 // its receipt. Check without exceeding the availability wait.
                 socket.set_nonblocking(true).ok()?;
                 let mut bytes = [0u8; MAX_REPLY];
-                let len = socket.recv(&mut bytes).ok()?;
-                let first = parse(&bytes[..len]).filter(is_receipt_or_verdict)?;
+                let Some(first) = socket
+                    .recv(&mut bytes)
+                    .ok()
+                    .and_then(|len| parse(&bytes[..len]).filter(is_receipt_or_verdict))
+                else {
+                    return offline(&mut trace);
+                };
                 socket.set_nonblocking(false).ok()?;
                 if Instant::now() >= deadline {
                     return None;
                 }
                 break first;
             }
-            Err(_) => return None,
+            Err(_) => return offline(&mut trace),
         }
     };
     let reply = if descriptor.request_receipts

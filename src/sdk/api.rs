@@ -1,3 +1,7 @@
+use super::hook_protocol::{
+    read_offline_deny, OfflineDeny, OfflineDenyRules, OFFLINE_DENY_FILE, OFFLINE_POLICY_LOCK,
+    POLICY_FILES_DIR,
+};
 use super::hooks::Hooks;
 use super::{
     abi::*,
@@ -7,7 +11,7 @@ use super::{
 };
 use fs2::FileExt;
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ffi::{c_char, c_void, CString};
 use std::fs::{File, OpenOptions};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -322,14 +326,13 @@ fn manage_codex(instance: &Instance, request: &Value) -> Result<Value, (i32, Str
         lease
             .try_lock_exclusive()
             .map_err(|_| (BUSY, "SDK state is owned by another collector".into()))?;
-        crate::deployment::reconcile_embedded_codex_hooks(
-            home,
-            &init.data_dir,
-            &init.resource_dir,
-            None,
-            || Ok(()),
-        )
-        .map_err(failure)?;
+        {
+            let _lock = hook_policy_lock(init).map_err(failure)?;
+            recover_hook_policy_files(init).map_err(failure)?;
+        }
+        let mut offline = read_offline_deny(&init.data_dir).unwrap_or_default();
+        offline.remove("codex");
+        configure_hook_files(init, Some(home), None, &offline).map_err(failure)?;
     }
     instance.status.lock().unwrap().codex_hook_deployment = json!({"state":"disabled"});
     Ok(json!({"agent":"codex","state":"disabled"}))
@@ -679,17 +682,104 @@ impl Drop for Session {
     }
 }
 
+const OFFLINE_TARGET: &str = "offline-deny";
+
+fn hook_policy_lock(init: &Init) -> anyhow::Result<File> {
+    let path = init.data_dir.join(OFFLINE_POLICY_LOCK);
+    crate::utils::source_access::private_path(&path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    lock.lock_exclusive()?;
+    Ok(lock)
+}
+
+fn recover_hook_policy_files(init: &Init) -> anyhow::Result<()> {
+    let base = BTreeMap::from([(OFFLINE_TARGET.into(), init.data_dir.join(OFFLINE_DENY_FILE))]);
+    let mut registered = BTreeMap::new();
+    if let Some(home) = &init.codex_home {
+        registered.insert("config".into(), home.join("hooks.json"));
+        registered.insert("trust".into(), home.join("config.toml"));
+        registered.insert(
+            "backup".into(),
+            home.join("hooks.json.loongsuite-pilot.bak"),
+        );
+    }
+    let journal = init.data_dir.join(POLICY_FILES_DIR);
+    crate::utils::source_access::private_path(&journal)?;
+    crate::updater::ActivationTransaction::recover_registered(&journal, &[base], &registered)
+}
+
+fn configure_hook_files(
+    init: &Init,
+    codex_home: Option<&std::path::Path>,
+    codex_channel: Option<&'static str>,
+    offline: &OfflineDenyRules,
+) -> anyhow::Result<Option<Value>> {
+    let _lock = hook_policy_lock(init)?;
+    recover_hook_policy_files(init)?;
+    let codex = codex_home
+        .map(|home| {
+            crate::deployment::prepare_embedded_codex_hooks(
+                home,
+                &init.data_dir,
+                &init.resource_dir,
+                codex_channel,
+            )
+        })
+        .transpose()?;
+    let mut targets = match &codex {
+        Some(plan) => plan.targets()?,
+        None => BTreeMap::new(),
+    };
+    let offline_path = init.data_dir.join(OFFLINE_DENY_FILE);
+    crate::utils::source_access::private_path(&offline_path)?;
+    let write_offline = !offline.is_empty() || offline_path.exists();
+    if !targets.is_empty() || write_offline {
+        targets.insert(OFFLINE_TARGET.into(), offline_path);
+        let journal = init.data_dir.join(POLICY_FILES_DIR);
+        std::fs::create_dir_all(&journal)?;
+        let mut tx = crate::updater::ActivationTransaction::begin(&journal, targets)?;
+        let result = (|| {
+            if let Some(plan) = &codex {
+                plan.write(&mut tx)?;
+            }
+            if write_offline {
+                let bytes = serde_json::to_vec(&OfflineDeny {
+                    schema: 1,
+                    events: offline.clone(),
+                })?;
+                if tx.original_bytes(OFFLINE_TARGET)?.as_deref() != Some(&bytes) {
+                    tx.write(OFFLINE_TARGET, &bytes, 0o600)?;
+                }
+            }
+            tx.commit()
+        })();
+        if let Err(error) = result {
+            return match tx.rollback() {
+                Ok(()) => Err(error),
+                Err(rollback) => {
+                    Err(error.context(format!("SDK Hook policy recovery failed: {rollback:#}")))
+                }
+            };
+        }
+    }
+    Ok(codex.as_ref().map(|plan| plan.report()))
+}
+
 fn update_codex_deployment(instance: &Instance, policy: &Policy) -> anyhow::Result<()> {
     let _guard = instance.hook_files.lock().unwrap();
-    if let Some(home) = &instance.init.codex_home {
-        let deployment = crate::deployment::reconcile_embedded_codex_hooks(
-            home,
-            &instance.init.data_dir,
-            &instance.init.resource_dir,
-            policy.codex_hook_channel,
-            || Ok(()),
-        )?;
-        instance.status.lock().unwrap().codex_hook_deployment = deployment;
+    let init = &instance.init;
+    if let Some(report) = configure_hook_files(
+        init,
+        init.codex_home.as_deref(),
+        policy.codex_hook_channel,
+        &policy.offline_deny,
+    )? {
+        instance.status.lock().unwrap().codex_hook_deployment = report;
     }
     Ok(())
 }
@@ -823,7 +913,11 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
 static API: PilotApiV2 = PilotApiV2 {
     abi_version: ABI_VERSION,
     struct_size: std::mem::size_of::<PilotApiV2>() as u32,
-    capabilities: CAP_ACTIVITY_V2 | CAP_HOOK_UDP | CAP_MONITORING | CAP_CODEX_HOOK_CONTROL,
+    capabilities: CAP_ACTIVITY_V2
+        | CAP_HOOK_UDP
+        | CAP_MONITORING
+        | CAP_CODEX_HOOK_CONTROL
+        | CAP_OFFLINE_DENY,
     start,
     apply_policy: apply,
     snapshot,

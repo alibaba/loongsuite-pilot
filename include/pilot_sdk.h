@@ -16,6 +16,7 @@ extern "C" {
 #define PILOT_CAP_HOOK_UDP UINT64_C(2)
 #define PILOT_CAP_MONITORING UINT64_C(4)
 #define PILOT_CAP_CODEX_HOOK_CONTROL UINT64_C(32)
+#define PILOT_CAP_OFFLINE_DENY UINT64_C(64)
 
 typedef struct PilotHandle PilotHandle;
 typedef struct PilotJsonView { const uint8_t *data; size_t len; } PilotJsonView;
