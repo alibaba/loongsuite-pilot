@@ -475,10 +475,7 @@ export class ZCodeRolloutInput extends BaseInput {
     const finishReason = failure?.finishReason ?? rawFinishReason ?? 'stop';
     const responseId = str(response.responseId) ?? str(response.response_id) ?? requestId;
     const responseModelId = str(response.modelId) ?? str(response.model_id) ?? modelId;
-    const toolCallsRaw = Array.isArray(response.toolCalls) ? response.toolCalls : [];
-    const toolCalls = (toolCallsRaw as unknown[])
-      .map((tc) => normalizeToolCall(tc))
-      .filter(Boolean) as { id: string; name: string; args: unknown }[];
+    const toolCalls = normalizeToolCalls(response.toolCalls);
 
     const usage = (response.usage && typeof response.usage === 'object' ? response.usage : {}) as Record<string, unknown>;
     const inputTokens = num(usage.inputTokens) ?? num(usage.input_tokens);
@@ -567,14 +564,17 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.provider.name': providerId,
       'gen_ai.request.model': modelId,
       'gen_ai.response.model': responseModelId,
-      'gen_ai.input.messages': inputMessages.map(({ role, content, toolResult }) => ({
+      'gen_ai.input.messages': inputMessages.map(({ role, content, toolResult, toolCalls }) => ({
         role,
         parts: toolResult ? [{
           type: 'tool_call_response',
           id: toolResult.callId,
           response: (toolResult.content ?? null) as JsonValue,
           ...(toolResult.isError ? { isError: true } : {}),
-        }] : [{ type: 'text', content: content ?? '' }],
+        }] : [
+          ...(content !== undefined ? [{ type: 'text', content }] : []),
+          ...toolCalls.map(buildToolCallPart),
+        ],
       })),
       ...(systemInstructions.length > 0
         ? { 'gen_ai.system_instructions': systemInstructions }
@@ -592,13 +592,7 @@ export class ZCodeRolloutInput extends BaseInput {
     if (responseText.length > 0) {
       outputParts.push({ type: 'text', content: responseText });
     }
-    for (const tc of toolCalls) {
-      const part: Record<string, JsonValue> = { type: 'tool_call', id: tc.id, name: tc.name };
-      if (tc.args !== undefined && tc.args !== null) {
-        part.arguments = tc.args as JsonValue;
-      }
-      outputParts.push(part);
-    }
+    for (const call of toolCalls) outputParts.push(buildToolCallPart(call));
     const outputMessages: JsonValue = outputParts.length > 0
       ? [{ role: 'assistant', parts: outputParts }]
       : [];
@@ -795,17 +789,39 @@ export class ZCodeRolloutInput extends BaseInput {
   }
 }
 
-function normalizeInputMessage(m: unknown): { role: string; content?: string; toolResult?: ToolResult } | null {
+interface ToolCall {
+  id: string;
+  name: string;
+  args: unknown;
+}
+
+interface InputMessage {
+  role: string;
+  content?: string;
+  toolResult?: ToolResult;
+  toolCalls: ToolCall[];
+}
+
+function normalizeInputMessage(m: unknown): InputMessage | null {
   if (!m || typeof m !== 'object') return null;
   const r = m as Record<string, unknown>;
   const role = str(r.role);
   if (!role) return null;
   const content = str(r.content);
   const toolResult = normalizeToolResult(r);
-  return content === undefined && !toolResult ? null : { role, content, toolResult };
+  const toolCalls = role === 'assistant' ? normalizeToolCalls(r.toolCalls) : [];
+  return content !== undefined || toolResult || toolCalls.length ? { role, content, toolResult, toolCalls } : null;
 }
 
-function normalizeToolCall(tc: unknown): { id: string; name: string; args: unknown } | null {
+function normalizeToolCalls(value: unknown): ToolCall[] {
+  return Array.isArray(value) ? value.map(normalizeToolCall).filter(call => call !== null) : [];
+}
+
+function buildToolCallPart({ id, name, args }: ToolCall): JsonValue {
+  return { type: 'tool_call', id, name, ...(args != null ? { arguments: args as JsonValue } : {}) };
+}
+
+function normalizeToolCall(tc: unknown): ToolCall | null {
   if (!tc || typeof tc !== 'object') return null;
   const r = tc as Record<string, unknown>;
   const id = str(r.id) ?? str(r.toolCallId) ?? str(r.tool_call_id);

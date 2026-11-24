@@ -76,12 +76,17 @@ it.each([false, true])('exports the recorded ZCode tool outcome (isError=%s)', a
   const request = next.request as { messages: Array<Record<string, unknown>> };
   const rawResult = request.messages.find(message => message.role === 'tool')!;
   const response = isError ? 'Fixture file was not found' : 'Fixture file was read';
+  const args = { path: 'probe.txt' };
+  const assistant = {
+    role: 'assistant', content: '',
+    toolCalls: [{ id: rawResult.toolCallId, name: 'Read', input: args }],
+  };
   const continuation = {
     ...next,
     request: {
       ...request,
-      messages: request.messages.map(message =>
-        message === rawResult ? { ...message, content: response, isError } : message),
+      messages: request.messages.filter(message => message.role !== 'assistant').flatMap(message =>
+        message === rawResult ? [assistant, { ...message, content: response, isError }] : [message]),
     },
   };
   const records = input.buildEntriesFromRolloutLines([first, continuation, ...lines.slice(2)]);
@@ -97,7 +102,13 @@ it.each([false, true])('exports the recorded ZCode tool outcome (isError=%s)', a
   const nextLlm = spansOf('LLM').find(span =>
     span.attributes['gen_ai.response.id'] === (next.response as { responseId: string }).responseId);
   const messages = JSON.parse(String(nextLlm?.attributes['gen_ai.input.messages']));
-  expect(messages).toContainEqual({
+  const callIndex = messages.findIndex(message => message.role === 'assistant' &&
+    message.parts.some(part => part.type === 'tool_call' && part.id === rawResult.toolCallId));
+  expect(callIndex).toBeGreaterThanOrEqual(0);
+  expect(messages[callIndex]).toEqual({
+    role: 'assistant', parts: [{ type: 'tool_call', id: rawResult.toolCallId, name: 'Read', arguments: args }],
+  });
+  expect(messages[callIndex + 1]).toEqual({
     role: 'tool',
     parts: [{ type: 'tool_call_response', id: rawResult.toolCallId, response, ...(isError ? { isError: true } : {}) }],
   });
