@@ -75,9 +75,8 @@ export function saveState(sessionId, state, { publish } = {}) {
   const dir = path.dirname(dest);
   const tmp = path.join(dir, `${sanitizeSessionId(sessionId)}.${process.pid}.tmp`);
   try {
-    // A queued Stop retries automatically. Check the destination and stage
-    // the new cursor before publishing so a persistent state-write failure
-    // cannot append another copy on each collector poll.
+    // A queued Stop retries automatically. Catch a blocked destination or
+    // failed temporary write before appending another copy to the output.
     if (publish) {
       const checkpoint = fs.lstatSync(dest, { throwIfNoEntry: false });
       if (checkpoint?.isDirectory()) throw new Error('Claude Code checkpoint path is a directory');

@@ -106,6 +106,21 @@ describe('Claude Code late Stop transcript', () => {
     expect(await collect()).toEqual([]);
   });
 
+  test('a full queue falls back to reading the visible calls when this session has no pending Stop', () => {
+    fs.mkdirSync(queue, { recursive: true });
+    const now = Date.now();
+    for (let index = 0; index < 512; index++) {
+      const name = `${now}-${'a'.repeat(32)}-00000000-0000-0000-0000-${String(index).padStart(12, '0')}.json`;
+      fs.writeFileSync(path.join(queue, name), '');
+    }
+    fs.writeFileSync(transcriptPath, records(
+      user('prompt-a', 'use a tool', 0),
+      assistant('response-tool', [{ type: 'tool_use', name: 'Read', id: 'tool-a', input: {} }], 1, 'tool_use'),
+    ));
+    stop('prompt-a', 'answer still being written');
+    expect(rawResponses().map((event) => event['gen_ai.response.id'])).toEqual(['response-tool']);
+  });
+
   test('a user-only snapshot stays pending across collector restarts and an incomplete UTF-8 line', async () => {
     fs.writeFileSync(transcriptPath, records(user('prompt-a', 'hello', 0)));
     stop('prompt-a', 'answer 完成');

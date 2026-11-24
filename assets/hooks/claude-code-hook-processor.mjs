@@ -679,27 +679,28 @@ async function cmdTerminal(eventKind) {
       && path.isAbsolute(stop.transcriptPath);
     let parsed;
     try {
-      if (pending) {
-        // A following Stop (including StopFailure) cannot step over a pending
-        // turn's cursor. Keep the ordering decision under the session lock.
-        enqueueStop(pilotDataDir(), stop);
-        return;
-      }
-
-      if (hasReplyWitness) {
-        const samePath = !state.transcript_path || state.transcript_path === stop.transcriptPath;
-        if (!samePath) {
-          enqueueStop(pilotDataDir(), stop);
-          return;
-        }
+      if (!pending && hasReplyWitness && (!state.transcript_path || state.transcript_path === stop.transcriptPath)) {
         await waitForTranscriptStable(stop.transcriptPath, state.transcript_offset || 0);
         const receipt = readStopTranscript(state, stop);
-        if (!matchesStopReply(receipt.turn?.llmCalls.at(-1), stop)) {
-          if (!receipt.turn && wasCompletedStop(state, stop, receipt.parsed.sourceIdentity)) return;
-          enqueueStop(pilotDataDir(), stop);
+        if (matchesStopReply(receipt.turn?.llmCalls.at(-1), stop)) {
+          parsed = { ...receipt.parsed, turns: [receipt.turn] };
+        } else if (!receipt.turn && wasCompletedStop(state, stop, receipt.parsed.sourceIdentity)) {
           return;
         }
-        parsed = { ...receipt.parsed, turns: [receipt.turn] };
+      }
+
+      if (pending || (hasReplyWitness && !parsed)) {
+        try {
+          enqueueStop(pilotDataDir(), stop);
+          return;
+        } catch (error) {
+          logHookError({
+            agentId: AGENT_ID, stage: 'enqueue_stop', errorType: 'enqueue_failed',
+            errorMessage: error?.code || error?.message || 'pending Stop write failed',
+          });
+          // A following Stop cannot step over a pending turn's cursor.
+          if (pending) return;
+        }
       }
 
       // An on-time transcript still produces its daily hook JSONL here. The
