@@ -4,6 +4,7 @@ import { Updater } from './updater.js';
 import { UpdaterMetrics } from './updater-metrics.js';
 import { buildAutoUpdateConfig, type ConfigFile } from '../core/config-loader.js';
 import { createLogger, initFileLogging, flushLogsSync } from '../utils/logger.js';
+import { resolveDataDir } from '../utils/data-dir.js';
 import { readJsonFile, resolveHome, readInstalledVersion } from '../utils/fs-utils.js';
 import { acquireSingleInstanceLock } from '../utils/single-instance-lock.js';
 import { UPDATER_PROCESS_PATTERNS, writePidFileSync, removeOwnPidFileSync } from '../utils/pid-utils.js';
@@ -13,9 +14,7 @@ const logger = createLogger('UpdaterMain');
 const DEFAULT_CONFIG_PATH = '~/.loongsuite-pilot/config.json';
 
 async function main(): Promise<void> {
-  const dataDir = resolveHome(
-    process.env.LOONGSUITE_PILOT_DATA_DIR ?? path.join(os.homedir(), '.loongsuite-pilot'),
-  );
+  const dataDir = resolveDataDir();
   await initFileLogging(path.join(dataDir, 'logs', 'loongsuite-pilot-updater.log'));
 
   logger.info('updater process starting');

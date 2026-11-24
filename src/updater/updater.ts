@@ -9,6 +9,7 @@ import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveDataDir } from '../utils/data-dir.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
 import { getUpgradeMarkerPath, hookUpgradeInProgress } from '../utils/hook-restore-request.js';
 import { repairRequestedHookAssets } from './hook-asset-repair.js';
@@ -145,7 +146,7 @@ function defaultPaths(): UpdaterPaths {
   // The daemon bootstraps load from this cache. Use the same control directory
   // for pointers and the asset lock even when the shared hooks live elsewhere.
   const cacheDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR || defaultDir, { homedir: () => home });
-  const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? defaultDir);
+  const dataDir = resolveDataDir();
   return {
     cacheDir,
     dataDir,

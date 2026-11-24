@@ -1,10 +1,14 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadConfig } from '../../../src/core/config-loader.js';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
+import { Updater } from '../../../src/updater/updater.js';
+import { resolveHome } from '../../../src/utils/fs-utils.js';
 import { getHookRestoreRequestPath, writeHookRestoreRequest } from '../../../src/utils/hook-restore-request.js';
 import { redownloadCurrentHookAssets, repairRequestedHookAssets } from '../../../src/updater/hook-asset-repair.js';
 
@@ -19,6 +23,12 @@ vi.mock('node:fs/promises', async () => {
   }) as typeof actual.mkdtemp;
   return { ...actual, mkdtemp };
 });
+
+vi.mock('../../../src/core/hook-asset-manifest.js', () => ({
+  HOOK_ASSET_MANIFEST: {
+    'claude-code-loongsuite-pilot-hook.sh': createHash('sha256').update('#!/bin/sh\necho ok\n').digest('hex'),
+  },
+}));
 
 const execFileAsync = promisify(execFile);
 const scriptName = 'claude-code-loongsuite-pilot-hook.sh';
@@ -36,6 +46,7 @@ describe('hook asset repair', () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await cleanupTempDir(tmpDir);
   });
 
@@ -73,6 +84,63 @@ describe('hook asset repair', () => {
 
     expect(await fs.readFile(deployed, 'utf8')).toBe(scriptText);
     await expect(fs.readFile(getHookRestoreRequestPath(cacheDir))).rejects.toThrow();
+  });
+
+  async function deployedRequest(dataDir: string): Promise<{ cacheDir: string; pilotDir: string }> {
+    const cacheDir = path.join(tmpDir, 'cache');
+    const pilotDir = path.join(cacheDir, 'versions', 'v1');
+    await fs.mkdir(path.join(pilotDir, 'assets', 'hooks'), { recursive: true });
+    await fs.writeFile(path.join(pilotDir, 'assets', 'hooks', scriptName), scriptText, { mode: 0o755 });
+    await fs.writeFile(path.join(cacheDir, 'current'), 'v1\n');
+    await fs.mkdir(path.join(dataDir, 'hooks'), { recursive: true });
+    await fs.writeFile(path.join(dataDir, 'hooks', scriptName), 'tampered\n');
+    await fs.mkdir(path.join(cacheDir, 'hooks'), { recursive: true });
+    await fs.writeFile(path.join(cacheDir, 'hooks', 'sentinel.txt'), 'cache\n');
+    await request(cacheDir, pilotDir, [scriptName]);
+    vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheDir);
+    vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', path.join(tmpDir, 'config.json'));
+    return { cacheDir, pilotDir };
+  }
+
+  async function defaultScript(): Promise<string | null> {
+    try {
+      return await fs.readFile(path.join(os.homedir(), '.loongsuite-pilot', 'hooks', scriptName), 'utf8');
+    } catch {
+      return null;
+    }
+  }
+
+  it('restores the config-file dataDir and leaves the default directory alone', async () => {
+    const dataDir = path.join(tmpDir, 'from-config');
+    await fs.writeFile(path.join(tmpDir, 'config.json'), JSON.stringify({ dataDir }), 'utf8');
+    const { cacheDir } = await deployedRequest(dataDir);
+    vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', '');
+    const defaultBefore = await defaultScript();
+
+    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000 });
+    await updater.check();
+
+    expect(resolveHome((await loadConfig()).dataDir)).toBe(dataDir);
+    expect(await fs.readFile(path.join(dataDir, 'hooks', scriptName), 'utf8')).toBe(scriptText);
+    expect(await fs.readFile(path.join(cacheDir, 'hooks', 'sentinel.txt'), 'utf8')).toBe('cache\n');
+    expect(await defaultScript()).toBe(defaultBefore);
+    await expect(fs.readFile(getHookRestoreRequestPath(cacheDir))).rejects.toThrow();
+  });
+
+  it('lets LOONGSUITE_PILOT_DATA_DIR win over the config-file dataDir', async () => {
+    const fromConfig = path.join(tmpDir, 'from-config');
+    const fromEnv = path.join(tmpDir, 'from-env');
+    await fs.writeFile(path.join(tmpDir, 'config.json'), JSON.stringify({ dataDir: fromConfig }), 'utf8');
+    const { cacheDir } = await deployedRequest(fromEnv);
+    vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', fromEnv);
+
+    const updater = new Updater({ enabled: false, checkIntervalMs: 60_000 });
+    await updater.check();
+
+    expect(resolveHome((await loadConfig()).dataDir)).toBe(fromEnv);
+    expect(await fs.readFile(path.join(fromEnv, 'hooks', scriptName), 'utf8')).toBe(scriptText);
+    await expect(fs.stat(fromConfig)).rejects.toThrow();
+    expect(await fs.readFile(path.join(cacheDir, 'hooks', 'sentinel.txt'), 'utf8')).toBe('cache\n');
   });
 
   it('drops a request whose version is no longer current', async () => {
