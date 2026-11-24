@@ -145,10 +145,9 @@ export interface ConfigFile {
     enabled?: boolean;
     intervalMs?: number;
     repairCooldownMs?: number;
-  };
-
-  hookTamper?: {
-    enabled?: boolean;
+    tamperProtection?: {
+      enabled?: boolean;
+    };
   };
 
   privacy?: { excludeWorkspaces?: string[] };
@@ -932,7 +931,7 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
 function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
   return {
     enabled: envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true),
-    tamperProtection: envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookTamper?.enabled ?? false),
+    tamperProtection: envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false),
     intervalMs: envInt(
       'LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS',
       file?.hookWatchdog?.intervalMs ?? 5 * 60_000, // 5 minutes
@@ -1509,7 +1508,7 @@ export function buildAutoUpdateConfig(
 
   return {
     enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
-    tamperProtection: envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookTamper?.enabled ?? false),
+    tamperProtection: envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false),
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,

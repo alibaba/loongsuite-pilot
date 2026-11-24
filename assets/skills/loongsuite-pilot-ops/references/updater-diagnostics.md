@@ -268,7 +268,7 @@ git_commit=abc1234
 |------|---------|
 | `loongsuite-pilot status` 显示 updater 未运行 | 查看 updater 日志。防篡改开着且只关版本检查时，进程仍应在（`auto-update disabled, repairing hook assets only`）。两个都关时日志是 `auto-update and hook repair disabled, exiting`，pid 不在是预期状态。其余情况进程不在就重启服务 |
 | `auto-update disabled, repairing hook assets only` | `autoUpdate.enabled` 为 `false` 或 `LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED=false`，同时 hook 修复还开着。版本检查停了，hook 修复还在 |
-| `auto-update and hook repair disabled, exiting` | 上面的自动更新开关，再加上 hook 防篡改关闭。防篡改默认关，打开用 `hookTamper.enabled: true` 或 `LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED=true`。两个都关，进程退出 |
+| `auto-update and hook repair disabled, exiting` | 上面的自动更新开关，再加上 hook 防篡改关闭。防篡改默认关，打开用 `hookWatchdog.tamperProtection.enabled: true` 或 `LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED=true`。两个都关，进程退出 |
 | manifest 拉取失败（`manifest fetch failed`） | 检查网络连通性：`curl -I <manifestUrl>`。常见原因：代理未配置、OSS 域名不可达、DNS 解析失败 |
 | `SHA-256 mismatch` | tarball 下载不完整或 CDN 缓存与 manifest 不一致。等待下一次自动重试（通常 CDN 缓存刷新后恢复） |
 | `npm install` 失败 | 检查 Node.js 和 npm 是否可用：`node --version && npm --version`。常见：PATH 中无 node、npm registry 不可达 |

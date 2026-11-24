@@ -89,10 +89,10 @@ describe('buildAutoUpdateConfig', () => {
     expect(config.checkIntervalMs).toBe(999);
   });
 
-  it('leaves hook tamper repair off unless hookTamper is enabled', () => {
+  it('leaves hook tamper repair off unless hookWatchdog.tamperProtection is enabled', () => {
     expect(buildAutoUpdateConfig(null).tamperProtection).toBe(false);
     expect(buildAutoUpdateConfig({ hookWatchdog: { enabled: false } }).tamperProtection).toBe(false);
-    expect(buildAutoUpdateConfig({ hookTamper: { enabled: true } }).tamperProtection).toBe(true);
+    expect(buildAutoUpdateConfig({ hookWatchdog: { tamperProtection: { enabled: true } } }).tamperProtection).toBe(true);
   });
 
   it('env LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED=true turns hook repair on', () => {

@@ -657,8 +657,10 @@ describe('ConfigLoader', () => {
 
     it('turns hook tamper protection on without following the watchdog switch', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
-        hookWatchdog: { enabled: false },
-        hookTamper: { enabled: true },
+        hookWatchdog: {
+          enabled: false,
+          tamperProtection: { enabled: true },
+        },
       });
 
       const config = await loadConfig();
