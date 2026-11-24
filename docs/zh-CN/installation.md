@@ -20,6 +20,8 @@ curl -fsSL https://loongcollector-community-edition.oss-cn-shanghai.aliyuncs.com
 
 安装器会检测支持的 Agent，让你选择要监控的 Agent，部署 Hook 或插件，写入本地配置，并启动后台服务。
 
+部署 Qoder 或 Qoder CN 的 Hook 时，Pilot 会在客户端用户配置目录的 `.env` 中补齐 `QODER_EXPOSE_TOKEN_USAGE=1` 和 `QODERCN_EXPOSE_TOKEN_USAGE=1`。已有显式配置优先。部署完成后，完全退出并重新打开客户端，新的请求就会使用这些设置。
+
 ## 在 Windows 从公开包安装
 
 打开 PowerShell，执行：

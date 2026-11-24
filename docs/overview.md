@@ -41,6 +41,7 @@ LoongSuite Pilot runs on a developer machine and collects telemetry from support
 | Qoder Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
 | Qwen Code CLI | Hook | Yes | Yes | Yes | Yes |
 | Qwen Work CN | Hook / local data polling | Yes | Yes | Yes | Yes |
+| TRAE CN | Hook + local session data | Yes | Yes | Yes | Yes |
 | Wukong | CLI API polling | Yes | Yes | Yes | Yes |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | Yes | Yes | Yes | Yes |
 | [Doubao Work (macOS/Windows, experimental)](doubao-work.md) | Read-only client logs | Client turns + local tools | Metadata only | No | No |
