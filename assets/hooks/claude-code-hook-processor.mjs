@@ -48,6 +48,11 @@ import {
   saveState,
   readAndDeleteChildState,
   withStateLock,
+  enqueueStop,
+  hashStopText,
+  hasPendingStop,
+  listPendingStops,
+  readPendingStop,
 } from './claude-code/state.mjs';
 import {
   buildBashUpdatedInput,
@@ -59,13 +64,6 @@ import {
 import {
   parseClaudeTranscript,
 } from './claude-code/transcript-parser.mjs';
-import {
-  enqueueStop,
-  hashStopText,
-  hasPendingStop,
-  listPendingStops,
-  readPendingStop,
-} from './claude-code/pending-stops.mjs';
 import {
   convertInputMessages,
   convertOutputMessages,

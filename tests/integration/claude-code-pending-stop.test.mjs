@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { StateStore } from '../../src/checkpoints/state-store.ts';
 import { ClaudeCodeLogInput } from '../../src/inputs/claude-code-log/claude-code-log-input.ts';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.ts';
-import { enqueueStop, hashStopText } from '../../assets/hooks/claude-code/pending-stops.mjs';
+import { enqueueStop, hashStopText } from '../../assets/hooks/claude-code/state.mjs';
 
 const HOOKS = fileURLToPath(new URL('../../assets/hooks', import.meta.url));
 const start = Date.now() - 10_000;
