@@ -158,8 +158,10 @@ export class HubUsage {
               const result = JSON.stringify(info.result.data ?? info.result);
               if (args.length + result.length <= 64000) {
                 const prior = turn.todos.get(call);
+                // Later UI snapshots can decorate a completed result. Keep the
+                // first returned payload that was available to its continuation.
                 if (prior === undefined) turn.todos.set(call, { plan: d.id, args, result });
-                else if (prior && (prior.plan !== d.id || prior.args !== args || prior.result !== result)) turn.todos.set(call, null);
+                else if (prior && (prior.plan !== d.id || prior.args !== args)) turn.todos.set(call, null);
               }
             }
             // The client replaces a plan item's reasoning on updates. A single

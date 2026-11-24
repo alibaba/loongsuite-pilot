@@ -6,7 +6,7 @@ import cbor from 'cbor';
 import { expect, it } from 'vitest';
 import { NativeUsageIndex } from '../../../../src/inputs/trae-cn-log/native-usage-index.js';
 
-it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('reconciles a native tool batch: %s', async mode => {
+it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two replies'])('reconciles a native tool batch: %s', async mode => {
   const root = await mkdtemp(join(tmpdir(), 'trae-stream-'));
   const index = new NativeUsageIndex();
   Object.assign(index, { root });
@@ -48,7 +48,9 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('re
   try {
     const dir = join(root, '20261120T150000', 'Modular');
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'ai_agent-0-2026-11-20.alaudalog'), Buffer.concat([header,deflateRawSync(Buffer.concat(chunks))]));
+    await writeFile(join(dir, 'ai_agent-0-2026-11-20.alaudalog'), Buffer.concat([header,deflateRawSync(Buffer.concat(mode === 'rotated' ? chunks.slice(0, -3) : chunks))]));
+    if (mode === 'rotated') await writeFile(join(dir, 'ai_agent-1-2026-11-20.alaudalog'),
+      Buffer.concat([header, deflateRawSync(Buffer.concat(chunks.slice(-3)))]));
     await index.refresh();
     const rounds = index.responses(session, new Set(['one']));
     expect(rounds?.[0].id).toBe(history);
@@ -58,7 +60,7 @@ it.each(['valid', 'overlap', 'wrong count', 'two histories', 'two replies'])('re
       expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
       expect(index.ownsTool(trace, session, unrelatedReply, calls)).toBe(false);
     }
-    if (mode === 'valid' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', headersAt: String(BigInt(Date.UTC(2026, 0, 320, 8, 3, 2)) * 1000000n + 1n), reply, seq: 5, toolIds: ['one','two'] });
+    if (mode === 'valid' || mode === 'rotated' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', headersAt: String(BigInt(Date.UTC(2026, 0, 320, 8, 3, 2)) * 1000000n + 1n), reply, seq: 5, toolIds: ['one','two'] });
     else if (mode === 'two histories') {
       expect(rounds).toHaveLength(2);
       for (const round of rounds!) {

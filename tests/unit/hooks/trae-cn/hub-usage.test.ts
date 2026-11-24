@@ -80,6 +80,8 @@ it.each([false, true])('joins TodoWrite bodies only on the verified tool call wi
       ['plan_item', { id: 'read', tool_call_info: { meta: { llm_toolcall_id: 'read-call' } } }],
       ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
         result: { status: 'success', data: result }, meta: { llm_toolcall_id: 'todo-call' } } }],
+      ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
+        result: { status: 'success', data: { ...result, result: 'UI summary' } }, meta: { llm_toolcall_id: 'todo-call' } } }],
     ] as const;
     await writeFile(join(root, 'task', reply + '.jsonl'), rows.map(([type, data], seq) =>
       JSON.stringify({ type, seq, data: JSON.stringify({ ...data, reply_to_message_id: reply }) })).join('\n') + '\n');

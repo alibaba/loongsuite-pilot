@@ -56,7 +56,7 @@ export class NativeUsageIndex {
   private readonly root = path.join(process.platform === 'darwin' ? path.join(os.homedir(), 'Library/Application Support')
     : (process.platform === 'win32' ? process.env.APPDATA : process.env.XDG_CONFIG_HOME) || path.join(os.homedir(), '.config'), 'Trae CN', 'logs');
 
-  private visit(stream: NativeStream, record: unknown) {
+  private visit(file: string, stream: NativeStream, record: unknown) {
     const f = (record as { fields?: Record<string, unknown> })?.fields;
     if (!f) return;
     const trace = text(f.trace_id), message = text(f.message);
@@ -68,7 +68,18 @@ export class NativeUsageIndex {
       }
       return;
     }
-    const r = stream.receipts.get(trace);
+    let r = stream.receipts.get(trace);
+    if (!r) {
+      // Rotation starts a new compressed file without repeating the task
+      // context. Only resume an identified task in the same TRAE log session.
+      for (const [otherFile, other] of this.streams) {
+        if (path.dirname(otherFile) !== path.dirname(file)) continue;
+        const candidate = other.receipts.get(trace);
+        if (!candidate) continue;
+        if (r) return;
+        r = candidate;
+      }
+    }
     if (!r) return;
     const owner = (record as { span?: unknown }).span;
     if (message === 'cloud stream response headers' &&
@@ -201,10 +212,15 @@ export class NativeUsageIndex {
     for (const dir of await fs.readdir(this.root, { withFileTypes: true }).catch(() => [])) {
       if (!dir.isDirectory() || !/^\d{8}T\d{6}$/.test(dir.name)) continue;
       const folder = path.join(this.root, dir.name, 'Modular');
-      for (const item of await fs.readdir(folder, { withFileTypes: true }).catch(() => [])) {
-        if (!item.isFile() || !/^ai_agent-\d+-\d{4}-\d\d-\d\d\.alaudalog$/.test(item.name)) continue;
+      const entries = await fs.readdir(folder, { withFileTypes: true }).catch(() => []);
+      const files = await Promise.all(entries.filter(item =>
+        item.isFile() && /^ai_agent-\d+-\d{4}-\d\d-\d\d\.alaudalog$/.test(item.name)).map(async item => {
         const file = path.join(folder, item.name);
-        const stat = await fs.lstat(file).catch(() => undefined);
+        return { file, stat: await fs.lstat(file).catch(() => undefined) };
+      }));
+      // Read the older segment before the continuation when starting cold.
+      for (const { file, stat } of files.sort((a, b) => (a.stat?.birthtimeMs ?? 0) - (b.stat?.birthtimeMs ?? 0) ||
+          a.file.localeCompare(b.file, 'en', { numeric: true }))) {
         if (!stat?.isFile() || stat.mtimeMs < cutoff || stat.size < 178) continue;
         active.add(file);
         let stream = this.streams.get(file);
@@ -224,7 +240,7 @@ export class NativeUsageIndex {
             stream = new NativeStream(identity, start);
             this.streams.set(file, stream);
             const current = stream;
-            stream.visitor = record => this.visit(current, record);
+            stream.visitor = record => this.visit(file, current, record);
           }
           const buffer = Buffer.allocUnsafe(256 * 1024);
           while (stream.offset < stat.size) {
