@@ -109,4 +109,37 @@ describe('hook install idempotency', () => {
     expect((await installInHome()).report.agents[0].status).toBe('up-to-date');
     expect((await fs.stat(envFile)).mtimeMs).toBe(envMtime);
   });
+
+  it.skipIf(process.platform !== 'linux' || process.getuid?.() !== 0)(
+    'keeps Qoder token settings readable by the profile owner during privileged deployment',
+    async () => {
+      const profile = path.join(tmp, '.qoder');
+      await fs.mkdir(profile);
+      await fs.chown(profile, 12345, 12345);
+      await fs.copyFile(
+        new URL('../../../agents.d/qoder.json', import.meta.url),
+        path.join(pilotDir, 'agents.d', 'qoder.json'),
+      );
+
+      const envFile = path.join(profile, '.env');
+      expect((await install('qoder')).report.agents[0].status).toBe('ok');
+      expect(await fs.stat(envFile)).toMatchObject({ uid: 12345, gid: 12345 });
+      expect((await fs.stat(envFile)).mode & 0o777).toBe(0o600);
+
+      const linkedEnvFile = path.join(tmp, 'shared.env');
+      const explicit = 'QODER_EXPOSE_TOKEN_USAGE=0\n';
+      await fs.rename(envFile, linkedEnvFile);
+      await fs.writeFile(linkedEnvFile, explicit);
+      await fs.chmod(linkedEnvFile, 0o640);
+      await fs.chown(linkedEnvFile, 12346, 12346);
+      await fs.symlink(linkedEnvFile, envFile);
+
+      expect((await install('qoder')).report.agents[0].status).toBe('ok');
+      expect(await fs.readlink(envFile)).toBe(linkedEnvFile);
+      const updated = await fs.stat(linkedEnvFile);
+      expect(updated).toMatchObject({ uid: 12346, gid: 12346 });
+      expect(updated.mode & 0o777).toBe(0o640);
+      expect(await fs.readFile(linkedEnvFile, 'utf8')).toBe(explicit + 'QODERCN_EXPOSE_TOKEN_USAGE=1\n');
+    },
+  );
 });

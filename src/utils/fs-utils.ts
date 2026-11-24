@@ -67,6 +67,8 @@ export interface AtomicTextWriteOptions {
   mode?: number;
   /** Retain an existing user file's exact mode, without applying umask again. */
   preserveMode?: boolean;
+  /** Set the temporary file's owner before replacing the target. */
+  owner?: { uid: number; gid: number };
 }
 
 async function assertExpectedFileState(
@@ -113,10 +115,28 @@ export async function writeTextFileAtomic(
     }
   }
 
+  const prepareTempFile = async (tempPath: string): Promise<void> => {
+    const owner = options.owner;
+    if (!owner) {
+      await fsp.writeFile(tempPath, text, { encoding: 'utf8', mode: options.mode });
+      if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tempPath, options.mode);
+      return;
+    }
+    const handle = await fsp.open(tempPath, 'wx', options.mode);
+    try {
+      await handle.writeFile(text, 'utf8');
+      await handle.chown(owner.uid, owner.gid);
+      if (options.preserveMode && options.mode !== undefined) await handle.chmod(options.mode);
+    } finally {
+      await handle.close();
+    }
+  };
+
   const tmp = atomicTmpPath(path);
+  let prepared = false;
   try {
-    await fsp.writeFile(tmp, text, { encoding: 'utf8', mode: options.mode });
-    if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp, options.mode);
+    await prepareTempFile(tmp);
+    prepared = true;
     // Re-check after preparing the temporary file. This narrows the remaining
     // race to the final compare-and-rename window.
     if (options.expected) {
@@ -132,8 +152,7 @@ export async function writeTextFileAtomic(
       await ensureDir(dir);
       const tmp2 = atomicTmpPath(path);
       try {
-        await fsp.writeFile(tmp2, text, { encoding: 'utf8', mode: options.mode });
-        if (options.preserveMode && options.mode !== undefined) await fsp.chmod(tmp2, options.mode);
+        await prepareTempFile(tmp2);
         if (options.expected) {
           await assertExpectedFileState(path, options.expected);
         }
@@ -142,12 +161,9 @@ export async function writeTextFileAtomic(
         await fsp.unlink(tmp2).catch(() => {});
         throw retryErr;
       }
-    } else if (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES') {
+    } else if (prepared && (code === 'EPERM' || code === 'EBUSY' || code === 'EACCES')) {
       // On Windows, rename can fail when the target is briefly locked by
       // antivirus/indexer or concurrent I/O. Retry once after a short delay.
-      // If the error came from writeFile (tmp doesn't exist), skip the retry.
-      const tmpExists = await fsp.stat(tmp).then(() => true, () => false);
-      if (!tmpExists) throw err;
       await new Promise(r => setTimeout(r, 50));
       try {
         if (options.expected) {

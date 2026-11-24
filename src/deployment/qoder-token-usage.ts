@@ -4,6 +4,7 @@ import * as util from 'node:util';
 import type { AgentDefinition } from '../types/index.js';
 import { resolveHome, type AtomicTextWriteOptions } from '../utils/fs-utils.js';
 import { createLogger } from '../utils/logger.js';
+import { agentConfigOwner } from './agent-config-owner.js';
 
 const logger = createLogger('QoderTokenUsage');
 const tokenUsageKeys = ['QODER_EXPOSE_TOKEN_USAGE', 'QODERCN_EXPOSE_TOKEN_USAGE'];
@@ -41,6 +42,8 @@ export async function planQoderTokenUsageDefaults(def: AgentDefinition): Promise
     const newline = content.includes('\r\n') ? '\r\n' : '\n';
     const separator = content && !content.endsWith('\n') ? newline : '';
     const defaults = missing.map(key => `${key}=1`).join(newline);
+    // A privileged deployment must leave the file readable by the client user.
+    const owner = process.getuid?.() === 0 ? stat ?? await agentConfigOwner(target) : undefined;
     return {
       file: target,
       text: `${content}${separator}${defaults}${newline}`,
@@ -48,6 +51,7 @@ export async function planQoderTokenUsageDefaults(def: AgentDefinition): Promise
         mode: stat ? stat.mode & 0o777 : 0o600,
         preserveMode: stat !== undefined,
         expected: stat ? { exists: true, content } : { exists: false },
+        ...(owner ? { owner: { uid: owner.uid, gid: owner.gid } } : {}),
       },
     };
   } catch (error) {
