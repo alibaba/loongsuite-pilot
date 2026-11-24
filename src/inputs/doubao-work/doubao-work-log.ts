@@ -5,8 +5,9 @@ const EVENTS = new Set([
   'on_message_session_start', 'on_message_sending_start',
   'on_message_sending_end', 'general_agent_message_id_mapping', 'on_message_session_end',
   'flow_message_time',
+  'on_message_receiving_end',
 ]);
-const EVENT_PREFILTER = /"eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time)"/;
+const EVENT_PREFILTER = /"eventName"\s*:\s*"(?:on_message_session_start|on_message_sending_start|on_message_sending_end|general_agent_message_id_mapping|on_message_session_end|flow_message_time|on_message_receiving_end)"/;
 const MIN_EPOCH_MS = Date.UTC(2020, 0, 1);
 const MAX_EPOCH_MS = Date.UTC(2100, 0, 1);
 // Observed present_files implementation: path validation is dispatched through
@@ -25,6 +26,9 @@ export interface DoubaoLogEvent {
   turnId?: string;
   conversationId?: string;
   localMessageId?: string;
+  modeType?: string;
+  sendMessageId?: string;
+  receiveMessageId?: string;
   clientOutcome?: 'received' | 'ended' | 'error' | 'cancelled';
   selectedSkills?: string[];
   selectedPartners?: string[];
@@ -177,6 +181,9 @@ export function parseDoubaoLogLine(line: string, fileName: string): DoubaoLogEve
   }
   return {
     name: object.eventName, timeNano, queryMs, turnId, clientOutcome,
+    modeType: identifier(meta.mode_type),
+    sendMessageId: identifier(meta.send_message_id),
+    receiveMessageId: identifier(meta.receive_message_id),
     conversationId: identifier(meta.conversation_id ?? meta.conversationId),
     localMessageId: identifier(meta.send_local_message_id ?? meta.localMessageId),
     selectedSkills: selectedNames(meta.mention_skill_list),
@@ -189,6 +196,10 @@ export interface DoubaoPendingTurn {
   queryMs: number;
   conversationId?: string;
   localMessageId?: string;
+  modeType?: string;
+  sendMessageId?: string;
+  receiveMessageId?: string;
+  receiveEndNano?: string;
   updatedMs: number;
   selectedSkills?: string[];
   selectedPartners?: string[];
