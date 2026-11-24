@@ -7,11 +7,12 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import type { NativeUsageIndex } from './native-usage-index.js';
 
 type Usage = { input: number; output: number; cached?: number; reasoning?: number; cacheCreated?: number };
-type TodoBody = { plan: string; args: string; result: string };
+type TodoBody = { args: string; result: string };
+type TodoReceipt = { plan: string; status?: 'success' | 'failure'; body?: TodoBody };
 type Turn = {
   reply: string; session: string; trace: string; tools: Set<string>; reports: Map<number, Usage>;
   timings: Map<string, { start: number; first: number } | null>;
-  todos: Map<string, TodoBody | null>;
+  todos: Map<string, TodoReceipt | null>;
   plans: Map<string, { seq: number; content: string; call?: string }>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
 };
@@ -21,7 +22,7 @@ const windowSize = 4 * 1024 * 1024;
 
 // A confirmed commit includes one result per dispatched call. Its timestamp is
 // the batch acknowledgement, not a measured tool execution end.
-function todoEvents(entry: AgentActivityEntry, todo: {call: string; start: string; committedAt: string}, body?: TodoBody) {
+function todoEvents(entry: AgentActivityEntry, todo: {call: string; start: string; committedAt: string}, status?: TodoReceipt['status'], body?: TodoBody) {
   const key = [entry.trace_id, 'TodoWrite', todo.call].join('/');
   const digest = (suffix: string) => createHash('sha256').update(key + suffix).digest('hex');
   const base = {
@@ -38,6 +39,8 @@ function todoEvents(entry: AgentActivityEntry, todo: {call: string; start: strin
     { ...base, 'event.name': 'tool.call', 'event.id': digest('/call'), time_unix_nano: todo.start,
       ...(body ? { 'gen_ai.tool.call.arguments': JSON.parse(body.args) } : {}) },
     { ...base, 'event.name': 'tool.result', 'event.id': digest('/result'), time_unix_nano: todo.committedAt,
+      ...(status ? { 'tool.result.status': status } : {}),
+      ...(status === 'failure' ? { 'error.type': 'tool_use_failure' } : {}),
       ...(body ? { 'gen_ai.tool.call.result': JSON.parse(body.result) } : {}) },
   ] satisfies AgentActivityEntry[];
 }
@@ -152,16 +155,23 @@ export class HubUsage {
             const call = typeof id === 'string' && id.length > 0 && id.length <= 256 ? id : undefined;
             if (call) turn.tools.add(call);
             const info = d.tool_call_info;
-            if (this.captureContent && call && typeof d.id === 'string' && info?.name === 'TodoWrite' &&
-                info.params && info.result?.status && (turn.todos.has(call) || turn.todos.size < 256)) {
-              const args = JSON.stringify(info.params);
-              const result = JSON.stringify(info.result.data ?? info.result);
-              if (args.length + result.length <= 64000) {
-                const prior = turn.todos.get(call);
-                // Later UI snapshots can decorate a completed result. Keep the
-                // first returned payload that was available to its continuation.
-                if (prior === undefined) turn.todos.set(call, { plan: d.id, args, result });
-                else if (prior && (prior.plan !== d.id || prior.args !== args)) turn.todos.set(call, null);
+            if (call && typeof d.id === 'string' && info?.name === 'TodoWrite' &&
+                info.result?.status && (turn.todos.has(call) || turn.todos.size < 256)) {
+              const status = info.result.status === 'success' ? 'success' :
+                info.result.status === 'error' || info.result.status === 'failure' ? 'failure' : undefined;
+              const prior = turn.todos.get(call);
+              let body: TodoBody | undefined;
+              if (this.captureContent && info.params) {
+                const args = JSON.stringify(info.params);
+                const result = JSON.stringify(info.result.data ?? info.result);
+                if (args.length + result.length <= 64000) body = { args, result };
+              }
+              if (prior === undefined) turn.todos.set(call, { plan: d.id, status, body });
+              else if (prior && (prior.plan !== d.id || (prior.status && status && prior.status !== status) ||
+                  (prior.body && body && prior.body.args !== body.args))) turn.todos.set(call, null);
+              else if (prior) {
+                prior.status ??= status;
+                prior.body ??= body;
               }
             }
             // The client replaces a plan item's reasoning on updates. A single
@@ -216,8 +226,9 @@ export class HubUsage {
       for (const todo of round.todos) {
         if (ids.has(todo.call)) continue;
         ids.add(todo.call);
-        const body = evidence?.matchesHubOwner && Array.isArray(messages) ? turn?.todos.get(todo.call) : undefined;
-        recovered.push(...todoEvents(entry, todo, body ?? undefined));
+        const receipt = evidence?.matchesHubOwner ? turn?.todos.get(todo.call) : undefined;
+        const body = Array.isArray(messages) ? receipt?.body : undefined;
+        recovered.push(...todoEvents(entry, todo, receipt?.status, body));
         if (this.captureContent && Array.isArray(messages)) {
           recoveredCalls.push({ type: 'tool_call', name: 'TodoWrite', id: todo.call,
             ...(body ? { arguments: JSON.parse(body.args) } : {}) });

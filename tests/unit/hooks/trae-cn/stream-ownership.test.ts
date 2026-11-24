@@ -1,12 +1,14 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { deflateRawSync } from 'node:zlib';
 import cbor from 'cbor';
 import { expect, it } from 'vitest';
+import { HubUsage } from '../../../../src/inputs/trae-cn-log/hub-usage.js';
+import type { AgentActivityEntry } from '../../../../src/types/index.js';
 import { NativeUsageIndex } from '../../../../src/inputs/trae-cn-log/native-usage-index.js';
 
-it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two replies'])('reconciles a native tool batch: %s', async mode => {
+it.each(['valid', 'rotated', 'deleted', 'expired', 'overlap', 'wrong count', 'two histories', 'two replies'])('reconciles a native tool batch: %s', async mode => {
   const root = await mkdtemp(join(tmpdir(), 'trae-stream-'));
   const index = new NativeUsageIndex();
   Object.assign(index, { root });
@@ -29,7 +31,7 @@ it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two rep
   add('[Hub] task event contract', { event_type: 'token_usage', conversation_id: session, task_id: reply, event_seq: 5 });
   for (const toolcall_id of ['one','two']) {
     add('streaming ToolCall dispatch', { require_local_execution: true, toolcall_id });
-    add('tool execution started', { toolcall_id });
+    add('tool execution started', { toolcall_id, tool_name: toolcall_id === 'two' ? 'TodoWrite' : 'Read' });
   }
   add('routing CommitReady', { has_async_child: false, has_foreground: false, parent_result_count: 2 });
   add('commit_results', { conversation_id: session, result_count: mode === 'wrong count' ? 1 : 2 });
@@ -48,9 +50,20 @@ it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two rep
   try {
     const dir = join(root, '20261120T150000', 'Modular');
     await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, 'ai_agent-0-2026-11-20.alaudalog'), Buffer.concat([header,deflateRawSync(Buffer.concat(mode === 'rotated' ? chunks.slice(0, -3) : chunks))]));
-    if (mode === 'rotated') await writeFile(join(dir, 'ai_agent-1-2026-11-20.alaudalog'),
-      Buffer.concat([header, deflateRawSync(Buffer.concat(chunks.slice(-3)))]));
+    const rotated = ['rotated', 'deleted', 'expired'].includes(mode);
+    const oldFile = join(dir, 'ai_agent-0-2026-11-20.alaudalog');
+    const segment = (records: Buffer[]) => Buffer.concat([header, deflateRawSync(Buffer.concat(records))]);
+    await writeFile(oldFile, segment(rotated ? chunks.slice(0, -3) : chunks));
+    if (mode === 'deleted' || mode === 'expired') {
+      await index.refresh();
+      if (mode === 'deleted') await rm(oldFile);
+      if (mode === 'expired') {
+        const stale = new Date(Date.now() - 2 * 3600_000);
+        await utimes(oldFile, stale, stale);
+      }
+      await index.refresh(); // Evict the predecessor before reading the continuation.
+    }
+    if (rotated) await writeFile(join(dir, 'ai_agent-1-2026-11-20.alaudalog'), segment(chunks.slice(-3)));
     await index.refresh();
     const calls = new Set(['one']);
     const trace = 'a'.repeat(32);
@@ -64,7 +77,31 @@ it.each(['valid', 'rotated', 'overlap', 'wrong count', 'two histories', 'two rep
       expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
       expect(index.ownsTool(trace, session, unrelatedReply, calls)).toBe(false);
     }
-    if (mode === 'valid' || mode === 'rotated' || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', headersAt: String(BigInt(Date.UTC(2026, 0, 320, 8, 3, 2)) * 1000000n + 1n), reply, seq: 5, toolIds: ['one','two'] });
+    if (rotated) {
+      expect(index.ownsTool(trace, session, reply, calls)).toBe(true);
+      expect(index.expectedSeqs(trace, session, reply)).toEqual(new Set([5]));
+      expect(index.complete(trace, session, reply, new Map([[5, 42]]))).toBe(true);
+      expect(rounds?.[0]).toMatchObject({ id: history, reply, seq: 5, todos: [{ call: 'two' }] });
+      const hubDir = join(root, 'hub');
+      await mkdir(join(hubDir, 'task'), { recursive: true });
+      const hub = new HubUsage(hubDir);
+      try {
+        const rows = [
+          { seq: 1, type: 'metadata', data: { session_id: session, trace_id: trace } },
+          { seq: 5, type: 'token_usage', data: { prompt_tokens: 40, completion_tokens: 2, total_tokens: 42 } },
+        ];
+        await writeFile(join(hubDir, 'task', reply + '.jsonl'), rows.map(row => JSON.stringify({
+          ...row, data: JSON.stringify({ ...row.data, reply_to_message_id: reply }),
+        })).join('\n') + '\n');
+        await hub.refresh();
+        const entry = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+          'agent.trae-cn.tool_call_ids': ['one'] } as unknown as AgentActivityEntry;
+        hub.enrich(entry, index);
+        expect(entry['gen_ai.usage.total_tokens']).toBe(42);
+        expect(entry['loongsuite.trae_cn.model_responses']).toMatchObject([{ id: history, input: 40, output: 2 }]);
+      } finally { await hub.close(); }
+    }
+    if (mode === 'valid' || rotated || mode === 'two replies') expect(rounds?.[0]).toMatchObject({ request: 'request1', headersAt: String(BigInt(Date.UTC(2026, 0, 320, 8, 3, 2)) * 1000000n + 1n), reply, seq: 5, toolIds: ['one','two'] });
     else if (mode === 'two histories') {
       expect(rounds).toHaveLength(2);
       for (const round of rounds!) {

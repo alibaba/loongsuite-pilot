@@ -2,6 +2,8 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { HubUsage } from '../../../../src/inputs/trae-cn-log/hub-usage.js';
 import type { AgentActivityEntry } from '../../../../src/types/index.js';
 
@@ -68,31 +70,35 @@ it.each([true, false])('joins cache counts by call ID, with continuous stream=%s
 });
 
 it.each([
-  { capture: false, matchesHubOwner: true },
-  { capture: true, matchesHubOwner: true },
-  { capture: true, matchesHubOwner: false },
-])('joins TodoWrite bodies with capture=$capture and matching Hub owner=$matchesHubOwner', async ({ capture, matchesHubOwner }) => {
+  { capture: false, matchesHubOwner: true, status: 'error' },
+  { capture: true, matchesHubOwner: true, status: 'error' },
+  { capture: false, matchesHubOwner: true, status: 'success' },
+  { capture: true, matchesHubOwner: true, status: 'success' },
+  { capture: true, matchesHubOwner: false, status: 'error' },
+])('exports TodoWrite $status with capture=$capture and matching owner=$matchesHubOwner', async ({ capture, matchesHubOwner, status }) => {
   const root = await mkdtemp(join(tmpdir(), 'pilot-trae-todo-'));
   const hub = new HubUsage(root, capture);
   const reply = '1'.repeat(24), session = '2'.repeat(24);
   const args = { todos: [{ id: 'task', status: 'pending' }] };
-  const result = { todo_list: args };
+  const result = status === 'error' ? { message: 'private error detail' } : { todo_list: args };
   try {
     await mkdir(join(root, 'task'));
     const rows = [
       ['metadata', { session_id: session, trace_id: 'a'.repeat(32) }],
       ['plan_item', { id: 'read', tool_call_info: { meta: { llm_toolcall_id: 'read-call' } } }],
       ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
-        result: { status: 'success', data: result }, meta: { llm_toolcall_id: 'todo-call' } } }],
+        result: { status, data: result }, meta: { llm_toolcall_id: 'todo-call' } } }],
       ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
-        result: { status: 'success', data: { ...result, result: 'UI summary' } }, meta: { llm_toolcall_id: 'todo-call' } } }],
+        result: { status, data: { ...result, result: 'UI summary' } }, meta: { llm_toolcall_id: 'todo-call' } } }],
     ] as const;
     await writeFile(join(root, 'task', reply + '.jsonl'), rows.map(([type, data], seq) =>
       JSON.stringify({ type, seq, data: JSON.stringify({ ...data, reply_to_message_id: reply }) })).join('\n') + '\n');
     await hub.refresh();
     const entry = { 'event.name': 'llm.response', trace_id: 'a'.repeat(32), parent_span_id: '1'.repeat(16),
       'gen_ai.session.id': session, 'agent.trae-cn.tool_call_ids': ['read-call'],
-      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Final answer' }] }],
+      'gen_ai.agent.type': 'trae-cn', 'gen_ai.agent.name': 'trae-cn', 'gen_ai.turn.id': 'turn',
+      'gen_ai.step.id': 'step', time_unix_nano: '106', 'gen_ai.turn.end': true,
+      ...(capture ? { 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Final answer' }] }] } : {}),
     } as unknown as AgentActivityEntry;
     const events = hub.enrich(entry, { expectedSeqs: () => undefined, complete: () => false,
       responses: () => ({ matchesHubOwner, rounds: [
@@ -105,7 +111,25 @@ it.each([
     const answer = { role: 'assistant', parts: [{ type: 'text', content: 'Final answer' }] };
     expect(entry['gen_ai.output.messages']).toEqual(capture ? [
       { role: 'assistant', parts: [expect.objectContaining({ type: 'tool_call', id: 'todo-call' })] }, answer,
-    ] : [answer]);
+    ] : undefined);
+    const expectedStatus = matchesHubOwner ? (status === 'error' ? 'failure' : 'success') : undefined;
+    expect(events?.[1]['tool.result.status']).toBe(expectedStatus);
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, captureMessageContent: capture,
+      protocol: 'http/protobuf', serviceName: 'test', endpoints: [{ name: 'test', endpoint: 'http://localhost:4318' }] },
+      undefined, () => ({ export(batch, cb) { spans.push(...batch); cb({ code: 0 }); }, async shutdown() {} }));
+    try {
+      await flusher.sendBatch([{ ...entry, 'event.name': 'llm.request', time_unix_nano: '100', 'gen_ai.turn.end': false }, ...events!, entry]);
+    } finally { await flusher.shutdown(); }
+    const tool = spans.find(s => s.attributes['gen_ai.tool.call.id'] === 'todo-call');
+    expect(tool).toBeDefined();
+    expect(tool!.attributes['tool.result.status']).toBe(expectedStatus);
+    expect(tool!.status.code === 2).toBe(expectedStatus === 'failure');
+    if (!capture) {
+      expect(tool!.attributes).not.toHaveProperty('gen_ai.tool.call.arguments');
+      expect(tool!.attributes).not.toHaveProperty('gen_ai.tool.call.result');
+      expect(JSON.stringify([events, ...spans.map(s => [s.attributes, s.events, s.status])])).not.toContain('private error detail');
+    }
   } finally {
     await hub.close();
     await rm(root, { recursive: true, force: true });

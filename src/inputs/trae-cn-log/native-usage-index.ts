@@ -10,7 +10,7 @@ type ResponseStream = {
   todoStarts: Map<string, string>; committedAt?: string;
   initial: boolean; terminal?: boolean; continuation?: string; resultCount?: number; closed: boolean;
 };
-type Receipt = { session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
+type Receipt = { conflictingOwner?: boolean; session: string; turn: string; done: boolean; touched: number; streams: ResponseStream[]; active?: ResponseStream; ambiguousStreams?: boolean; calls: Set<string>; history: Map<string, string>; expected: Map<string, Set<number>> };
 const text = (value: unknown) => Buffer.isBuffer(value) ? value.toString('utf8') : '';
 const id24 = /^[a-f0-9]{24}$/;
 function nativeTimestamp(record: unknown): string | undefined {
@@ -22,7 +22,6 @@ function nativeTimestamp(record: unknown): string | undefined {
 }
 
 class NativeStream {
-  readonly receipts = new Map<string, Receipt>();
   readonly inflater = createInflateRaw();
   readonly decoder = new cbor.Decoder({ max_depth: 64 });
   visitor?: (record: unknown) => void;
@@ -52,35 +51,31 @@ class NativeStream {
 // The native Hub contract records the sequence of each usage notification,
 // including notifications whose numeric payload never reached the JSONL file.
 export class NativeUsageIndex {
+  private readonly receiptsByFolder = new Map<string, Map<string, Receipt>>();
   private readonly streams = new Map<string, NativeStream>();
   private readonly root = path.join(process.platform === 'darwin' ? path.join(os.homedir(), 'Library/Application Support')
     : (process.platform === 'win32' ? process.env.APPDATA : process.env.XDG_CONFIG_HOME) || path.join(os.homedir(), '.config'), 'Trae CN', 'logs');
 
-  private visit(file: string, stream: NativeStream, record: unknown) {
+  private visit(folder: string, record: unknown) {
     const f = (record as { fields?: Record<string, unknown> })?.fields;
     if (!f) return;
     const trace = text(f.trace_id), message = text(f.message);
     if (!/^[a-f0-9]{32}$/.test(trace)) return;
+    const receipts = this.receiptsByFolder.get(folder);
+    const r = receipts?.get(trace);
     if (message === 'context resolve applied to task request') {
       const session = text(f.session_id), turn = text(f.turn_id);
-      if (id24.test(session) && id24.test(turn) && !stream.receipts.has(trace)) {
-        stream.receipts.set(trace, { session, turn, expected: new Map(), streams: [], calls: new Set(), history: new Map(), done: false, touched: Date.now() });
+      if (!id24.test(session) || !id24.test(turn)) return;
+      if (r && (r.session !== session || r.turn !== turn)) r.conflictingOwner = true;
+      if (!r) {
+        const owners = receipts ?? new Map<string, Receipt>();
+        this.receiptsByFolder.set(folder, owners);
+        owners.set(trace, { session, turn, expected: new Map(), streams: [], calls: new Set(), history: new Map(), done: false, touched: Date.now() });
       }
       return;
     }
-    let r = stream.receipts.get(trace);
-    if (!r) {
-      // Rotation starts a new compressed file without repeating the task
-      // context. Only resume an identified task in the same TRAE log session.
-      for (const [otherFile, other] of this.streams) {
-        if (path.dirname(otherFile) !== path.dirname(file)) continue;
-        const candidate = other.receipts.get(trace);
-        if (!candidate) continue;
-        if (r) return;
-        r = candidate;
-      }
-    }
-    if (!r) return;
+    if (!r || r.conflictingOwner) return;
+    r.touched = Date.now();
     const owner = (record as { span?: unknown }).span;
     if (message === 'cloud stream response headers' &&
         /\/api\/agent\/v3\/(?:create_agent_task|commit_toolcall_result)$/.test(text(f.url))) {
@@ -143,11 +138,11 @@ export class NativeUsageIndex {
 
   responses(session: string, calls: Set<string>, hubTurn?: { trace: string; reply: string }) {
     if (!calls.size) return;
-    const matches = [...this.streams.values()].flatMap(s => [...s.receipts])
+    const matches = [...this.receiptsByFolder.values()].flatMap(receipts => [...receipts])
       .filter(([, receipt]) => receipt.session === session && [...calls].some(id => receipt.calls.has(id)));
     if (matches.length !== 1) return;
     const [trace, receipt] = matches[0];
-    if (!receipt.done || !receipt.history.size) return;
+    if (receipt.conflictingOwner || !receipt.done || !receipt.history.size) return;
     const exactTurn = [...calls].every(call => receipt.calls.has(call)) && receipt.expected.size <= 1;
     const matchesHubOwner = hubTurn?.trace === trace &&
       (receipt.expected.size === 0 || receipt.expected.has(hubTurn.reply));
@@ -177,11 +172,11 @@ export class NativeUsageIndex {
 
   ownsTool(trace: string, session: string, reply: string, calls: Set<string>): boolean {
     const callIds = [...calls];
-    const receipts = [...this.streams.values()].flatMap(stream => [...stream.receipts])
+    const receipts = [...this.receiptsByFolder.values()].flatMap(owners => [...owners])
       .filter(([, receipt]) => receipt.session === session && callIds.some(id => receipt.calls.has(id)));
     if (receipts.length !== 1) return false;
     const [[owningTrace, receipt]] = receipts;
-    if (owningTrace !== trace || !receipt.done || !receipt.expected.has(reply)) return false;
+    if (owningTrace !== trace || receipt.conflictingOwner || !receipt.done || !receipt.expected.has(reply)) return false;
     if (receipt.expected.size === 1) return true;
     if (receipt.ambiguousStreams) return false;
 
@@ -195,16 +190,16 @@ export class NativeUsageIndex {
   }
 
   expectedSeqs(trace: string, session: string, reply: string) {
-    const receipts = [...this.streams.values()].map(stream => stream.receipts.get(trace))
-      .filter(r => r?.done && r.session === session && r.expected.has(reply));
+    const receipts = [...this.receiptsByFolder.values()].map(owners => owners.get(trace))
+      .filter(r => r?.done && !r.conflictingOwner && r.session === session && r.expected.has(reply));
     if (receipts.length === 1) return receipts[0]?.expected.get(reply);
   }
 
   complete(trace: string, session: string, reply: string, seqs: Map<number, unknown>) {
-    for (const stream of this.streams.values()) {
-      const r = stream.receipts.get(trace);
+    for (const owners of this.receiptsByFolder.values()) {
+      const r = owners.get(trace);
       const expected = r?.expected.get(reply);
-      if (r?.done && r.session === session && r.expected.size === 1 && expected?.size === seqs.size &&
+      if (r?.done && !r.conflictingOwner && r.session === session && r.expected.size === 1 && expected?.size === seqs.size &&
           [...expected].every(seq => seqs.has(seq))) return true;
     }
     return false;
@@ -243,8 +238,7 @@ export class NativeUsageIndex {
             if (start > stat.size || start > 1024) continue;
             stream = new NativeStream(identity, start);
             this.streams.set(file, stream);
-            const current = stream;
-            stream.visitor = record => this.visit(file, current, record);
+            stream.visitor = record => this.visit(folder, record);
           }
           const buffer = Buffer.allocUnsafe(256 * 1024);
           while (stream.offset < stat.size) {
@@ -252,12 +246,15 @@ export class NativeUsageIndex {
             if (!bytesRead) break;
             await stream.feed(buffer.subarray(0, bytesRead));
           }
-          for (const [key, receipt] of stream.receipts) if (receipt.touched < cutoff) stream.receipts.delete(key);
         } catch {
           stream?.close();
           this.streams.delete(file);
         } finally { await handle.close(); }
       }
+    }
+    for (const [folder, owners] of this.receiptsByFolder) {
+      for (const [trace, receipt] of owners) if (receipt.touched < cutoff) owners.delete(trace);
+      if (!owners.size) this.receiptsByFolder.delete(folder);
     }
     for (const [file, stream] of this.streams) if (!active.has(file)) { stream.close(); this.streams.delete(file); }
   }
@@ -265,5 +262,6 @@ export class NativeUsageIndex {
   close() {
     for (const stream of this.streams.values()) stream.close();
     this.streams.clear();
+    this.receiptsByFolder.clear();
   }
 }
