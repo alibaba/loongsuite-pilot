@@ -49,6 +49,66 @@ export function hasModelToolSpanForOutput(tools, expectedToolCall) {
   });
 }
 
+function isTraeObservation(span, observation) {
+  return span.attributes?.['gen_ai.agent.name'] === 'trae-cn'
+    && span.attributes?.['loongsuite.trae_cn.observation'] === observation;
+}
+
+function isTraeTurnSummary(step, childrenMap) {
+  return isTraeObservation(step, 'turn_summary') &&
+    (childrenMap.get(step.spanId) || []).some(span => span._kind === 'LLM' && isTraeObservation(span, 'turn_summary'));
+}
+
+// Check semantic.last_step_no_tool_call: the LAST assistant message in the
+// last STEP's LLM `gen_ai.output.messages` must not contain a tool_call part.
+// Earlier assistant messages may legitimately carry tool_call parts (e.g.
+// trae-cn single-LLM-per-turn architecture). When no assistant message is
+// present, fall back to the last message in the array to avoid skipping the
+// check on degenerate payloads. Exported for unit testing.
+export function checkLastStepNoToolCall(spans, childrenMap) {
+  const stepSpans = spans.filter(s => s._kind === 'STEP');
+  if (stepSpans.length === 0) return [];
+  const sorted = [...stepSpans].sort((a, b) => {
+    const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
+    return d < 0n ? -1 : d > 0n ? 1 : 0;
+  });
+  const lastStep = sorted[sorted.length - 1];
+  // A TRAE summary starts with the turn but contains its terminal answer.
+  const terminalStep = sorted.find(step => step.parentSpanId === lastStep.parentSpanId &&
+    isTraeTurnSummary(step, childrenMap)) || lastStep;
+  const children = childrenMap.get(terminalStep.spanId) || [];
+  const llm = children.find(c => c._kind === 'LLM');
+  // When one terminal stream contains several model responses, only the
+  // agent-level summary owns the final text.
+  const owner = spans.find(span => span.spanId === terminalStep.parentSpanId &&
+    span._kind === 'AGENT' && isTraeObservation(span, 'turn_summary')) || llm;
+  if (!owner) return [];
+  const raw = owner.attributes?.['gen_ai.output.messages'];
+  if (!raw) return [pass('semantic.last_step_no_tool_call')];
+  try {
+    const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    let hasToolCall = false;
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      const assistantMsgs = msgs.filter(m => m && m.role === 'assistant');
+      const lastAssistant = assistantMsgs.length > 0
+        ? assistantMsgs[assistantMsgs.length - 1]
+        : msgs[msgs.length - 1];
+      if (lastAssistant && Array.isArray(lastAssistant.parts)) {
+        for (const part of lastAssistant.parts) {
+          if (part.type === 'tool_call') hasToolCall = true;
+        }
+      }
+    }
+    return [hasToolCall
+      ? error('semantic.last_step_no_tool_call',
+          'terminal assistant message contains tool_call, expected text-only final answer',
+          owner.spanId, owner.name)
+      : pass('semantic.last_step_no_tool_call')];
+  } catch {
+    return [pass('semantic.last_step_no_tool_call')];
+  }
+}
+
 // ─── CLI ─────────────────────────────────────────────────────────────────────
 
 function parseCli() {
@@ -292,13 +352,15 @@ export function validateStructure(trace) {
   for (const s of steps) {
     const children = childrenMap.get(s.spanId) || [];
     const llmChildren = children.filter(c => c._kind === 'LLM');
-    if (llmChildren.length !== 1) {
+    const traeToolOnlyStep = llmChildren.length === 0 && children.some(c => c._kind === 'TOOL') &&
+      (isTraeObservation(s, 'response_recorded') || isTraeObservation(s, 'unattributed_tools'));
+    if (llmChildren.length !== 1 && !traeToolOnlyStep) {
       checks.push(error('structure.step_has_one_llm', `STEP has ${llmChildren.length} LLM children, expected 1`, s.spanId, s.name));
       allStepsOk = false;
     }
   }
   if (allStepsOk && steps.length > 0) {
-    checks.push(pass('structure.step_has_one_llm', `${steps.length} STEPs, each with 1 LLM`));
+    checks.push(pass('structure.step_has_one_llm'));
   }
 
   let llmOrderOk = true;
@@ -309,6 +371,9 @@ export function validateStructure(trace) {
     if (llm && tools.length > 0) {
       const llmStart = BigInt(llm.startTimeUnixNano);
       for (const t of tools) {
+        // A native model persistence observation can follow tool dispatch.
+        if (isRecordedTraeModel(llm) && llm.startTimeUnixNano === llm.endTimeUnixNano &&
+            isTraeObservation(t, 'native_tool_acknowledged')) continue;
         if (BigInt(t.startTimeUnixNano) < llmStart) {
           checks.push(error('structure.llm_before_tools', `TOOL ${t.name} starts before LLM`, t.spanId, t.name));
           llmOrderOk = false;
@@ -423,6 +488,23 @@ function shortKey(key) {
 
 // ─── 5c. Time Validation ────────────────────────────────────────────────────
 
+function isRecordedTraeModel(span) {
+  return span._kind === 'LLM' && isTraeObservation(span, 'response_recorded') &&
+    Boolean(span.attributes['gen_ai.response.id']);
+}
+
+function isInstantTraeResponse(span, childrenMap) {
+  if (isRecordedTraeModel(span)) return true;
+  if (span._kind !== 'STEP' || !isTraeObservation(span, 'response_recorded')) return false;
+  // A tool-free history round and its only model share one recorded instant.
+  const children = childrenMap.get(span.spanId) || [];
+  const model = children[0];
+  return children.length === 1 && isRecordedTraeModel(model) &&
+    span.attributes['gen_ai.step.id'] === model.attributes['gen_ai.response.id'] &&
+    BigInt(model.startTimeUnixNano) === BigInt(span.startTimeUnixNano) &&
+    BigInt(model.endTimeUnixNano) === BigInt(span.endTimeUnixNano);
+}
+
 export function validateTime(trace, rules) {
   const checks = [];
   const { spans, childrenMap } = trace;
@@ -431,7 +513,8 @@ export function validateTime(trace, rules) {
   for (const s of spans) {
     const start = BigInt(s.startTimeUnixNano);
     const end = BigInt(s.endTimeUnixNano);
-    if (end <= start) {
+    if (end < start || (end === start && !isInstantTraeResponse(s, childrenMap) &&
+        !(s._kind === 'TOOL' && isTraeObservation(s, 'native_tool_acknowledged')))) {
       checks.push(error('time.non_zero_duration', `duration=${Number(end - start) / 1e6}ms`, s.spanId, s.name));
       allNonZero = false;
     }
@@ -442,7 +525,8 @@ export function validateTime(trace, rules) {
     (childrenMap.get(agent.spanId) || []).filter(s => s._kind === 'STEP'));
   let overlap = false;
   for (const agentSteps of stepGroups) {
-    const sorted = [...agentSteps].sort((a, b) => {
+    // A turn summary is a view of the entire turn, outside the sequence of concrete rounds.
+    const sorted = agentSteps.filter(step => !isTraeTurnSummary(step, childrenMap)).sort((a, b) => {
       const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
       return d < 0n ? -1 : d > 0n ? 1 : 0;
     });
@@ -832,26 +916,28 @@ export function validateSemantic(trace, rules) {
   // agent_token_sum
   for (const { agent: agentSpan, spans: executionSpans } of executions) {
     const llmSpans = executionSpans.filter(s => s._kind === 'LLM');
-    for (const tokenKey of ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']) {
+    let hasAnyToken = false;
+    let allMatch = true;
+    for (const counter of ['input_tokens', 'output_tokens', 'total_tokens']) {
+      const tokenKey = 'gen_ai.usage.' + counter;
       const agentVal = agentSpan.attributes?.[tokenKey];
       if (agentVal === undefined || agentVal === null) continue;
+      hasAnyToken = true;
       const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[tokenKey] || 0), 0);
-      if (agentVal !== llmSum) {
+      // TRAE can count a Hub receipt at turn scope without a model response
+      // to assign it to. Reconcile with the receipt aggregate and reject double counting.
+      const receiptCount = agentSpan.attributes?.['agent.trae-cn.hub.usage_received'];
+      const partialTraeAttribution = agentSpan.attributes?.['gen_ai.agent.name'] === 'trae-cn' &&
+        Number.isSafeInteger(receiptCount) &&
+        agentSpan.attributes['agent.trae-cn.hub.' + counter + '_observed'] === agentVal &&
+        llmSpans.filter(span => typeof span.attributes?.[tokenKey] === 'number').length < receiptCount;
+      if (agentVal !== llmSum && !(partialTraeAttribution && llmSum < agentVal)) {
         checks.push(error('semantic.agent_token_sum',
           `AGENT ${tokenKey}=${agentVal}, sum of LLM=${llmSum}`, agentSpan.spanId, agentSpan.name));
+        allMatch = false;
       }
     }
-    const hasAnyToken = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens']
-      .some(k => agentSpan.attributes?.[k] !== undefined);
-    if (hasAnyToken) {
-      const allMatch = ['gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens', 'gen_ai.usage.total_tokens'].every(k => {
-        const av = agentSpan.attributes?.[k];
-        if (av === undefined || av === null) return true;
-        const llmSum = llmSpans.reduce((sum, l) => sum + (l.attributes?.[k] || 0), 0);
-        return av === llmSum;
-      });
-      if (allMatch) checks.push(pass('semantic.agent_token_sum'));
-    }
+    if (hasAnyToken && allMatch) checks.push(pass('semantic.agent_token_sum'));
   }
 
   // tool_matches_llm_output
@@ -1010,6 +1096,11 @@ export function validateSemantic(trace, rules) {
     for (const t of toolSpans) {
       const args = t.attributes?.['gen_ai.tool.call.arguments'];
       if (args === undefined || args === null || args === '') {
+        if (isTraeObservation(t, 'native_tool_acknowledged')) {
+          checks.push(warn('semantic.tool_has_arguments', 'Native dispatch was observed without matching tool arguments', t.spanId, t.name));
+          allHaveArgs = false;
+          continue;
+        }
         checks.push(error('semantic.tool_has_arguments',
           `TOOL ${t.attributes?.['gen_ai.tool.name'] || t.name} missing gen_ai.tool.call.arguments`,
           t.spanId, t.name));
@@ -1020,49 +1111,16 @@ export function validateSemantic(trace, rules) {
     if (toolSpans.length === 0) checks.push(pass('semantic.tool_has_arguments'));
   }
 
-  // last_step_no_tool_call: last STEP's LLM output should not contain tool_call
+  // last_step_no_tool_call: last STEP's LLM terminal assistant message
+  // should be text-only (no tool_call). Earlier assistant messages may
+  // legitimately carry tool_call parts (e.g. trae-cn single-LLM-per-turn
+  // architecture: tool invocations during the turn precede the final
+  // answer). Only the LAST assistant message is checked — that is the
+  // model's terminal output for the STEP.
   if (!hasMessageContent) {
     checks.push(skipped('semantic.last_step_no_tool_call'));
   } else {
-    for (const { spans: executionSpans } of executions) {
-      const stepSpans = executionSpans.filter(s => s._kind === 'STEP');
-      if (stepSpans.length > 0) {
-        const sorted = [...stepSpans].sort((a, b) => {
-          const d = BigInt(a.startTimeUnixNano) - BigInt(b.startTimeUnixNano);
-          return d < 0n ? -1 : d > 0n ? 1 : 0;
-        });
-        const lastStep = sorted[sorted.length - 1];
-        const children = childrenMap.get(lastStep.spanId) || [];
-        const llm = children.find(c => c._kind === 'LLM');
-        if (llm) {
-          const raw = llm.attributes?.['gen_ai.output.messages'];
-          if (raw) {
-            try {
-              const msgs = typeof raw === 'string' ? JSON.parse(raw) : raw;
-              let hasToolCall = false;
-              if (Array.isArray(msgs)) {
-                for (const msg of msgs) {
-                  if (Array.isArray(msg.parts)) {
-                    for (const part of msg.parts) {
-                      if (part.type === 'tool_call') hasToolCall = true;
-                    }
-                  }
-                }
-              }
-              checks.push(hasToolCall
-                ? error('semantic.last_step_no_tool_call',
-                    'last STEP LLM output contains tool_call, expected final answer without tool calls',
-                    llm.spanId, llm.name)
-                : pass('semantic.last_step_no_tool_call'));
-            } catch {
-              checks.push(pass('semantic.last_step_no_tool_call'));
-            }
-          } else {
-            checks.push(pass('semantic.last_step_no_tool_call'));
-          }
-        }
-      }
-    }
+    checks.push(...checkLastStepNoToolCall(spans, childrenMap));
   }
 
   return checks;

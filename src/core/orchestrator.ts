@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
-import { SlsFlusher } from '../flushers/sls-flusher.js';
+import { SlsFlusher, type EndpointCounter } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
@@ -71,6 +71,7 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { TraeCnLogInput } from '../inputs/trae-cn-log/trae-cn-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
@@ -161,6 +162,7 @@ export class Orchestrator extends EventEmitter {
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
     'openclaw-plugin-log': 'openclaw',
+    'trae-cn-log': 'trae-cn',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
     'doubao-work': 'doubao-work',
@@ -1915,6 +1917,29 @@ export class Orchestrator extends EventEmitter {
             listenerCfg['hermes-agent-log']?.enabled ?? true,
           ),
         pollIntervalMs: listenerCfg['hermes-agent-log']?.pollInterval,
+      }),
+    );
+
+    // --- TRAE-CN (Hook JSONL + best-effort ai-agent log aux source) ---
+    const traeCnLogDir = path.join(this.dataDir, 'logs', 'trae-cn', 'history');
+    await ensureDir(traeCnLogDir);
+    const traeCnLogInput = new TraeCnLogInput({
+      stateStore: this.stateStore,
+      sessionDir: traeCnLogDir,
+      captureMessageContent: this.config.agents['trae-cn']?.captureMessageContent === true,
+      pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(traeCnLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(traeCnLogInput, {
+        watchPaths: [traeCnLogDir],
+        isAvailable: async () => directoryExists(traeCnLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-cn-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'trae-cn-log',
+            listenerCfg['trae-cn-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
       }),
     );
 

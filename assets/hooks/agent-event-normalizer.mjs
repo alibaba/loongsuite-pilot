@@ -267,13 +267,22 @@ export function hashJson(value) {
 }
 
 export function loadHookRuntimeConfig(dataDir) {
-  const configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
+  let configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
     || path.join(dataDir || path.join(os.homedir(), '.loongsuite-pilot'), 'config.json');
+  if (configPath === '~') configPath = os.homedir();
+  else if (configPath.startsWith('~/') || (process.platform === 'win32' && configPath.startsWith('~\\'))) {
+    configPath = path.join(os.homedir(), configPath.slice(2));
+  }
   let file = {};
+  let policyAvailable = true;
   try {
-    if (fs.existsSync(configPath)) file = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
-  } catch {
-    file = {};
+    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed;
+    else policyAvailable = false;
+  } catch (error) {
+    // An absent default config uses the documented defaults. A failed read
+    // of a configured policy must not enable content for privacy-aware hooks.
+    policyAvailable = error.code === 'ENOENT' && !process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
   }
 
   const envBool = (name, fallback) => {
@@ -286,6 +295,7 @@ export function loadHookRuntimeConfig(dataDir) {
     : {};
 
   return {
+    policyAvailable,
     userId: process.env.LOONGSUITE_PILOT_USER_ID
       || file.userId
       || file['user.id']
@@ -357,14 +367,17 @@ const AGENT_TYPE_TO_CONFIG_KEY = {
   'openclaw': 'openclaw',
 };
 
-export function applyHookContentPolicy(record, runtimeConfig = {}) {
-  const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
+export function shouldCaptureHookMessageContent(agentType, runtimeConfig = {}) {
   const agents = runtimeConfig.agents;
   const policy = agentType && agents
     ? (agents[agentType] || agents[AGENT_TYPE_TO_CONFIG_KEY[agentType] || ''])
     : undefined;
-  const capture = parseCaptureMessageContent(policy?.captureMessageContent);
-  if (capture !== false) return record;
+  return parseCaptureMessageContent(policy?.captureMessageContent) !== false;
+}
+
+export function applyHookContentPolicy(record, runtimeConfig = {}) {
+  const agentType = getStringValue(record, 'gen_ai.agent.type') || getStringValue(record, 'agent.type');
+  if (shouldCaptureHookMessageContent(agentType, runtimeConfig)) return record;
 
   return removeContentFields(record);
 }
