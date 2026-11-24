@@ -483,12 +483,8 @@ impl Outbox {
         Ok(())
     }
 
-    pub(super) fn has_checkpoint(&self, source: &str) -> anyhow::Result<bool> {
-        Ok(self.db.lock().unwrap().query_row(
-            "SELECT EXISTS(SELECT 1 FROM checkpoint WHERE source=?1)",
-            [source],
-            |row| row.get(0),
-        )?)
+    pub(super) fn checkpoint_text(&self, source: &str) -> anyhow::Result<Option<String>> {
+        Self::find_checkpoint(&self.db.lock().unwrap(), source)
     }
     #[cfg(test)]
     fn saved_checkpoints(&self) -> anyhow::Result<Vec<(String, String)>> {
@@ -538,14 +534,14 @@ impl Outbox {
         source: &str,
         handoff: LegacyCheckpointHandoff,
         read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
-    ) -> anyhow::Result<bool> {
+    ) -> anyhow::Result<Option<String>> {
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         let checkpoint =
             Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)?;
         Ok(match checkpoint {
-            ShellCheckpoint::Existing(value) | ShellCheckpoint::Handoff(value) => value.is_some(),
-            ShellCheckpoint::Consolidated(_) => true,
+            ShellCheckpoint::Existing(value) | ShellCheckpoint::Handoff(value) => value,
+            ShellCheckpoint::Consolidated(value) => Some(value),
         })
     }
 

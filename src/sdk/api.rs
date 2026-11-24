@@ -762,10 +762,10 @@ fn worker_inner(instance: Arc<Instance>, mut policy: Policy, receiver: &mpsc::Re
                 } else if let Some(session) = session.as_mut() {
                     match session.collector.apply(&next, || {
                         let hooks = session.hooks.as_ref().expect("running Hook endpoints");
-                        let mut settings = hooks.settings.write().unwrap();
                         update_codex_deployment(&instance, &next)?;
+                        let mut settings = hooks.settings.write().unwrap();
                         instance.status.lock().unwrap().version = next.version.clone();
-                        *settings = next.hooks.clone();
+                        *settings = Arc::new(next.hooks.clone());
                         super::hooks::update_local_status(&session.queue, &next.hooks);
                         Ok(())
                     }) {

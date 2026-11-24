@@ -613,9 +613,41 @@ fn sdk_rejects_policy_when_its_legacy_checkpoint_cannot_be_imported() {
     assert_eq!(host.snapshot()["effective_version"], "original");
 
     std::fs::write(pilot.join("logs/input-state.json"), "{}").unwrap();
-    let (code, result) = host.apply(policy);
+    let (code, result) = host.apply(policy.clone());
     assert_eq!(code, OK, "repaired checkpoint result: {result}");
     until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    let namespace = host.snapshot()["agents"][0]["status"]["source_namespace"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let sdk = root.join("sdk");
+    let db = rusqlite::Connection::open(sdk.join("outbox/delivery.sqlite")).unwrap();
+    db.execute(
+        "INSERT OR REPLACE INTO checkpoint(source,json) VALUES(?1,'{}')",
+        [&namespace],
+    )
+    .unwrap();
+    let mirror = sdk
+        .join("sources")
+        .join(&namespace)
+        .join("input-state.json");
+    if mirror.exists() {
+        std::fs::remove_file(&mirror).unwrap();
+    }
+    std::fs::create_dir(&mirror).unwrap();
+    let mut replacement = policy.clone();
+    replacement["version"] = json!("replacement");
+    replacement["hcd"]["agent_configs"]["codex"]["collection"]["limits"] =
+        json!({"poll_interval_ms":2000});
+    let (code, result) = host.apply(replacement.clone());
+    assert_eq!(code, FAILURE, "{result}");
+    let snapshot = host.snapshot();
+    assert_eq!(snapshot["effective_version"], policy["version"]);
+    assert_eq!(snapshot["agents"][0]["status"]["state"], "running");
+    assert!(mirror.is_dir());
+    std::fs::remove_dir(&mirror).unwrap();
+
+    assert_eq!(host.apply(replacement).0, OK);
     host.stop();
 }
 
@@ -2205,19 +2237,33 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
             .ok();
         child.wait_with_output().unwrap()
     };
+    let assert_managed_deny = || {
+        let result = managed_hook();
+        assert!(result.status.success());
+        let output: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
+    };
+    let mut same = policy.clone();
+    same["version"] = json!("same-channel");
+    same["hcd"]["agent_configs"]["codex"]["collection"]["limits"] =
+        json!({"poll_interval_ms":2000});
+    assert_eq!(host.apply(same).0, OK);
     let journal = data.join("codex-hook-deployment/update-recovery.json");
     std::fs::write(&journal, "{}").unwrap();
-    let during_commit = managed_hook();
-    assert!(during_commit.status.success() && during_commit.stdout.is_empty());
-    std::fs::remove_file(journal).unwrap();
-    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
-    // A client can still have the cloud command after the policy changes.
+    assert_managed_deny();
     let mut local = policy.clone();
+    local["version"] = json!("new-channel");
     local["hcd"]["agent_configs"]["codex"]["hook_deployment"]["channel"] = json!("local");
+    assert_eq!(host.apply(local.clone()).0, FAILURE);
+    assert_eq!(host.snapshot()["effective_version"], "same-channel");
+    assert!(journal.exists());
+    assert_managed_deny();
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 5);
+    std::fs::remove_file(journal).unwrap();
     assert_eq!(host.apply(local).0, OK);
     let stale = managed_hook();
     assert!(stale.status.success() && stale.stdout.is_empty());
-    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 3);
+    assert_eq!(host.ctx.hook_requests.lock().unwrap().len(), 5);
     host.stop();
 
     let mut cleanup = Host::start_with_init(init, empty_policy(), Box::default());

@@ -432,57 +432,62 @@ fn run_agent(
         };
         (init.data_dir == expected).then_some((host, handoff))
     });
-    let has_durable_checkpoint = if let Some((host, handoff)) = shell_handoff {
+    let mut preview = if let Some((host, handoff)) = shell_handoff {
         queue.preview_shell_checkpoint(&namespace, handoff, || {
             read_shell_checkpoint(&host.data_dir, checkpoint_key)
         })?
     } else {
-        queue.has_checkpoint(&namespace)?
+        queue.checkpoint_text(&namespace)?
     };
     let replaces_mirror =
         shell_handoff.is_some_and(|(_, handoff)| handoff == LegacyCheckpointHandoff::Codex);
     if let Some(host) = &plan.pilot_host {
-        if !has_durable_checkpoint && (replaces_mirror || !checkpoint.try_exists()?) {
-            runtime.block_on(read_pilot_checkpoint(&host.data_dir, checkpoint_key))?;
+        if preview.is_none() && (replaces_mirror || !checkpoint.try_exists()?) {
+            preview = runtime.block_on(read_pilot_checkpoint(&host.data_dir, checkpoint_key))?;
         }
-    }
-
-    // Checkpoint preflight only reads. Transfer ownership and re-read progress
-    // after activation so a worker being replaced can finish committing its cursor.
-    let (ready, activate) = activation;
-    if ready.send(Ok(())).is_err() || activate.recv().is_err() {
-        return Ok(());
-    }
-    if let Some((host, handoff)) = shell_handoff {
-        let imported = queue.prepare_shell_checkpoint(&namespace, handoff, || {
-            read_shell_checkpoint(&host.data_dir, checkpoint_key)
-        })?;
-        if let Some(text) = imported {
-            write_checkpoint(&checkpoint, &text)?;
-        } else if handoff == LegacyCheckpointHandoff::Codex {
-            source_access::private_path(&checkpoint)?;
-            match std::fs::remove_file(&checkpoint) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-    } else {
-        queue.restore(&namespace, &checkpoint)?;
     }
     let store = Arc::new(if isolated_codex {
         StateStore::new_sdk_source(&checkpoint)
     } else {
         StateStore::new(&checkpoint)
     });
-    if let Some(state) = &plan.pilot_host {
-        runtime.block_on(import_pilot_checkpoint(
-            &state.data_dir,
-            &checkpoint,
-            checkpoint_key,
-        ))?;
+    if let Some(text) = preview.as_deref() {
+        store.load_checkpoint_text(text)?;
     }
-    runtime.block_on(store.load());
+    // The compatibility mirror is reversible. Complete the actual filesystem
+    // operation while the old policy and workers are still active.
+    let backup = stage_checkpoint_mirror(&checkpoint, preview.as_deref(), replaces_mirror)?;
+    if preview.is_none() && !replaces_mirror {
+        runtime.block_on(store.load());
+    }
+    let (ready, activate) = activation;
+    if ready.send(Ok(())).is_err() || activate.recv().is_err() {
+        match backup {
+            MirrorRollback::Created => std::fs::remove_file(&checkpoint)?,
+            MirrorRollback::Restore(saved) => {
+                saved.persist(&checkpoint)?;
+            }
+            MirrorRollback::Unchanged => {}
+        }
+        return Ok(());
+    }
+    drop(backup);
+    // A replaced worker can advance its cursor during preparation. Start from
+    // the latest authoritative SQLite value after it stops, without another mirror write.
+    let latest = if let Some((host, handoff)) = shell_handoff {
+        queue.prepare_shell_checkpoint(&namespace, handoff, || {
+            read_shell_checkpoint(&host.data_dir, checkpoint_key)
+        })?
+    } else {
+        queue.checkpoint_text(&namespace)?
+    };
+    if let Some(text) = latest
+        .as_deref()
+        .filter(|text| Some(*text) != preview.as_deref())
+    {
+        store.load_checkpoint_text(text)?;
+    }
+    drop((latest, preview));
     let journal = queue.clone();
     let source = namespace.clone();
     // The outbox is authoritative after an interruption. Keep the JSON
@@ -830,20 +835,46 @@ fn live<T: Send + Sync + 'static>(
     )
 }
 
-async fn import_pilot_checkpoint(
-    data_dir: &Path,
-    target: &Path,
-    input: &str,
-) -> anyhow::Result<()> {
-    match std::fs::symlink_metadata(target) {
-        Ok(_) => return Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
+enum MirrorRollback {
+    Unchanged,
+    Created,
+    Restore(tempfile::NamedTempFile),
+}
+
+fn stage_checkpoint_mirror(
+    path: &Path,
+    text: Option<&str>,
+    remove_stale: bool,
+) -> anyhow::Result<MirrorRollback> {
+    let existing = match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            anyhow::ensure!(
+                meta.is_file(),
+                "checkpoint mirror is not a regular file: {}",
+                path.display()
+            );
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => return Err(err.into()),
+    };
+    if text.is_none() && !(existing && remove_stale) {
+        return Ok(MirrorRollback::Unchanged);
     }
-    if let Some(text) = read_pilot_checkpoint(data_dir, input).await? {
-        write_checkpoint(target, &text)?;
+    let backup = if existing {
+        let saved =
+            tempfile::NamedTempFile::new_in(path.parent().expect("source state directory"))?;
+        std::fs::copy(path, saved.path())?;
+        MirrorRollback::Restore(saved)
+    } else {
+        MirrorRollback::Created
+    };
+    if let Some(text) = text {
+        write_checkpoint(path, text)?;
+    } else {
+        std::fs::remove_file(path)?;
     }
-    Ok(())
+    Ok(backup)
 }
 
 async fn read_pilot_checkpoint(data_dir: &Path, input: &str) -> anyhow::Result<Option<String>> {
@@ -987,27 +1018,35 @@ fn failed_codex_commit_discards_staged_source_before_checkpoint_or_delivery() {
         .join(namespace)
         .join("input-state.json");
     let mut collector = Collector::new(init.clone(), queue.clone(), Default::default());
-    let error = collector
-        .apply(&policy, || {
-            crate::deployment::reconcile_embedded_codex_hooks(
-                &home,
-                &init.data_dir,
-                &init.resource_dir,
-                Some("cloud"),
-                || {
-                    assert!(std::fs::read_to_string(&settings)?.contains("--pilot-sdk-managed"));
-                    assert!(!mirror.exists());
-                    // An external writer restores the original bytes before commit validation.
-                    std::fs::write(&trust, "model = 'original'\n")?;
+    for original in [None, Some("{ }\n")] {
+        if let Some(text) = original {
+            std::fs::write(&mirror, text).unwrap();
+        }
+        let error =
+            collector
+                .apply(&policy, || {
+                    crate::deployment::reconcile_embedded_codex_hooks(
+                        &home,
+                        &init.data_dir,
+                        &init.resource_dir,
+                        Some("cloud"),
+                        || {
+                            assert!(
+                                std::fs::read_to_string(&settings)?.contains("--pilot-sdk-managed")
+                            );
+                            assert_eq!(std::fs::read_to_string(&mirror)?, "{}");
+                            // An external writer restores the original bytes before commit validation.
+                            std::fs::write(&trust, "model = 'original'\n")?;
+                            Ok(())
+                        },
+                    )?;
                     Ok(())
-                },
-            )?;
-            Ok(())
-        })
-        .unwrap_err();
-    assert!(format!("{error:#}").contains("提交前"), "{error:#}");
-    assert!(!settings.exists());
-    assert!(!mirror.exists());
+                })
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("提交前"), "{error:#}");
+        assert!(!settings.exists());
+        assert_eq!(std::fs::read_to_string(&mirror).ok().as_deref(), original);
+    }
     assert_eq!(queue.pending_bytes().unwrap(), 0);
     assert_eq!(collector.snapshot(), json!([]));
 }

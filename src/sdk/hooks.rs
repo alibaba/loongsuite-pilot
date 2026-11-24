@@ -21,7 +21,7 @@ pub struct Hooks {
     pools: Vec<Arc<WorkPool>>,
     writers: Vec<JoinHandle<()>>,
     descriptors: Vec<PathBuf>,
-    pub settings: Arc<RwLock<Value>>,
+    pub settings: Arc<RwLock<Arc<Value>>>,
     instance: String,
 }
 
@@ -39,6 +39,7 @@ struct WorkPool {
 }
 
 struct Job {
+    settings: Arc<Value>,
     packet: Datagram,
     peer: SocketAddr,
     received: Instant,
@@ -61,7 +62,7 @@ struct Endpoint {
     socket: UdpSocket,
     descriptor: Descriptor,
     spool: PathBuf,
-    settings: Arc<RwLock<Value>>,
+    settings: Arc<RwLock<Arc<Value>>>,
     outbox: Arc<Outbox>,
     callback: Option<OnHook>,
     context: usize,
@@ -144,7 +145,7 @@ impl Hooks {
         activated: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let instance = uuid::Uuid::new_v4().to_string();
-        let settings = Arc::new(RwLock::new(settings));
+        let settings = Arc::new(RwLock::new(Arc::new(settings)));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -361,26 +362,22 @@ impl Endpoint {
             {
                 continue;
             }
-            if packet.managed && packet.agent == "codex" {
+            let settings = self.settings.read().unwrap().clone();
+            if packet.managed && packet.agent == "codex" && settings["embedded_codex"] == true {
                 // A client may have cached commands from a rolled-back deployment.
-                let Ok(settings) = self.settings.try_read() else {
+                let Some(channel) = settings["codex_hook_channel"].as_str() else {
                     continue;
                 };
-                if settings["embedded_codex"] == true {
-                    let Some(channel) = settings["codex_hook_channel"].as_str() else {
-                        continue;
-                    };
-                    let expected = if super::agent_hooks::AgentHook::for_wire_id("codex")
-                        .expect("Codex Hook")
-                        .supports_blocking(&packet.event)
-                    {
-                        channel
-                    } else {
-                        "observe"
-                    };
-                    if self.channel != expected {
-                        continue;
-                    }
+                let expected = if super::agent_hooks::AgentHook::for_wire_id("codex")
+                    .expect("Codex Hook")
+                    .supports_blocking(&packet.event)
+                {
+                    channel
+                } else {
+                    "observe"
+                };
+                if self.channel != expected {
+                    continue;
                 }
             }
             seen.retain(|_, prior| prior.received.elapsed() < Duration::from_secs(5));
@@ -411,7 +408,7 @@ impl Endpoint {
             let required = self.channel == "cloud"
                 && self.callback.is_some()
                 && packet.event == "PreToolUse"
-                && may_block(&packet, &self.settings.read().unwrap());
+                && may_block(&packet, &settings);
             let deadline = received + Duration::from_millis(remaining);
             let response = Arc::new(RecentRequest {
                 peer,
@@ -421,6 +418,7 @@ impl Endpoint {
                 reply: Mutex::new(None),
             });
             let mut job = Job {
+                settings,
                 packet,
                 peer,
                 received,
@@ -522,7 +520,7 @@ impl Endpoint {
             if verdict.status == "verdict" {
                 record_tool_verdict(
                     &self.outbox,
-                    &self.settings,
+                    &job.settings,
                     &verdict,
                     if self.channel == "local" {
                         self.callback
@@ -662,7 +660,6 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
     let Endpoint {
         spool,
         channel,
-        settings,
         callback,
         context,
         outbox: queue,
@@ -698,7 +695,7 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         Ok(Value::Object(object)) => object,
         _ => return input_error(),
     };
-    let trusted = settings.read().unwrap().clone();
+    let trusted = job.settings.as_ref();
     let Some(adapter) = AgentHook::for_wire_id(&packet.agent) else {
         return allow();
     };
@@ -710,7 +707,7 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         return allow();
     }
 
-    let accepted = adapter.wakeup(&payload, &packet.event, channel, &trusted, queue);
+    let accepted = adapter.wakeup(&payload, &packet.event, channel, trusted, queue);
     if channel == "observe" {
         if accepted && packet.event != "SubagentStop" && trusted["relay_host_verdicts"] == true {
             let session = payload
@@ -739,7 +736,7 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         return allow();
     }
 
-    let blocking = may_block(packet, &trusted);
+    let blocking = may_block(packet, trusted);
     let request = adapter.parse(&payload, &packet.event);
     let prompt_key = (channel == "local" && blocking && trusted["managed_host_rules"] == true)
         .then(|| {
@@ -943,7 +940,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 fn record_tool_verdict(
     queue: &Outbox,
-    settings: &RwLock<Value>,
+    settings: &Value,
     result: &Verdict,
     callback: Option<OnHook>,
     context: usize,
@@ -984,9 +981,7 @@ fn record_tool_verdict(
         queue
             .verdicts
             .put_sdk_verdict(&key, action, result.guardrail.clone(), now);
-        if let Some(callback) =
-            callback.filter(|_| settings.read().unwrap()["relay_host_verdicts"] == true)
-        {
+        if let Some(callback) = callback.filter(|_| settings["relay_host_verdicts"] == true) {
             let verdict = json!({
                 "session_id": key.session_id,
                 "tool_use_id": key.tool_use_id,
@@ -1026,7 +1021,7 @@ fn notify_shell(queue: &Outbox, callback: OnHook, context: usize, deadline: Inst
     queue.callbacks.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn record_blocked_prompt(queue: &Outbox, settings: &RwLock<Value>, result: &Verdict) {
+fn record_blocked_prompt(queue: &Outbox, settings: &RwLock<Arc<Value>>, result: &Verdict) {
     use crate::interceptor::HookEventName;
     let Some(request) = result.request.as_ref() else {
         return;
