@@ -88,6 +88,7 @@ type differences are called out in the notes.
 | OpenCode | `opencode` | Plugin injection. |
 | Pi Coding Agent | `pi-coding-agent` | Pi Extension injection; captures LLM and tool lifecycle events. Detection and `settings.json` follow Pi's `PI_CODING_AGENT_DIR` (default `~/.pi/agent`). |
 | Qoder | `qoder` | Hook integration. |
+| TRAE CN | `trae-cn` | Native command Hook and local model evidence. Installed-client acceptance pending. |
 | Qoder CN | `qoder-cn` | Hook integration. |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only deploy ID. Agent gating uses `qoder` in `agent-control.json`; emitted records use `qoder-idea`. |
 | Qoder CLI | `qoder` | Shares the Qoder agent definition and uses hook/session sources. |

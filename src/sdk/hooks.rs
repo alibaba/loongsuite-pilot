@@ -727,8 +727,27 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         })
         .flatten();
     let prompt_at = chrono::Utc::now().timestamp_millis();
+    let relay_prompt = callback.filter(|_| trusted["relay_host_verdicts"] == true);
+    let record_prompt =
+        |key: &crate::interceptor::prompt_verdict::PromptKey,
+         guardrail: Option<crate::interceptor::GuardrailMetadata>| {
+            queue
+                .verdicts
+                .put_prompt(key.clone(), guardrail.clone(), prompt_at);
+            if let Some(callback) = relay_prompt {
+                notify_shell(
+                    queue,
+                    callback,
+                    context,
+                    deadline,
+                    json!({
+                        "kind":"prompt_verdict","key":key,"guardrail":guardrail,"at":prompt_at,
+                    }),
+                );
+            }
+        };
     if let Some(key) = &prompt_key {
-        queue.verdicts.put_prompt(key.clone(), None, prompt_at);
+        record_prompt(key, None);
     }
     let verdict = if channel == "cloud" {
         let Some(callback) = callback else {
@@ -837,21 +856,12 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
     let guardrail = (channel == "local" && trusted["managed_host_rules"] == true)
         .then(|| crate::interceptor::GuardrailMetadata::from_verdict(&verdict));
     if let Some(key) = prompt_key {
-        if Instant::now() < deadline && !endpoint.stop.load(Ordering::Relaxed) {
-            queue
-                .verdicts
-                .put_prompt(key.clone(), guardrail.clone(), prompt_at);
-            if let Some(callback) = callback.filter(|_| trusted["relay_host_verdicts"] == true) {
-                notify_shell(
-                    queue,
-                    callback,
-                    context,
-                    deadline,
-                    json!({
-                        "kind":"prompt_verdict","key":key,"guardrail":guardrail,"at":prompt_at,
-                    }),
-                );
-            }
+        if verdict["action"] == "allow"
+            && (verdict["failOpen"] != true || verdict["matched"] == true)
+            && Instant::now() < deadline
+            && !endpoint.stop.load(Ordering::Relaxed)
+        {
+            record_prompt(&key, guardrail.clone());
         }
     }
     match reply_action(&verdict) {

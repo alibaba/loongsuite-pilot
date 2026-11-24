@@ -280,6 +280,9 @@ fn package(root: &Path) -> PathBuf {
         "assets/hooks/claude-code-loongsuite-pilot-hook.ps1",
         "agents.d/codex.json",
         "agents.d/kiro-cli.json",
+        "agents.d/trae-cn.json",
+        "assets/hooks/trae-cn-loongsuite-pilot-hook.sh",
+        "assets/hooks/trae-cn-loongsuite-pilot-hook.ps1",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.sh",
         "assets/hooks/kiro-cli-loongsuite-pilot-hook.ps1",
         "assets/hooks/cursor-loongsuite-pilot-hook.sh",
@@ -937,6 +940,87 @@ fn packaged_hook_rejects_corrupt_deployment_state_without_touching_agent() {
             "自动发现也不能把损坏状态报告为空成功"
         );
     }
+}
+
+#[test]
+fn packaged_trae_native_hooks_preserve_foreign_handlers_on_reinstall_and_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path().canonicalize().unwrap();
+    fs::write(root.join("config.json"), "{}").unwrap();
+    fs::create_dir(root.join("data")).unwrap();
+    let binary = package(&root);
+    let package = binary.parent().unwrap().parent().unwrap();
+    let home = root.join("TRAE fixture 中文");
+    fs::create_dir(&home).unwrap();
+    let config = home.join("hooks.json");
+    let existing = serde_json::json!({
+        "source":"owned by fixture",
+        "hooks":{"UserPromptSubmit":[{"matcher":"*","hooks":[{"type":"command","command":"fixture-user-hook"}]}]}
+    });
+    fs::write(&config, serde_json::to_vec(&existing).unwrap()).unwrap();
+    let home_arg = format!("trae-cn={}", home.display());
+    let run = |mode| {
+        invoke(
+            &binary,
+            &root,
+            &[
+                "hook",
+                mode,
+                "--agents",
+                "trae-cn",
+                "--home",
+                &home_arg,
+                "--pilot-dir",
+                package.to_str().unwrap(),
+                "--json",
+            ],
+        )
+    };
+    let mut previous = None;
+    for _ in 0..2 {
+        let output = run("install");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let bytes = fs::read(&config).unwrap();
+        if let Some(old) = previous {
+            assert_eq!(old, bytes);
+        }
+        let installed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(installed["hooks"].as_object().unwrap().len(), 6);
+        let prompt = installed["hooks"]["UserPromptSubmit"].to_string();
+        assert!(prompt.contains("fixture-user-hook") && prompt.contains("user-prompt-submit"));
+        assert!(!prompt.contains("node "));
+        previous = Some(bytes);
+    }
+    let status = run("status");
+    assert!(
+        status.status.success(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let removed = invoke(
+        &binary,
+        &root,
+        &[
+            "installer-helper",
+            "cleanup-agents",
+            "--data-dir",
+            root.join("data").to_str().unwrap(),
+            "--pilot-dir",
+            package.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        removed.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&removed.stdout),
+        String::from_utf8_lossy(&removed.stderr)
+    );
+    let remaining: Value = serde_json::from_slice(&fs::read(config).unwrap()).unwrap();
+    assert_eq!(remaining, existing);
 }
 
 #[test]

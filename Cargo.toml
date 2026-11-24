@@ -25,6 +25,7 @@ default = []
 proprietary = []
 
 [dependencies]
+ciborium = "=0.2.2"
 futures-util = "0.3"
 boa_engine = { version = "0.22.0", default-features = false }
 anyhow = "1"

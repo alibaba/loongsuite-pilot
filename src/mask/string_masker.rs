@@ -468,10 +468,27 @@ mod tests {
             "unsupported_github=ghx_1234567890abcdefghijklmnop",
             "generic_token=token=abc123",
             "generic_api_key=api_key=not-a-real-key-value",
-            "bearer=Bearer abcdefghijklmnopqrstuvwxyz123456",
+            "short_bearer=Bearer abc123",
         ]
         .join("\n");
         assert_eq!(mask(&input), input);
+    }
+
+    #[test]
+    fn masks_trae_cn_credentials_and_command_output() {
+        let input = [
+            "iCubeAuthInfo://synthetic_auth_token",
+            "trae-jwt-token=synthetic_jwt",
+            r#"sessionKey="synthetic_session""#,
+            "access_token='synthetic_access'",
+            "Bearer abcdefghijklmnopqrstuvwxyz123456",
+            "/home/fixture/project",
+            "/Users/fixture/project",
+        ]
+        .join("\n");
+        let masked = mask(&input);
+        assert_eq!(masked.matches("[TRAE_CN_CREDENTIAL_MASKED]").count(), 4);
+        assert_eq!(masked.matches("[TRAE_CN_COMMAND_OUTPUT_MASKED]").count(), 3);
     }
 
     #[test]

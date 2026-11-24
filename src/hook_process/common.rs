@@ -223,11 +223,31 @@ pub struct RuntimeConfig {
     pub generate_trace_when_missing: bool,
 }
 
+pub(crate) fn hook_config_path(env: &Env) -> (PathBuf, bool) {
+    let Some(configured) = env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return (data_dir(env).join("config.json"), false);
+    };
+    let path = if configured == "~" {
+        home_dir(env)
+    } else if let Some(tail) = configured.strip_prefix("~/").or_else(|| {
+        if cfg!(windows) {
+            configured.strip_prefix("~\\")
+        } else {
+            None
+        }
+    }) {
+        home_dir(env).join(tail)
+    } else {
+        PathBuf::from(configured)
+    };
+    (path, true)
+}
+
 pub fn load_runtime_config(env: &Env) -> RuntimeConfig {
-    let root = data_dir(env);
-    let config_path = env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("config.json"));
+    let (config_path, _) = hook_config_path(env);
     let file = read_json_file(&config_path).unwrap_or_default();
     let upstream = file.get("upstreamLink").and_then(Value::as_object);
     let user_id = env_get(env, "LOONGSUITE_PILOT_USER_ID")
@@ -510,9 +530,7 @@ pub fn filter_workspace_records(
     agent_id: &str,
 ) -> Result<Vec<Obj>, String> {
     let root = data_dir(env);
-    let config_path = env_get(env, "AGENT_DATA_COLLECTION_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| root.join("config.json"));
+    let (config_path, _) = hook_config_path(env);
     let text = match fs::read_to_string(&config_path) {
         Ok(text) => text,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(records.to_vec()),

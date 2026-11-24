@@ -72,6 +72,7 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 | OpenCode | `opencode` | 插件注入。 |
 | Pi Coding Agent | `pi-coding-agent` | 注入 Pi Extension，采集 LLM 与工具生命周期事件。检测路径和 `settings.json` 遵循 Pi 官方的 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。 |
 | Qoder | `qoder` | Hook 集成。 |
+| TRAE CN | `trae-cn` | 原生命令 Hook 与本地模型证据。安装态真实客户端待验。 |
 | Qoder CN | `qoder-cn` | Hook 集成。 |
 | Qoder for JetBrains | `qoder-jetbrains` | 部署/检测专用 ID。`agent-control.json` 中采集开关为 `qoder`；输出记录使用 `qoder-idea`。 |
 | Qoder CLI | `qoder` | 复用 Qoder Agent 定义，使用 Hook / session 数据源。 |

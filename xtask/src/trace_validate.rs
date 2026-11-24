@@ -96,6 +96,15 @@ impl Span {
             .filter(|s| !s.is_empty())
             .unwrap_or("UNKNOWN")
     }
+    fn trae_observation(&self, observation: &str) -> bool {
+        self.attributes["gen_ai.agent.name"] == "trae-cn"
+            && self.attributes["loongsuite.trae_cn.observation"] == observation
+    }
+    fn recorded_trae_model(&self) -> bool {
+        self.kind() == "LLM"
+            && self.trae_observation("response_recorded")
+            && truthy(&self.attributes["gen_ai.response.id"])
+    }
     fn start(&self) -> Option<u128> {
         nanos(&self.start_time_unix_nano)
     }
@@ -399,7 +408,12 @@ fn structure(trace: &Trace<'_>) -> Vec<Check> {
     for step in &steps {
         let children = trace.children(step);
         let llms: Vec<_> = children.iter().filter(|s| s.kind() == "LLM").collect();
-        if llms.len() != 1 {
+        let trae_tool_only = llms.is_empty()
+            && children.iter().any(|s| s.kind() == "TOOL")
+            && ["response_recorded", "unattributed_tools", "stream_summary"]
+                .iter()
+                .any(|kind| step.trae_observation(kind));
+        if llms.len() != 1 && !trae_tool_only {
             one_llm = false;
             checks.push(Check::new(
                 "structure.step_has_one_llm",
@@ -411,6 +425,12 @@ fn structure(trace: &Trace<'_>) -> Vec<Check> {
         if let Some(llm) = llms.first() {
             for tool in children.iter().filter(|s| s.kind() == "TOOL") {
                 if llm.start().zip(tool.start()).is_some_and(|(l, t)| t < l) {
+                    if llm.recorded_trae_model()
+                        && llm.start() == llm.end()
+                        && tool.trae_observation("native_tool_acknowledged")
+                    {
+                        continue;
+                    }
                     order = false;
                     checks.push(Check::new(
                         "structure.llm_before_tools",
@@ -541,7 +561,14 @@ fn timing(trace: &Trace<'_>, rules: &Rules) -> Vec<Check> {
             ));
             continue;
         };
-        if end <= start {
+        let instant = span.recorded_trae_model()
+            || (span.kind() == "TOOL" && span.trae_observation("native_tool_acknowledged"))
+            || (span.kind() == "STEP"
+                && span.trae_observation("response_recorded")
+                && matches!(trace.children(span), [model] if model.recorded_trae_model()
+                    && span.attributes["gen_ai.step.id"] == model.attributes["gen_ai.response.id"]
+                    && model.start() == Some(start) && model.end() == Some(end)));
+        if end < start || (end == start && !instant) {
             valid = false;
             checks.push(Check::new(
                 "time.non_zero_duration",
@@ -589,7 +616,12 @@ fn timing(trace: &Trace<'_>, rules: &Rules) -> Vec<Check> {
             .children(agent)
             .iter()
             .copied()
-            .filter(|s| s.kind() == "STEP")
+            .filter(|s| {
+                s.kind() == "STEP"
+                    && !["turn_summary", "stream_summary", "unattributed_tools"]
+                        .iter()
+                        .any(|kind| s.trae_observation(kind))
+            })
             .collect();
         steps.sort_by_key(|s| s.start());
         for pair in steps.windows(2) {

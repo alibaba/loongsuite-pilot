@@ -17,6 +17,7 @@ pub const AGENT_SYSTEM_MAP: &[(&str, &str)] = &[
     ("cursor-cli", "cursor"),
     ("cursor-hook", "cursor"),
     ("kiro-cli", "kiro"),
+    ("trae-cn", "trae-cn"),
     ("qwen-code-cli", "qwen-code"),
     ("opencode", "opencode"),
     ("openclaw", "openclaw"),

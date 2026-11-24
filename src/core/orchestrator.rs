@@ -60,6 +60,7 @@ use crate::inputs::qwen_work_cn::{
     QwenWorkCnSqliteInput, QwenWorkCnSqliteOptions, QwenWorkCnTraceInput, QwenWorkCnTraceOptions,
 };
 use crate::inputs::rest_support::{HookInputOptions, SessionInputOptions};
+use crate::inputs::trae_cn_log::TraeCnLogInput;
 use crate::inputs::workbuddy::{WorkBuddyInput, WorkBuddyInputOptions};
 use crate::inputs::wukong::{WukongInput, WukongInputOptions};
 use crate::interceptor::{
@@ -2719,6 +2720,29 @@ impl Orchestrator {
             },
         )
         .await;
+        let trae_dir = self.data_dir_join("logs/trae-cn/history");
+        let trae_home = resolve_home("~/.trae-cn");
+        self.attach_hook(
+            entries,
+            "trae-cn-log",
+            "trae-cn",
+            TraeCnLogInput::new(
+                crate::inputs::rest_support::SessionInputOptions {
+                    state_store: Arc::clone(state_store),
+                    session_dir: Some(trae_dir.clone()),
+                    file_pattern: None,
+                    poll_interval_ms: self.poll("trae-cn-log"),
+                },
+                &self.data_dir,
+            ),
+            vec![trae_dir.clone()],
+            move || {
+                let log = trae_dir.clone();
+                let home = trae_home.clone();
+                async move { directory_exists(&log).await || directory_exists(&home).await }
+            },
+        )
+        .await;
         let kiro = self.data_dir_join("logs/kiro-cli");
         ensure_dir(&kiro).await;
         self.attach_hook(
@@ -3544,6 +3568,7 @@ fn listener_agent(listener: &str) -> &str {
         "cursor-hook" => "cursor",
         "claude-code-log" => "claude-code",
         "grok-build-log" => "grok-build",
+        "trae-cn-log" => "trae-cn",
         "codex-transcript" | "codex-aborted-turn" => "codex",
         "kiro-cli-log" | "kiro-cli-session" => "kiro-cli",
         "opencode-log" => "opencode",
@@ -3868,6 +3893,7 @@ hook_surface!(CursorHookInput);
 hook_surface!(ClaudeCodeLogInput);
 hook_surface!(GrokBuildLogInput);
 hook_surface!(KiroCliLogInput);
+hook_surface!(TraeCnLogInput, TraeCnLogInput::runtime_info);
 hook_surface!(OpenCodeLogInput);
 hook_surface!(PiCodingAgentLogInput);
 hook_surface!(MimoCodeLogInput);

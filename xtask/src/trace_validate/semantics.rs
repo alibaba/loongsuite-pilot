@@ -158,7 +158,22 @@ pub(super) fn validate(trace: &Trace<'_>, rules: &Rules) -> Vec<Check> {
                 }?;
                 sum.checked_add(n)
             });
-            if integer(value).is_none() || integer(value) != sum {
+            let token_count = integer(value);
+            let observed = key.strip_prefix("gen_ai.usage.").and_then(|counter| {
+                integer(&agent.attributes[format!("agent.trae-cn.hub.{counter}_observed")])
+            });
+            let receipts = agent.attributes["agent.trae-cn.hub.usage_received"].as_u64();
+            let partial_trae = agent.attributes["gen_ai.agent.name"] == "trae-cn"
+                && token_count == observed
+                && receipts.is_some_and(|count| {
+                    count
+                        > llms
+                            .iter()
+                            .filter(|llm| integer(&llm.attributes[*key]).is_some())
+                            .count() as u64
+                })
+                && sum.zip(token_count).is_some_and(|(sum, total)| sum < total);
+            if token_count.is_none() || (token_count != sum && !partial_trae) {
                 ok = false;
                 checked(
                     &mut checks,
@@ -185,7 +200,11 @@ pub(super) fn validate(trace: &Trace<'_>, rules: &Rules) -> Vec<Check> {
             checked(
                 &mut checks,
                 "semantic.tool_has_arguments",
-                "error",
+                if tool.trae_observation("native_tool_acknowledged") {
+                    "warn"
+                } else {
+                    "error"
+                },
                 "TOOL 缺少 gen_ai.tool.call.arguments",
                 Some(tool),
             );
@@ -351,24 +370,49 @@ pub(super) fn validate(trace: &Trace<'_>, rules: &Rules) -> Vec<Check> {
     if roles_ok {
         checks.push(Check::pass("semantic.tool_response_role"));
     }
-    for (_, execution) in &executions {
-        if let Some(last_step) = execution
+    for (agent, execution) in &executions {
+        let last_step = execution
             .iter()
-            .filter(|s| s.kind() == "STEP" && s.start().is_some())
-            .max_by_key(|s| s.start())
-        {
-            if let Some(llm) = trace.children(last_step).iter().find(|s| s.kind() == "LLM") {
-                if tool_calls(&llm.attributes["gen_ai.output.messages"]).is_empty() {
-                    checks.push(Check::pass("semantic.last_step_no_tool_call"));
-                } else {
-                    checked(
-                        &mut checks,
-                        "semantic.last_step_no_tool_call",
-                        "error",
-                        "最后 STEP 的 LLM 输出仍包含 tool_call",
-                        Some(llm),
-                    );
-                }
+            .filter(|s| {
+                s.kind() == "STEP"
+                    && s.start().is_some()
+                    && !s.trae_observation("stream_summary")
+                    && !s.trae_observation("unattributed_tools")
+            })
+            .max_by_key(|s| s.start());
+        let owner = if agent.trae_observation("turn_summary") {
+            Some(*agent)
+        } else {
+            last_step.and_then(|step| {
+                trace
+                    .children(step)
+                    .iter()
+                    .copied()
+                    .find(|s| s.kind() == "LLM")
+            })
+        };
+        if let Some(owner) = owner {
+            let terminal_has_call = messages::parsed(&owner.attributes["gen_ai.output.messages"])
+                .as_ref()
+                .and_then(Value::as_array)
+                .is_some_and(|messages| {
+                    messages
+                        .iter()
+                        .rfind(|message| message["role"] == "assistant")
+                        .or_else(|| messages.last())
+                        .and_then(|message| message["parts"].as_array())
+                        .is_some_and(|parts| parts.iter().any(|part| part["type"] == "tool_call"))
+                });
+            if terminal_has_call {
+                checked(
+                    &mut checks,
+                    "semantic.last_step_no_tool_call",
+                    "error",
+                    "最后一条助手消息仍包含 tool_call",
+                    Some(owner),
+                );
+            } else {
+                checks.push(Check::pass("semantic.last_step_no_tool_call"));
             }
         }
     }

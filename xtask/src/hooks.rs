@@ -66,6 +66,11 @@ const HOOKS: &[Hook] = &[
         mode: Mode::Event(&["stop", "subagent-start", "subagent-stop"]),
     },
     Hook {
+        file: "trae-cn-loongsuite-pilot-hook",
+        agent: "trae-cn",
+        mode: Mode::Event(&[]),
+    },
+    Hook {
         file: "workbuddy-loongsuite-pilot-hook",
         agent: "workbuddy",
         mode: Mode::Event(&[]),
