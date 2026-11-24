@@ -92,6 +92,22 @@ describe('installer hook tamper protection flag', () => {
     expect(fresh.hookWatchdog).toBeUndefined();
   });
 
+  it('PowerShell treats True and TRUE as on, including a reinstall that was already on', () => {
+    const turnedOn = { hookWatchdog: { enabled: true, tamperProtection: { enabled: false } } };
+    applyPowerShellMerge(turnedOn, 'True');
+    expect(turnedOn.hookWatchdog.tamperProtection.enabled).toBe(true);
+
+    const upper = { hookWatchdog: { enabled: false, tamperProtection: { enabled: false } } };
+    applyPowerShellMerge(upper, 'TRUE');
+    expect(upper.hookWatchdog.enabled).toBe(false);
+    expect(upper.hookWatchdog.tamperProtection.enabled).toBe(true);
+
+    const alreadyOn = { hookWatchdog: { enabled: true, tamperProtection: { enabled: true } } };
+    applyPowerShellMerge(alreadyOn, 'True');
+    expect(alreadyOn.hookWatchdog.enabled).toBe(true);
+    expect(alreadyOn.hookWatchdog.tamperProtection.enabled).toBe(true);
+  });
+
   it('a config written by install is still the effective switch after the process reads it again', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'hook-tamper-install-'));
     const configPath = join(dir, 'config.json');
