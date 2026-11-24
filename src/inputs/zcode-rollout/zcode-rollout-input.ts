@@ -9,6 +9,7 @@ import { readBoundedLineTail } from '../base/bounded-line-tail.js';
 import { buildAgentActivityEntry, timestampToUnixNanos } from '../../normalization/entry-builder.js';
 import { classifyZCodeRolloutFailure, ZCODE_NATIVE_OUTPUT_UNAVAILABLE } from '../../normalization/zcode-rollout-outcome.js';
 import { readZCodeMessageWindow, ZCODE_MESSAGE_WINDOW } from '../../normalization/zcode-message-window.js';
+import { readZCodeRequestMaxTokens, readZCodeToolDefinitions } from '../../normalization/zcode-request-metadata.js';
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 
 // Import the shared helpers from the .mjs file so the AGENT span_id (derived
@@ -441,17 +442,13 @@ export class ZCodeRolloutInput extends BaseInput {
     const inputMessages = rawInputMessages.map(normalizeInputMessage).filter(message => message !== null);
     const messageWindow = rawInputMessages === request.messages ? readZCodeMessageWindow(request) : undefined;
 
-    // P1 fix: extract system_instructions (role=="system" messages) and
-    // tool_definitions (request.toolNames — names only, no
-    // description/parameters; ZCode rollout does not log full tool schemas,
-    // so we emit name-only definitions and document the gap as P2 follow-up
-    // for downstream consumers needing full JSON schemas).
     const systemInstructions: JsonValue[] = inputMessages.filter(message => message.role === 'system')
       .map(message => ({ type: 'text', content: message.content ?? '' }));
-    const toolNamesRaw = Array.isArray(request.toolNames) ? request.toolNames : [];
-    const toolDefinitions: JsonValue[] = (toolNamesRaw as unknown[])
-      .map((n) => (typeof n === 'string' ? { name: n } : null))
-      .filter(Boolean) as JsonValue[];
+    const toolNames = Array.isArray(request.toolNames) ? request.toolNames : [];
+    const definitions = readZCodeToolDefinitions(record);
+    const toolDefinitions = definitions ?? toolNames.flatMap(name =>
+      typeof name === 'string' && name.trim() ? [{ name, type: 'function' }] : []);
+    const maxTokens = readZCodeRequestMaxTokens(request);
 
     // P1 fix: detect first line of a turn (no assistant message in input →
     // user prompt that triggered the turn is present). Emit a synthetic
@@ -582,9 +579,8 @@ export class ZCodeRolloutInput extends BaseInput {
       ...(systemInstructions.length > 0
         ? { 'gen_ai.system_instructions': systemInstructions }
         : {}),
-      ...(toolDefinitions.length > 0
-        ? { 'gen_ai.tool.definitions': toolDefinitions }
-        : {}),
+      ...(definitions !== undefined || toolDefinitions.length > 0 ? { 'gen_ai.tool.definitions': toolDefinitions } : {}),
+      ...(maxTokens !== undefined ? { 'gen_ai.request.max_tokens': maxTokens } : {}),
       ...(messageWindow ? { attributes: { [ZCODE_MESSAGE_WINDOW]: messageWindow } } : {}),
       trace_id: traceId,
       span_id: llmSpanId,
@@ -640,9 +636,6 @@ export class ZCodeRolloutInput extends BaseInput {
       'gen_ai.response.attempt_index': num(record.attempt) ?? 1,
       ...(systemInstructions.length > 0
         ? { 'gen_ai.system_instructions': systemInstructions }
-        : {}),
-      ...(toolDefinitions.length > 0
-        ? { 'gen_ai.tool.definitions': toolDefinitions }
         : {}),
       trace_id: traceId,
       span_id: llmSpanId,
