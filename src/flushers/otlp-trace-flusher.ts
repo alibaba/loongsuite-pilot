@@ -161,11 +161,14 @@ const MULTIMODAL_METADATA_KEYS = [
 const ZCODE_AGENT_TYPE = 'zcode';
 
 /**
- * Extract tool_call.id values from a record's gen_ai.output.messages parts.
- * Rollout llm.response carries one assistant message whose parts include
- * {type:'tool_call', id, name, input} blocks.
+ * Use rollout correlation IDs independently of message capture. Older
+ * buffered records can still be joined through their output message parts.
  */
 function extractToolCallIds(record: Record<string, any>): string[] {
+  const correlationIds = record['agent.zcode.rollout.tool_call_ids'];
+  if (Array.isArray(correlationIds)) {
+    return correlationIds.filter(id => typeof id === 'string' && id.length > 0);
+  }
   const out: string[] = [];
   const messages = record['gen_ai.output.messages'];
   if (!Array.isArray(messages)) return out;
@@ -2288,6 +2291,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         }
       }
     }
+    if (agentType === ZCODE_AGENT_TYPE) this.enrichZCodeToolOutcomes(records, spans);
     if (agentType === 'claude-code') this.enrichClaudeCodeLlmAttributes(records, spans);
     if (agentType === 'grok-build') this.enrichGrokBuildSpans(records, spans, grokMetadata);
     if (records.some(record => record['agent.source'] === 'qwen-work-cn-collaboration')) {
@@ -3091,6 +3095,31 @@ export class OtlpTraceFlusher extends BaseFlusher {
       llmSpans[0].attributes['gen_ai.system_instructions'] = JSON.stringify(
         metadata.systemInstructions,
       );
+    }
+  }
+
+  private enrichZCodeToolOutcomes(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
+    // The hook and rollout join inside a single turn before conversion. ZCode's
+    // rollout-side result has a call ID but no span ID to match directly.
+    const resultsByCall = new Map<string, AgentActivityEntry>();
+    for (const record of records) {
+      const callId = record['gen_ai.tool.call.id'];
+      if (record['event.name'] === 'tool.result' && callId && record['tool.result.status'] &&
+          record['error.type'] !== 'orphaned') {
+        resultsByCall.set(callId, record);
+      }
+    }
+    for (const span of spans) {
+      const callId = span.attributes['gen_ai.tool.call.id'];
+      if (span.attributes['gen_ai.span.kind'] !== 'TOOL' || typeof callId !== 'string') continue;
+      const result = resultsByCall.get(callId);
+      const status = result?.['tool.result.status'];
+      if (!status) continue;
+      span.attributes['tool.result.status'] = status;
+      if (status === 'failure') {
+        span.attributes['error.type'] = result['error.type'] ?? 'ToolError';
+        Object.assign(span.status, { code: SpanStatusCode.ERROR });
+      }
     }
   }
 

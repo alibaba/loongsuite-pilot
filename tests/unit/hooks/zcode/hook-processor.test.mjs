@@ -206,6 +206,19 @@ describe('zcode-hook-processor 端到端', () => {
     expect(rec['error.message']).toBeUndefined();
   });
 
+  test('PostToolUse reports a structured Read result without an exit code as success', () => {
+    const post = readHookEvents().find(event => event.hook_event_name === 'PostToolUse');
+    const readResult = { type: 'text', filePath: 'probe.txt', content: 'Fixture contents', numLines: 1 };
+    const result = runHook('post-tool-use', {
+      ...post, tool_name: 'Read', isError: false, toolResultPreview: JSON.stringify(readResult),
+    });
+    expect(result.status).toBe(0);
+    expect(readJsonlRecords()[0]).toMatchObject({
+      'gen_ai.tool.call.result': readResult,
+      'tool.result.status': 'success',
+    });
+  });
+
   test('Stop 事件不再发 llm.response (由 zcode-rollout input 补 per-LLM response)', () => {
     const events = readHookEvents();
     const stop = events.find((e) => e.hook_event_name === 'Stop');

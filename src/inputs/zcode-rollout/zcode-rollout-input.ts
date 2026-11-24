@@ -245,6 +245,12 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       ? 'cancelled'
       : normalizeFinishReason(nativeFinishReason);
     const outputMessages = toGenAiOutputMessages(response, finishReason);
+    // Call IDs carry the rollout-to-hook association even when messages are suppressed.
+    const toolCallIds = Array.isArray(response.toolCalls) ? response.toolCalls.flatMap(call => {
+      const tool = asRecord(call);
+      const id = stringValue(tool.id);
+      return id && stringValue(tool.name) ? [id] : [];
+    }) : [];
     const effectiveOutputMessages = outputMessages
       ?? (isInterrupted
         ? ([{
@@ -308,7 +314,7 @@ export class ZcodeRolloutInput extends BaseSessionInput {
       'gen_ai.usage.cache_creation.input_tokens': effectiveCacheWrite,
       'gen_ai.usage.total_tokens': effectiveTotalTokens,
       ...(effectiveOutputMessages ? { 'gen_ai.output.messages': effectiveOutputMessages } : {}),
-      attributes: baseAttrs,
+      attributes: toolCallIds.length > 0 ? { ...baseAttrs, 'agent.zcode.rollout.tool_call_ids': toolCallIds } : baseAttrs,
     });
 
     const out: AgentActivityEntry[] = [];

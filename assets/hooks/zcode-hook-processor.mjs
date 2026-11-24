@@ -284,15 +284,16 @@ function cmdPostToolUse() {
     }
   }
 
-  // Determine status: isError flag wins; otherwise infer from parsed payload.
-  let status;
+  // Read returns a structured payload with neither status nor a process exit code.
+  let status = 'success';
   if (isError) {
     status = 'error';
   } else if (parsedResult && typeof parsedResult === 'object') {
-    status = parsedResult.status
-      || (parsedResult.exitCode === 0 ? 'success' : 'error');
-  } else {
-    status = 'success';
+    if (typeof parsedResult.status === 'string' && parsedResult.status) {
+      status = parsedResult.status;
+    } else if (typeof parsedResult.exitCode === 'number' && parsedResult.exitCode !== 0) {
+      status = 'error';
+    }
   }
 
   // For error path with a non-object payload, wrap so gen_ai.tool.call.result

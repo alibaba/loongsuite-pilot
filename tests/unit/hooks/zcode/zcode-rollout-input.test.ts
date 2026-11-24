@@ -4,6 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ZcodeRolloutInput } from '../../../../src/inputs/zcode-rollout/zcode-rollout-input.js';
+import { SpanStatusCode } from '@opentelemetry/api';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import { OtlpTraceFlusher } from '../../../../src/flushers/otlp-trace-flusher.js';
+import { stripAgentMessageContent } from '../../../../src/normalization/agent-content-policy.js';
+import { buildAgentActivityEntry } from '../../../../src/normalization/entry-builder.js';
 import { StateStore } from '../../../../src/checkpoints/state-store.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -690,6 +695,58 @@ describe('ZcodeRolloutInput', () => {
     expect(tr['gen_ai.session.id']).toBe(req['gen_ai.session.id']);
     expect(tr['gen_ai.turn.id']).toBe(req['gen_ai.turn.id']);
     expect(tr['gen_ai.step.id']).toBeUndefined();
+  });
+
+  test.each([true, false])('exports a recorded ZCode Read failure without a PostToolUse hook (capture=%s)', async capture => {
+    const filePath = path.join(TMPDIR, 'rollout', path.basename(V015_G2_FIXTURE));
+    const [first, second] = fs.readFileSync(V015_G2_FIXTURE, 'utf-8').trim().split('\n').map(line => JSON.parse(line));
+    const input = new ZcodeRolloutInput({ stateStore, sessionDir: path.dirname(filePath) });
+    const secondRecords = await (input as any).processSessionLine(second, filePath);
+    const result = secondRecords.find(record => record['event.name'] === 'tool.result');
+    // The slim fixture abbreviates the request-side call ID. Match the native pair for the export test.
+    const [rawCall] = first.response.toolCalls;
+    first.response.toolCalls = [{ ...rawCall, id: result['gen_ai.tool.call.id'] }];
+    const firstRecords = await (input as any).processSessionLine(first, filePath);
+    const common = {
+      trace_id: result.trace_id, 'gen_ai.agent.type': 'zcode',
+      'gen_ai.session.id': result['gen_ai.session.id'], 'gen_ai.turn.id': result['gen_ai.turn.id'],
+    };
+    const call = buildAgentActivityEntry({
+      ...common, 'event.name': 'tool.call', timestamp: Date.parse(first.completedAt) + 1,
+      'gen_ai.tool.call.id': result['gen_ai.tool.call.id'], 'gen_ai.tool.name': result['gen_ai.tool.name'],
+    });
+    const stop = buildAgentActivityEntry({
+      ...common, 'event.name': 'other', timestamp: Date.parse(second.completedAt) + 1,
+      'gen_ai.response.finish_reasons': ['end_turn'],
+    });
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({
+      enabled: true, serviceName: 'zcode-test', protocol: 'http/protobuf',
+      endpoints: [{ endpoint: 'http://127.0.0.1:4318' }],
+    }, undefined, () => ({
+      export(batch, callback) { spans.push(...batch); callback({ code: 0 }); },
+      async shutdown() {},
+    }));
+    try {
+      const records = [...firstRecords, call, ...secondRecords, stop];
+      await flusher.sendBatch(capture ? records : records.map(stripAgentMessageContent));
+      await flusher.flush();
+      const tools = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'TOOL');
+      expect(tools).toHaveLength(1);
+      expect(spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(2);
+      const [tool] = tools;
+      expect(tool?.attributes['gen_ai.tool.call.id']).toBe(result['gen_ai.tool.call.id']);
+      expect(tool?.attributes['tool.result.status']).toBe('failure');
+      expect(tool?.status.code).toBe(SpanStatusCode.ERROR);
+      if (capture) {
+        expect(tool?.attributes['gen_ai.tool.call.result']).toContain('File does not exist');
+      } else {
+        expect(tool?.attributes['gen_ai.tool.call.result']).toBeUndefined();
+        expect(tool?.attributes['error.message']).toBeUndefined();
+      }
+    } finally {
+      await flusher.shutdown();
+    }
   });
 
   test('G2 v0.15.0: 成功 role=tool 消息 (isError absent/false) 不被合成 tool.result (留给 hook PostToolUse)', async () => {
