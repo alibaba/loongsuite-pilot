@@ -28,6 +28,7 @@ export type AlarmType =
 export interface AlarmContext {
   input_name?: string;
   endpoint_name?: string;
+  failure_class?: string;
 }
 
 export interface AlarmEntry {
@@ -40,6 +41,7 @@ export interface AlarmEntry {
   ver: string;
   input_name?: string;
   endpoint_name?: string;
+  failure_class?: string;
   __time__: number;
 }
 
@@ -64,7 +66,7 @@ export class AlarmManager {
   }
 
   record(type: AlarmType, level: AlarmLevel, message: string, context?: AlarmContext, count = 1): void {
-    const key = `${type}_${context?.input_name ?? ''}_${context?.endpoint_name ?? ''}`;
+    const key = JSON.stringify([type, context?.input_name ?? '', context?.endpoint_name ?? '', context?.failure_class ?? '']);
     const existing = this.alarms.get(key);
     if (existing) {
       existing.count += count;
@@ -94,6 +96,7 @@ export class AlarmManager {
       };
       if (item.context?.input_name) entry.input_name = item.context.input_name;
       if (item.context?.endpoint_name) entry.endpoint_name = item.context.endpoint_name;
+      if (item.context?.failure_class) entry.failure_class = item.context.failure_class;
       entries.push(entry);
     }
 

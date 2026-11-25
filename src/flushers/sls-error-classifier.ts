@@ -50,6 +50,22 @@ export interface SlsSendErrorClassification {
   detail: string;
 }
 
+export type SlsFailureClass = 'transient' | 'quota' | 'config' | 'payload';
+
+const WRITE_QUOTA_CODES = new Set(['writequotaexceed', 'shardwritequotaexceed']);
+const TERMINAL_CONFIG_CODES = new Set([
+  'projectnotexist', 'projectforbidden', 'projectinrecyclebin', 'logstorenotexist',
+]);
+
+/** Only SLS's known codes are sufficient evidence of a terminal target error. */
+export function classifySlsFailureAction(error: SlsSendErrorClassification): SlsFailureClass {
+  const code = error.code.toLowerCase();
+  if (error.httpStatus === 429 || WRITE_QUOTA_CODES.has(code)) return 'quota';
+  if (error.httpStatus === 413 || code === 'postbodytoolarge') return 'payload';
+  if (TERMINAL_CONFIG_CODES.has(code)) return 'config';
+  return 'transient';
+}
+
 interface ExtractedEvidence {
   code: string;
   httpStatus: number;
@@ -81,7 +97,7 @@ export function formatSlsSendFailureMessage(
   const safeTransport = transport === 'ak' || transport === 'apiKey' || transport === 'webtracking'
     ? transport
     : 'unknown';
-  const safeAttempts = Number.isInteger(attempts) && attempts > 0 ? attempts : 1;
+  const safeAttempts = Number.isInteger(attempts) && attempts >= 0 ? attempts : 1;
   const status = classification.httpStatus > 0
     ? ` status=${classification.httpStatus}`
     : '';
