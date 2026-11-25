@@ -2130,6 +2130,9 @@ impl OtlpInner {
                 }
             }
         }
+        if agent_type == "qwen-work-cn" {
+            remove_qwen_request_model_fallback(records, &mut spans);
+        }
         if agent_type == "claude-code" {
             enrich_claude(records, &mut spans);
         }
@@ -2837,6 +2840,33 @@ impl EventLogConverter for StreamResult {
             .unwrap_or_else(|error| error.into_inner())
             .take()
             .ok_or_else(|| "stream adapter consumed twice".into())
+    }
+}
+
+// Flash stores the requested route; preserve an absent response model through OTLP.
+fn remove_qwen_request_model_fallback(records: &[AgentActivityEntry], spans: &mut [ReadableSpan]) {
+    let absent: HashSet<_> = records
+        .iter()
+        .filter(|record| {
+            crate::inputs::base::is_event(record, "llm.response")
+                && record.response_model.as_deref().is_none_or(str::is_empty)
+        })
+        .filter_map(|record| record.response_id.as_deref().filter(|id| !id.is_empty()))
+        .collect();
+    for span in spans {
+        if span
+            .attributes
+            .get("gen_ai.span.kind")
+            .and_then(Value::as_str)
+            == Some("LLM")
+            && span
+                .attributes
+                .get("gen_ai.response.id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| absent.contains(id))
+        {
+            span.attributes.remove("gen_ai.response.model");
+        }
     }
 }
 

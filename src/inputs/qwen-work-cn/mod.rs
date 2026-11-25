@@ -2,6 +2,7 @@
 
 mod collaboration_input;
 mod collaboration_parser;
+mod flash_usage;
 pub mod multimodal;
 
 pub(crate) use collaboration_input::{

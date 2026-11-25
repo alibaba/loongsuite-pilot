@@ -112,6 +112,10 @@ pub(crate) fn private_correlation(text: &str, at_ms: i64, request_id: Option<&st
     value
 }
 
+pub(crate) fn lookup_from_entry(entry: &AgentActivityEntry) -> Option<PromptLookup> {
+    lookup(entry, entry.extra.get(CORRELATION).cloned())
+}
+
 pub(crate) fn lookup(entry: &AgentActivityEntry, metadata: Option<Value>) -> Option<PromptLookup> {
     let agent_type = prompt_agent(&entry.agent_type)?;
     if entry.session_id.is_empty() {

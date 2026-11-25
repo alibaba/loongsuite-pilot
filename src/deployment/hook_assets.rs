@@ -222,6 +222,13 @@ impl HookAssets {
                 safe_destination(root, "pilot-bin")?,
                 format!("{binary}\n"),
             ));
+            if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
+                files.push((
+                    crate::hook_process::CURSOR_CONFIG_MARKER.into(),
+                    safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
+                    crate::hook_process::cursor_config_record(root)?,
+                ));
+            }
         }
         Ok(Self {
             root: root.into(),
@@ -248,6 +255,13 @@ impl HookAssets {
                     safe_destination(root, "pilot-bin")?,
                     String::new(),
                 ));
+                if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
+                    files.push((
+                        crate::hook_process::CURSOR_CONFIG_MARKER.into(),
+                        safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
+                        String::new(),
+                    ));
+                }
             }
         }
         Ok(Self {
@@ -554,6 +568,17 @@ pub fn healthy(def: &AgentDefinition, pilot: &Path, data: &Path) -> bool {
         != Some(format!("{}\n", binary.display()).as_str())
     {
         return false;
+    }
+    if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
+        let Ok(marker) = safe_destination(data, crate::hook_process::CURSOR_CONFIG_MARKER) else {
+            return false;
+        };
+        let Ok(expected) = crate::hook_process::cursor_config_record(data) else {
+            return false;
+        };
+        if std::fs::read_to_string(marker).ok().as_deref() != Some(&expected) {
+            return false;
+        }
     }
     assets.into_iter().all(|(relative, content)| {
         let Ok(path) = safe_destination(data, &relative) else {

@@ -1,5 +1,6 @@
 //! Port of `src/inputs/qwen-work-cn/qwen-work-cn-trace-input.ts`.
 
+use super::flash_usage::FlashSource;
 use crate::inputs::base::{
     create_hook_history_startup_checkpoint, entry_from, filter_bootstrap_history_turns, InputBody,
     InputRuntime,
@@ -69,6 +70,7 @@ struct QwenWorkCnMultimodalRuntime {
 pub struct QwenWorkCnTraceBody {
     log_dir: String,
     segments_root: String,
+    flash_source: FlashSource,
     multimodal: Option<QwenWorkCnMultimodalRuntime>,
     multimodal_stopped: Arc<AtomicBool>,
     segment_pairs: Mutex<HashMap<String, Vec<SegmentLlmPair>>>,
@@ -140,6 +142,21 @@ impl QwenWorkCnTraceInput {
     }
 
     pub fn new(opts: QwenWorkCnTraceOptions) -> Self {
+        let desktop_db = Path::new(&super::qwen_work_cn_sqlite_input::resolve_qwen_work_cn_root())
+            .join("data/agents.db")
+            .to_string_lossy()
+            .into_owned();
+        let flash_db = resolve_home("~/.qwenworkcn/.harness/flash-cli/qwenwork/qwenwork.db");
+        Self::with_flash_source(
+            opts,
+            FlashSource {
+                desktop_db,
+                flash_db,
+            },
+        )
+    }
+
+    fn with_flash_source(opts: QwenWorkCnTraceOptions, flash_source: FlashSource) -> Self {
         let log_dir = opts
             .log_dir
             .unwrap_or_else(|| resolve_home("~/.loongsuite-pilot/logs/qwen-work-cn/history"));
@@ -184,6 +201,7 @@ impl QwenWorkCnTraceInput {
                 QwenWorkCnTraceBody {
                     log_dir,
                     segments_root,
+                    flash_source,
                     multimodal,
                     multimodal_stopped: stopped,
                     segment_pairs: Mutex::new(HashMap::new()),
@@ -283,10 +301,17 @@ impl QwenWorkCnTraceBody {
         for (session_id, cwd) in collect_session_cwd(&entries) {
             self.read_segments_for_session(rt, &session_id, &cwd).await;
         }
+        let bindings = match self.flash_source.bindings(&entries).await {
+            Ok(bindings) => bindings,
+            Err(_) => {
+                rt.warn("could not read QwenWorkCN Flash session bindings", None);
+                HashMap::new()
+            }
+        };
         let mut output = Vec::new();
         for turn in group_by_turn(entries).into_values() {
             let mut turn = turn;
-            self.enrich_turn(&mut turn);
+            self.enrich_turn(rt, &mut turn, &bindings).await;
             inject_trace_id(&mut turn);
             for entry in &mut turn {
                 entry.agent_type = ClientType::QwenWorkCN.as_str().to_owned();
@@ -711,7 +736,12 @@ impl QwenWorkCnTraceBody {
                 .is_some_and(|turns| turns.contains_key(turn_id))
     }
 
-    fn enrich_turn(&self, entries: &mut [AgentActivityEntry]) {
+    async fn enrich_turn(
+        &self,
+        rt: &InputRuntime,
+        entries: &mut [AgentActivityEntry],
+        bindings: &HashMap<String, String>,
+    ) {
         let session_id = entries.iter().find_map(|entry| {
             if entry.session_id.is_empty() {
                 None
@@ -721,6 +751,7 @@ impl QwenWorkCnTraceBody {
         });
         let turn_id = entries.iter().find_map(|entry| entry.turn_id.clone());
         let step_order = step_ids(entries);
+        let mut flash_steps = Vec::new();
         if let Some(session_id) = session_id.as_deref() {
             for step_id in &step_order {
                 let request_index = entries.iter().position(|entry| {
@@ -735,7 +766,7 @@ impl QwenWorkCnTraceBody {
                 {
                     let request_nano = entries[request_index].time_unix_nano.clone();
                     let response_id = entries[response_index].event_id.clone();
-                    let response_nano = entries[response_index].time_unix_nano.clone();
+                    flash_steps.push((request_index, response_index));
                     let request_snapshot = entries[request_index].clone();
                     let response_snapshot = entries[response_index].clone();
                     if let Some(pair) = self.take_segment_pair(
@@ -767,10 +798,22 @@ impl QwenWorkCnTraceBody {
                                 entry.request_model = Some(model.clone());
                             }
                         }
-                        let _ = response_nano;
                     }
                 }
                 self.apply_tool_timing(session_id, entries);
+            }
+        }
+        if let Some(native_session) = session_id
+            .as_ref()
+            .and_then(|session| bindings.get(session))
+        {
+            if self
+                .flash_source
+                .enrich(entries, &flash_steps, native_session)
+                .await
+                .is_err()
+            {
+                rt.warn("could not read QwenWorkCN Flash model calls", None);
             }
         }
         for index in 0..step_order.len().saturating_sub(1) {
@@ -900,7 +943,7 @@ fn apply_usage(entry: &mut AgentActivityEntry, usage: &TokenUsage) {
     }
 }
 
-fn missing_model(value: Option<&str>) -> bool {
+pub(super) fn missing_model(value: Option<&str>) -> bool {
     matches!(value, None | Some("") | Some("auto") | Some("unknown"))
 }
 
