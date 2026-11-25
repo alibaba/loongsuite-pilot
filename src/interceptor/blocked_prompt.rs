@@ -27,7 +27,12 @@ pub fn build_blocked_qoder_prompt_entry(
     );
     opts.insert("time_unix_nano".to_string(), Value::String(nanos.clone()));
     opts.insert("observed_time_unix_nano".to_string(), Value::String(nanos));
-    opts.insert("gen_ai.agent.type".to_string(), json!("qoder-cli"));
+    let agent_type = if request.agent.is_qoder_cn() {
+        "qoder-cn"
+    } else {
+        "qoder-cli"
+    };
+    opts.insert("gen_ai.agent.type".to_string(), json!(agent_type));
     opts.insert(
         "gen_ai.session.id".to_string(),
         Value::String(request.session_id.clone().unwrap_or_default()),

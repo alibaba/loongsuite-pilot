@@ -468,8 +468,9 @@ impl ToolVerdictStore {
                             .filter(|binding| {
                                 key.missing_request_id
                                     && is_qoder(&binding.agent_type)
-                                    && (key.missing_agent_type
-                                        || binding.agent_type == key.agent_type)
+                                    && (binding.agent_type == key.agent_type
+                                        || (key.missing_agent_type
+                                            && binding.agent_type != "qoder-cn"))
                                     && valid_digest(&binding.request_id)
                                     && binding.at.abs_diff(recorded) <= MATCH_WINDOW_MS
                             });

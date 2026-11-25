@@ -14,6 +14,8 @@ impl AgentHook {
         Some(Self(match id {
             "qoder" => InterceptorAgent::Qoder,
             "qodercli" => InterceptorAgent::QoderCli,
+            "qoder-cn" => InterceptorAgent::QoderCn,
+            "qoderclicn" => InterceptorAgent::QoderCliCn,
             "codex" => InterceptorAgent::Codex,
             _ => return None,
         }))
@@ -22,17 +24,26 @@ impl AgentHook {
     pub(super) fn policy_id(self) -> &'static str {
         match self.0 {
             InterceptorAgent::QoderCli => "qoder",
+            InterceptorAgent::QoderCliCn => "qoder-cn",
             agent => agent.as_str(),
         }
     }
 
     pub(super) fn supports_blocking(self, event: &str) -> bool {
         match self.0 {
-            InterceptorAgent::Qoder | InterceptorAgent::QoderCli | InterceptorAgent::Codex => {
+            InterceptorAgent::Qoder
+            | InterceptorAgent::QoderCli
+            | InterceptorAgent::QoderCn
+            | InterceptorAgent::QoderCliCn
+            | InterceptorAgent::Codex => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
             _ => false,
         }
+    }
+
+    pub(super) fn supports_channel(self, channel: &str) -> bool {
+        !self.0.is_qoder_cn() || channel == "local"
     }
 
     pub(super) fn parse(self, payload: &Map<String, Value>, event: &str) -> Option<HookRequest> {
@@ -48,6 +59,9 @@ impl AgentHook {
         settings: &Value,
         queue: &Outbox,
     ) -> bool {
+        if self.0.is_qoder_cn() {
+            return false;
+        }
         let is_codex = self.0 == InterceptorAgent::Codex;
         let codex_event = codex_observe_event(event);
         let codex_prompt =

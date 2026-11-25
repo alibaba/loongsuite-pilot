@@ -2,7 +2,7 @@
 
 use super::hook_assets::HookAssets;
 use crate::hooks::{legacy_claude_hook_paths, quote_claude_hook_path, HookDefinition, HookManager};
-use crate::sdk::agent_hooks::{codex_command, codex_command_executable};
+use crate::sdk::agent_hooks::{codex_command, codex_command_executable, quote_codex_path};
 use crate::types::{
     AgentDefinition, AgentHookConfig, DeployMode, DeployResult, DeployStrategy,
     DeployedAgentRecord, EventSubcommand, HookInsert, SettingsSyntax,
@@ -494,6 +494,28 @@ fn qoder_legacy_exec_args(legacy: &HookDefinition, data: &Path) -> Vec<String> {
         .collect()
 }
 
+fn qoder_cn_command(binary: &Path, data: &Path, event: &str) -> Option<String> {
+    if !crate::interceptor::SUPPORTED_HOOK_EVENTS.contains(&event) {
+        return None;
+    }
+    let binary = quote_codex_path(binary)?;
+    let sdk_data = quote_codex_path(&data.join(crate::sdk::STANDALONE_QODER_CN_DATA))?;
+    Some(format!(
+        "{binary} sdk-hook --channel local --agent qoder-cn-auto --event {event} --data-dir {sdk_data}"
+    ))
+}
+
+fn qoder_cn_interception_enabled() -> bool {
+    let config: Option<Value> = std::fs::read_to_string(crate::utils::config_json_path())
+        .ok()
+        .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok());
+    crate::interceptor::should_deploy_interceptor_hooks(
+        &crate::interceptor::build_interceptor_config(
+            config.as_ref().and_then(|config| config.get("interceptor")),
+        ),
+    )
+}
+
 fn qoder_exec_args(legacy: &HookDefinition, data: &Path) -> Vec<String> {
     let event = legacy.hook_json_path.last().expect("Qoder Hook event");
     let channel = if event == "Stop" || qoder_subagent_hook(legacy) {
@@ -536,6 +558,39 @@ fn qoder_exec_definition(legacy: &HookDefinition, binary: &Path, data: &Path) ->
         timeout.min(QODER_EXEC_TIMEOUT)
     }));
     definition
+}
+
+fn qoder_cn_owned_hooks(
+    settings: &Value,
+    legacy: &HookDefinition,
+    data: &Path,
+    binary_owned: impl Fn(&Path) -> bool,
+) -> Vec<HookDefinition> {
+    let Some(event) = legacy.hook_json_path.last() else {
+        return Vec::new();
+    };
+    settings["hooks"][event]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|group| {
+            std::iter::once(group).chain(group["hooks"].as_array().into_iter().flatten())
+        })
+        .filter_map(|handler| {
+            let command = handler["command"].as_str()?;
+            let binary = codex_command_executable(command)?;
+            if handler["type"] != "command"
+                || !binary_owned(&binary)
+                || qoder_cn_command(&binary, data, event).as_deref() != Some(command)
+            {
+                return None;
+            }
+            let mut owned = legacy.clone();
+            owned.hook_command = command.to_owned();
+            owned.replace_hook_commands = None;
+            Some(owned)
+        })
+        .collect()
 }
 
 fn qoder_owned_exec_hooks(
@@ -671,11 +726,33 @@ pub(crate) fn plan_qoder_legacy_restore(
     binary: &Path,
     restore_subagents: bool,
 ) -> Result<Option<String>, String> {
-    let Some(hook) = def.hook.as_ref().filter(|_| def.id == "qoder") else {
+    let Some(hook) = &def.hook else {
         return Ok(None);
     };
     let mut document = SettingsDocument::from_snapshot(Some(raw), settings_syntax(hook))?;
     let strategy = HookStrategy::new(HookManager::new(None, None));
+    if def.id == "qoder-cn" {
+        let previous = strategy.build_interceptor_definitions(def);
+        for entry in strategy.build_hook_definitions(def) {
+            let direct = qoder_cn_owned_hooks(&document.data, &entry, data, |path| path == binary);
+            if direct.is_empty() {
+                continue;
+            }
+            for owned in direct {
+                document.apply_hook(&owned, true, false)?;
+            }
+            if let Some(old) = previous
+                .iter()
+                .find(|old| old.hook_json_path == entry.hook_json_path)
+            {
+                document.apply_hook(old, false, false)?;
+            }
+        }
+        return Ok(document.changed().then_some(document.raw));
+    }
+    if def.id != "qoder" {
+        return Ok(None);
+    }
     for legacy in strategy.legacy_hook_definitions(def) {
         let direct = qoder_owned_exec_hooks(&document.data, &legacy, data, |path| path == binary);
         if direct.is_empty() {
@@ -1313,7 +1390,7 @@ impl HookStrategy {
         let sdk_settings = if let Some(hook) = def
             .hook
             .as_ref()
-            .filter(|_| matches!(def.id.as_str(), "qoder" | "codex"))
+            .filter(|_| matches!(def.id.as_str(), "qoder" | "codex" | "qoder-cn"))
         {
             let Ok(document) =
                 SettingsDocument::read(&resolve_home(&hook.settings_path), settings_syntax(hook))
@@ -1329,16 +1406,30 @@ impl HookStrategy {
             if qoder_subagent_hook(&legacy) && direct_binary.is_none() {
                 continue;
             }
+            let interceptor = self.is_interceptor_definition(def, &legacy);
+            if interceptor && def.id == "qoder-cn" && direct_binary.is_none() {
+                if sdk_settings.as_ref().is_some_and(|settings| {
+                    !self.installed_sdk_hooks(def, settings, &legacy).is_empty()
+                        || HookManager::is_hook_installed_in_settings(settings, &legacy)
+                }) {
+                    return true;
+                }
+                continue;
+            }
             if def.id != "qoder"
+                && def.id != "qoder-cn"
                 && legacy.exec_args.is_none()
-                && self.is_interceptor_definition(def, &legacy)
+                && interceptor
             {
                 if self.hook_manager.is_hook_installed(&legacy).await {
                     return true;
                 }
                 continue;
             }
-            let desired = self.sdk_desired_hook(legacy.clone(), direct_binary.as_deref());
+            let binary = direct_binary
+                .as_deref()
+                .filter(|_| def.id != "qoder-cn" || interceptor);
+            let desired = self.sdk_desired_hook(legacy.clone(), binary);
             if let Some(settings) = &sdk_settings {
                 let installed = self.installed_sdk_hooks(def, settings, &legacy);
                 if installed.len() > usize::from(direct_binary.is_some())
@@ -1821,11 +1912,15 @@ impl HookStrategy {
             }
             let prune_empty = uninstall && self.preserve_runtime_assets;
             for legacy in self.legacy_hook_definitions(def) {
-                if def.id != "qoder" && self.is_interceptor_definition(def, &legacy) {
+                let interceptor = self.is_interceptor_definition(def, &legacy);
+                if def.id != "qoder" && def.id != "qoder-cn" && interceptor {
                     document.apply_hook(&legacy, true, prune_empty)?;
                     continue;
                 }
-                let desired = self.sdk_desired_hook(legacy.clone(), direct_binary.as_deref());
+                let binary = direct_binary
+                    .as_deref()
+                    .filter(|_| def.id != "qoder-cn" || interceptor);
+                let desired = self.sdk_desired_hook(legacy.clone(), binary);
                 if indexed_codex || self.embedded_codex.is_some() {
                     self.edit_indexed_codex_event(
                         def,
@@ -1852,7 +1947,8 @@ impl HookStrategy {
                 if qoder_subagent_hook(&legacy) && direct_binary.is_none() && !uninstall {
                     continue;
                 }
-                document.apply_hook(&desired, uninstall, prune_empty)?;
+                let inactive_cn = def.id == "qoder-cn" && interceptor && binary.is_none();
+                document.apply_hook(&desired, uninstall || inactive_cn, prune_empty)?;
             }
         }
         if let Some(cfg) = &hook.trust_toml {
@@ -2249,10 +2345,24 @@ impl HookStrategy {
                     matcher,
                     exec_args: None,
                     history_dir: None,
-                    replace_hook_commands: interceptor
-                        .replace_hook_commands
-                        .clone()
-                        .or_else(|| Some(Vec::new())),
+                    replace_hook_commands: {
+                        let mut commands = interceptor
+                            .replace_hook_commands
+                            .clone()
+                            .unwrap_or_default();
+                        if def.id == "qoder-cn" {
+                            if let Some((script, args)) =
+                                interceptor.hook_command.rsplit_once(" --agent ")
+                            {
+                                commands.push(format!(
+                                    "{} --agent {args}",
+                                    quote_claude_hook_path(script)
+                                ));
+                                commands.push(wrap_legacy_ps1_command(&interceptor.hook_command));
+                            }
+                        }
+                        Some(commands)
+                    },
                     use_nested_format: Some(hook_config.format.as_str() == "nested"),
                     shell: if cfg!(windows) {
                         hook_config.win_shell.clone()
@@ -2329,6 +2439,12 @@ impl HookStrategy {
             }
             // An unpacked package can be used before it has an active version pointer.
             return Some(binary);
+        }
+        if def.id == "qoder-cn" {
+            return qoder_cn_interception_enabled()
+                .then(|| installed_qoder_hook_binary(pilot, data, &hook_cache_dir(data)))
+                .flatten()
+                .filter(|binary| qoder_cn_command(binary, data, "PreToolUse").is_some());
         }
         if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
             return None;
@@ -2486,6 +2602,20 @@ impl HookStrategy {
         settings: &Value,
         legacy: &HookDefinition,
     ) -> Vec<HookDefinition> {
+        if def.id == "qoder-cn" {
+            return self
+                .resource_roots
+                .as_ref()
+                .filter(|_| self.is_interceptor_definition(def, legacy))
+                .map(|(_, data)| {
+                    let cache = hook_cache_dir(data);
+                    let binary = super::runtime_launcher::hook_binary(data).ok();
+                    qoder_cn_owned_hooks(settings, legacy, data, |path| {
+                        binary.as_deref() == Some(path) || qoder_version_binary(path, &cache)
+                    })
+                })
+                .unwrap_or_default();
+        }
         if def.id != "codex" {
             return self.qoder_installed_exec_hooks(def, settings, legacy);
         }
@@ -2533,6 +2663,23 @@ impl HookStrategy {
         let Some(binary) = binary else {
             return legacy;
         };
+        if legacy.agent_id == "qoder-cn" {
+            let command = self.resource_roots.as_ref().and_then(|(_, data)| {
+                qoder_cn_command(binary, data, legacy.hook_json_path.last()?)
+            });
+            let Some(command) = command else {
+                return legacy;
+            };
+            let mut native = legacy;
+            let old = std::mem::replace(&mut native.hook_command, command);
+            native
+                .replace_hook_commands
+                .get_or_insert_with(Vec::new)
+                .push(old);
+            native.shell = None;
+            native.timeout = Some(QODER_EXEC_TIMEOUT);
+            return native;
+        }
         if legacy.agent_id == "codex" {
             let Some(event) = legacy.hook_json_path.last() else {
                 return legacy;
@@ -3006,6 +3153,40 @@ mod tests {
         }
     }
 
+    #[test]
+    fn qoder_cn_rollback_preserves_collection_and_user_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let binary = root
+            .join("current package/bin")
+            .join(sdk_hook_binary_name());
+        let foreign = root.join("user binary/bin").join(sdk_hook_binary_name());
+        let mut definition: AgentDefinition =
+            serde_json::from_str(include_str!("../../agents.d/qoder-cn.json")).unwrap();
+        definition.hook.as_mut().unwrap().interceptor.take();
+        let original = serde_json::json!({"hooks":{"PreToolUse":[{"matcher":"*", "hooks":[
+            {"type":"command","command":qoder_cn_command(&binary, &root, "PreToolUse").unwrap()},
+            {"type":"command","command":qoder_cn_command(&foreign, &root, "PreToolUse").unwrap()},
+            {"type":"command","command":"qoder-cn-collection"},
+            {"type":"command","command":"third-party"},
+        ]}]}});
+        let edited =
+            plan_qoder_legacy_restore(&original.to_string(), &definition, &root, &binary, true)
+                .unwrap()
+                .unwrap();
+        let after: Value = serde_json::from_str(&edited).unwrap();
+        assert_eq!(
+            after["hooks"]["PreToolUse"][0]["hooks"].as_array().unwrap(),
+            &original["hooks"]["PreToolUse"][0]["hooks"]
+                .as_array()
+                .unwrap()[1..],
+        );
+        assert!(
+            plan_qoder_legacy_restore(&edited, &definition, &root, &binary, true)
+                .unwrap()
+                .is_none()
+        );
+    }
     #[test]
     fn qoder_sdk_migration_recognizes_exact_old_and_new_commands() {
         let temp = tempfile::tempdir().unwrap();

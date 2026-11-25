@@ -145,6 +145,12 @@ impl Hooks {
         activated: Arc<AtomicBool>,
     ) -> anyhow::Result<Self> {
         let instance = uuid::Uuid::new_v4().to_string();
+        // This hosted profile has no cloud callback or SDK-owned sources.
+        let channels: &[&str] = if settings["agents"] == json!(["qoder-cn"]) {
+            &["local"]
+        } else {
+            &["cloud", "local", "observe"]
+        };
         let settings = Arc::new(RwLock::new(Arc::new(settings)));
         #[cfg(unix)]
         {
@@ -226,7 +232,7 @@ impl Hooks {
         // Hold startup senders only until endpoints have been made. On a
         // partial startup, drop those senders before Hooks joins its writers.
         let endpoints = (|| -> anyhow::Result<()> {
-            for channel in ["cloud", "local", "observe"] {
+            for &channel in channels {
                 let (workers, capacity) = if channel == "cloud" {
                     (CLOUD_WORKERS, CLOUD_IN_FLIGHT)
                 } else {
@@ -408,7 +414,7 @@ impl Endpoint {
             let required = self.channel == "cloud"
                 && self.callback.is_some()
                 && packet.event == "PreToolUse"
-                && may_block(&packet, &settings);
+                && may_block(&packet, &settings, self.channel);
             let deadline = received + Duration::from_millis(remaining);
             let response = Arc::new(RecentRequest {
                 peer,
@@ -636,9 +642,10 @@ fn atomic_descriptor(path: &Path, descriptor: &Descriptor) -> anyhow::Result<()>
     file.persist(path)?;
     Ok(())
 }
-fn may_block(packet: &Datagram, trusted: &Value) -> bool {
+fn may_block(packet: &Datagram, trusted: &Value, channel: &str) -> bool {
     AgentHook::for_wire_id(&packet.agent).is_some_and(|adapter| {
-        adapter.supports_blocking(&packet.event)
+        adapter.supports_channel(channel)
+            && adapter.supports_blocking(&packet.event)
             && trusted["agents"]
                 .as_array()
                 .is_some_and(|list| list.iter().any(|a| a == adapter.policy_id()))
@@ -699,10 +706,11 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
     let Some(adapter) = AgentHook::for_wire_id(&packet.agent) else {
         return allow();
     };
-    if !trusted
-        .get("agents")
-        .and_then(Value::as_array)
-        .is_some_and(|agents| agents.iter().any(|a| a == adapter.policy_id()))
+    if !adapter.supports_channel(channel)
+        || !trusted
+            .get("agents")
+            .and_then(Value::as_array)
+            .is_some_and(|agents| agents.iter().any(|a| a == adapter.policy_id()))
     {
         return allow();
     }
@@ -736,7 +744,7 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         return allow();
     }
 
-    let blocking = may_block(packet, trusted);
+    let blocking = may_block(packet, trusted, channel);
     let request = adapter.parse(&payload, &packet.event);
     let prompt_key = (channel == "local" && blocking && trusted["managed_host_rules"] == true)
         .then(|| {
@@ -1037,23 +1045,27 @@ fn record_blocked_prompt(queue: &Outbox, settings: &RwLock<Arc<Value>>, result: 
         return;
     };
     if result.action == "block"
-        && matches!(
-            request.agent,
-            crate::interceptor::InterceptorAgent::Qoder
-                | crate::interceptor::InterceptorAgent::QoderCli
-        )
+        && (request.agent.is_qoder_cn()
+            || matches!(
+                request.agent,
+                crate::interceptor::InterceptorAgent::Qoder
+                    | crate::interceptor::InterceptorAgent::QoderCli
+            ))
         && request.event == HookEventName::UserPromptSubmit
     {
         let mut entry = crate::interceptor::build_blocked_qoder_prompt_entry(request, None);
         if let Some(guardrail) = &result.guardrail {
             guardrail.apply(&mut entry);
         }
+        let policy_id = AgentHook::for_wire_id(request.agent.as_str())
+            .map(AgentHook::policy_id)
+            .expect("Qoder Hook adapter");
         let (host, mask) = {
             let settings = settings.read().unwrap();
             entry.user_id = settings["user_id"].as_str().unwrap_or("").to_owned();
             (
-                settings
-                    .pointer("/collector_plans/qoder/pilot_host")
+                settings["collector_plans"][policy_id]
+                    .get("pilot_host")
                     .cloned(),
                 settings["mask"].clone(),
             )

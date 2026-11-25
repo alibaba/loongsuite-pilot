@@ -1,31 +1,42 @@
 //! Resolve the Qoder surface for registrations shared by the IDE and CLI.
 //! Inspect bounded native ancestry without starting a subprocess.
 
-pub(super) fn agent() -> &'static str {
-    if cli_ancestor() {
-        "qodercli"
-    } else {
-        "qoder"
+pub(super) fn agent(cn: bool, product: Option<&str>) -> &'static str {
+    let cli = match product {
+        Some("app") => false,
+        Some("cli") => true,
+        _ => {
+            (cn && std::env::var("LOONGSUITE_QODERCLI_FLAVOR").as_deref() == Ok("qoderclicn"))
+                || cli_ancestor(cn)
+        }
+    };
+    match (cn, cli) {
+        (true, true) => "qoderclicn",
+        (true, false) => "qoder-cn",
+        (false, true) => "qodercli",
+        (false, false) => "qoder",
     }
 }
 
-fn is_cli(name: &str) -> bool {
+fn is_cli(name: &str, cn: bool) -> bool {
     let name = name.to_ascii_lowercase();
     let name = name.strip_suffix(".exe").unwrap_or(&name);
-    ["qodercli", "qoder-cli", "qoder_cli"].iter().any(|prefix| {
-        name.strip_prefix(prefix).is_some_and(|suffix| {
-            suffix.is_empty()
-                || suffix
-                    .strip_prefix('-')
-                    .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+    (cn && (name.starts_with("qoderclicn") || name.starts_with("qoder-cli-cn")))
+        || ["qodercli", "qoder-cli", "qoder_cli"].iter().any(|prefix| {
+            name.strip_prefix(prefix).is_some_and(|suffix| {
+                suffix.is_empty()
+                    || suffix
+                        .strip_prefix('-')
+                        .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+            })
         })
-    }) || name
-        .strip_prefix("qoder-")
-        .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
+        || name
+            .strip_prefix("qoder-")
+            .is_some_and(|version| version.starts_with(|c: char| c.is_ascii_digit()))
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-fn cli_ancestor() -> bool {
+fn cli_ancestor(cn: bool) -> bool {
     let mut pid = unsafe { libc::getppid() };
     for _ in 0..12 {
         if pid <= 1 {
@@ -34,7 +45,7 @@ fn cli_ancestor() -> bool {
         let Some((parent, name)) = process(pid) else {
             break;
         };
-        if is_cli(&name) {
+        if is_cli(&name, cn) {
             return true;
         }
         pid = parent;
@@ -82,7 +93,7 @@ fn process(pid: libc::pid_t) -> Option<(libc::pid_t, String)> {
 }
 
 #[cfg(windows)]
-fn cli_ancestor() -> bool {
+fn cli_ancestor(cn: bool) -> bool {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
@@ -107,7 +118,7 @@ fn cli_ancestor() -> bool {
             entry.th32ProcessID,
             (
                 entry.th32ParentProcessID,
-                is_cli(&String::from_utf16_lossy(&name[..nul])),
+                is_cli(&String::from_utf16_lossy(&name[..nul]), cn),
             ),
         );
         found = unsafe { Process32NextW(snapshot, &mut entry) };
@@ -130,6 +141,6 @@ fn cli_ancestor() -> bool {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-fn cli_ancestor() -> bool {
+fn cli_ancestor(_cn: bool) -> bool {
     false
 }

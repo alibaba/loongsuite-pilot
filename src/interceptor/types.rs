@@ -6,7 +6,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub const SUPPORTED_HOOK_EVENTS: &[&str] = &["UserPromptSubmit", "PreToolUse", "PostToolUse"];
-pub const INTERCEPTOR_AGENTS: &[&str] = &["qoder", "qodercli", "openclaw", "qwen-work-cn"];
+pub const INTERCEPTOR_AGENTS: &[&str] = &[
+    "qoder",
+    "qodercli",
+    "qoder-cn",
+    "qoderclicn",
+    "openclaw",
+    "qwen-work-cn",
+];
 
 pub const INTERCEPTOR_SERVICE: &str = "loongsuite-pilot-interceptor";
 pub const INTERCEPTOR_DEFAULT_PORT: u16 = 18791;
@@ -47,6 +54,10 @@ pub enum InterceptorAgent {
     Qoder,
     #[serde(rename = "qodercli")]
     QoderCli,
+    #[serde(rename = "qoder-cn")]
+    QoderCn,
+    #[serde(rename = "qoderclicn")]
+    QoderCliCn,
     #[serde(rename = "openclaw")]
     OpenClaw,
     #[serde(rename = "qwen-work-cn")]
@@ -58,6 +69,8 @@ impl InterceptorAgent {
         match self {
             Self::Qoder => "qoder",
             Self::QoderCli => "qodercli",
+            Self::QoderCn => "qoder-cn",
+            Self::QoderCliCn => "qoderclicn",
             Self::OpenClaw => "openclaw",
             Self::Codex => "codex",
             Self::QwenWorkCn => "qwen-work-cn",
@@ -70,10 +83,16 @@ pub fn is_interceptor_agent(value: &str) -> bool {
 }
 
 impl InterceptorAgent {
+    pub(crate) fn is_qoder_cn(self) -> bool {
+        matches!(self, Self::QoderCn | Self::QoderCliCn)
+    }
+
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "qoder" => Some(Self::Qoder),
             "qodercli" => Some(Self::QoderCli),
+            "qoder-cn" => Some(Self::QoderCn),
+            "qoderclicn" => Some(Self::QoderCliCn),
             "openclaw" => Some(Self::OpenClaw),
             "qwen-work-cn" => Some(Self::QwenWorkCn),
             _ => None,

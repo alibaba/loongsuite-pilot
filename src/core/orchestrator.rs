@@ -518,7 +518,11 @@ impl Orchestrator {
                 interceptor_config.as_ref(),
             );
         } else if let Some(config) = &interceptor_config {
-            self.start_qoder_hooks(&pilot_dir, config, verdicts).await;
+            self.start_qoder_hooks(&pilot_dir, config, Arc::clone(&verdicts))
+                .await;
+        }
+        if let Some(config) = interceptor_config.as_ref().filter(|_| interception_enabled) {
+            self.register_qoder_cn_hooks(&mut detection, &pilot_dir, config, verdicts);
         }
         let deploy_entries = deployment
             .as_ref()
@@ -3000,13 +3004,16 @@ impl Orchestrator {
                     .is_some_and(|agent| is_agent_multimodal_enabled(Some("qoder"), agent)))
     }
 
-    async fn start_qoder_hooks(
+    fn host_qoder_hooks(
         &self,
+        agent: &str,
+        input: &'static str,
+        standalone_path: &str,
         pilot_dir: &str,
         config: &crate::types::InterceptorConfig,
         verdicts: Arc<ToolVerdictStore>,
-    ) {
-        let sdk_data = self.data_dir_join(crate::sdk::STANDALONE_QODER_DATA);
+    ) -> super::sdk_agent::SdkAgent {
+        let sdk_data = self.data_dir_join(standalone_path);
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
@@ -3014,24 +3021,41 @@ impl Orchestrator {
             "user_id": self.config.user_id,
         });
         let policy = serde_json::json!({
-            "agents": ["qoder"],
-            "hcd": {"agent_configs":{"qoder":{"collection":{"enabled":false}}}},
+            "agents": [agent],
+            "hcd": {"agent_configs":{(agent):{"collection":{"enabled":false}}}},
             "sdk_options": {"mask": self.config.mask, "hooks": {
                 "local": config,
                 "pilot_qoder_use_host_collector": {
                     "data_dir": self.data_dir,
-                    "capture_message_content": self.config.agents.get("qoder")
+                    "capture_message_content": self.config.agents.get(agent)
                         .and_then(|agent| agent.capture_message_content),
                     "exclude_workspaces": self.config.privacy.as_ref()
                         .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
                 },
             }},
         });
-        let sdk = super::sdk_agent::SdkAgent::hook_only(
+        super::sdk_agent::SdkAgent::hook_only(
+            input,
             init,
             policy,
             &self.inputs,
             std::path::PathBuf::from(sdk_data),
+            verdicts,
+        )
+    }
+
+    async fn start_qoder_hooks(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        verdicts: Arc<ToolVerdictStore>,
+    ) {
+        let sdk = self.host_qoder_hooks(
+            "qoder",
+            "qoder-trace",
+            crate::sdk::STANDALONE_QODER_DATA,
+            pilot_dir,
+            config,
             Arc::clone(&verdicts),
         );
         if let Err(error) = sdk.start().await {
@@ -3047,6 +3071,43 @@ impl Orchestrator {
             verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
             *self.qoder_hooks.lock().expect("Qoder Hook SDK") = Some(sdk);
         }
+    }
+
+    fn register_qoder_cn_hooks(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        verdicts: Arc<ToolVerdictStore>,
+    ) {
+        let input = "qoder-cn-interceptor";
+        let sdk = Arc::new(self.host_qoder_hooks(
+            "qoder-cn",
+            input,
+            crate::sdk::STANDALONE_QODER_CN_DATA,
+            pilot_dir,
+            config,
+            Arc::clone(&verdicts),
+        ));
+        verdicts.start_checkpoint_loop(interceptor::TOOL_VERDICT_CHECKPOINT_INTERVAL_MS);
+        let live = live_from_parts(
+            input,
+            "qoder-cn",
+            "sdk-hook",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            vec![resolve_home("~/.qoder-cn")],
+            || async { crate::utils::directory_exists(&resolve_home("~/.qoder-cn")).await },
+            1,
+            None,
+        );
     }
 
     fn register_sdk_qoder(
@@ -3555,7 +3616,7 @@ async fn precondition_for(
 fn listener_agent(listener: &str) -> &str {
     match listener {
         "qoder-trace" => "qoder",
-        "qoder-cn-trace" | "qoder-cn-sqlite" | "qoder-cn" => "qoder-cn",
+        "qoder-cn-interceptor" | "qoder-cn-trace" | "qoder-cn-sqlite" | "qoder-cn" => "qoder-cn",
         "qoder-work" | "qoder-work-trace" | "qoder-work-log" | "qoder-work-sqlite" => "qoder-work",
         "qoder-work-cn-trace"
         | "qoder-work-cn-hook"
