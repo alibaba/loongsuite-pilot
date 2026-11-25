@@ -590,6 +590,13 @@ fn recover_stop(
     } else {
         ""
     };
+    if transcript_path.is_empty() {
+        for event in &mut visible {
+            if let Some(object) = event.as_object_mut() {
+                object.remove("transcript_path");
+            }
+        }
+    }
     let env = &policy.env;
     let events = &visible;
     let conversation_id = conversation;
@@ -815,7 +822,16 @@ impl Journal {
                 Err(error) => return Err(error.to_string()),
             }
         }
-        let (stops, discard) = pending_stops(self.read_all()?, chrono::Utc::now() - ORPHAN_GRACE);
+        let (mut stops, discard) =
+            pending_stops(self.read_all()?, chrono::Utc::now() - ORPHAN_GRACE);
+        // Older journals did not record per-invocation identities. Keep their
+        // existing same-turn reconciliation when an unrelated generation fires.
+        stops.retain(|stop| {
+            stop.get("_journal_id").is_some()
+                || (text(current, "conversation_id") == stop["conversation_id"].as_str()
+                    && text(current, "generation_id") == stop["generation_id"].as_str())
+        });
+        stops.sort_by_key(|stop| current.get("_journal_id") != stop.get("_journal_id"));
         if !discard.is_empty() {
             self.rewrite(&[], Some(&discard))?;
         }
@@ -1387,7 +1403,12 @@ mod main673_contracts {
             json!({"hook_event_name":"beforeSubmitPrompt","conversation_id":"conv","generation_id":"gen",
             "cursor_version":"3.30.14","model":"gpt-5","prompt":"PRIVATE OFFLINE"}),
         );
-        assert_eq!(Journal::open(root).read_all().unwrap().len(), 2);
+        invoke(
+            root,
+            json!({"hook_event_name":"afterAgentResponse","conversation_id":"conv","generation_id":"gen",
+            "cursor_version":"3.30.14","model":"gpt-5","text":"PRIVATE RESPONSE","input_tokens":5,"output_tokens":2}),
+        );
+        assert_eq!(Journal::open(root).read_all().unwrap().len(), 3);
         fs::write(config, "{}").unwrap();
         invoke(
             root,
@@ -1403,7 +1424,8 @@ mod main673_contracts {
         )
         .unwrap();
         assert!(history.contains("\"gen\""));
-        assert!(!history.contains("PRIVATE OFFLINE"));
+        assert!(!history.contains("PRIVATE"));
+        assert!(history.contains("gen_ai.usage.input_tokens"));
     }
 
     #[test]
