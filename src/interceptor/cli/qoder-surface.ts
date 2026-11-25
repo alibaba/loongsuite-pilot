@@ -10,6 +10,7 @@ type ExecText = (
 ) => string;
 
 export function resolveQoderSurface(env: NodeJS.ProcessEnv = process.env): QoderSurface | null {
+  if (env.LOONGSUITE_QODERCLI_FLAVOR === 'qoderclicn') return 'qoderclicn';
   const fromEnv = classifyConfigDir(env.QODER_CONFIG_DIR);
   if (fromEnv) return fromEnv;
 
@@ -20,10 +21,23 @@ export function resolveQoderSurface(env: NodeJS.ProcessEnv = process.env): Qoder
   return null;
 }
 
+/** The CN hook is explicitly installed in the shared CN profile. */
+export function resolveQoderCnSurface(env: NodeJS.ProcessEnv = process.env): QoderSurface {
+  if (env.LOONGSUITE_QODERCLI_FLAVOR === 'qoderclicn') return 'qoderclicn';
+  for (const name of ancestorNames()) {
+    const surface = classifyExecutable(name);
+    if (surface === 'qoderclicn' || surface === 'qodercli') return 'qoderclicn';
+    if (surface === 'qoder-cn' || surface === 'qoder') return 'qoder-cn';
+  }
+  return 'qoder-cn';
+}
+
 export function classifyExecutable(raw: string): QoderSurface | null {
   const name = normalizeName(raw);
   if (!name) return null;
   if (isNonQoderHost(name)) return null;
+  if (name.includes('qoderclicn') || name.includes('qoder-cli-cn')) return 'qoderclicn';
+  if (name.includes('qodercn') || name.includes('qoder-cn')) return 'qoder-cn';
   if (name.includes('qodercli') || name.includes('qoder-cli') || name.includes('qoder_cli')) {
     return 'qodercli';
   }
@@ -37,6 +51,7 @@ function classifyConfigDir(raw: string | undefined): QoderSurface | null {
   if (!raw) return null;
   const normalized = raw.replace(/\\/g, '/').toLowerCase();
   if (normalized.includes('.qoderwork')) return null;
+  if (normalized.includes('.qoder-cn')) return 'qoder-cn';
   if (normalized.includes('.qoder')) return 'qoder';
   return null;
 }

@@ -376,7 +376,7 @@ function parseKey(key: string): InterceptorVerdictKey | null {
       if (typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId
         || requestId.length > 512 || typeof agentType !== 'string' || !agentType
         || typeof promptHash !== 'string' || !/^[a-f0-9]{64}$/.test(promptHash)) return null;
-      if ((missingRequestId || missingAgentType) && !['qoder', 'qoder-cli', 'qoder-app'].includes(agentType)) return null;
+      if ((missingRequestId || missingAgentType) && !['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn'].includes(agentType)) return null;
       if (missingAgentType && agentType !== 'qoder') return null;
       return { sessionId, requestId, phase, agentType, promptHash,
         ...(missingRequestId ? { missingRequestId: true } : {}), ...(missingAgentType ? { missingAgentType: true } : {}) };

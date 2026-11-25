@@ -137,6 +137,8 @@ Worker 异常退出时，collector 清掉失效的 interceptor runtime，按 1 �
 
 CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CLI（`qodercli`）。首版覆盖 `UserPromptSubmit`、`PreToolUse` 与 `PostToolUse`。
 
+Qoder CN 通过 `agents.d/qoder-cn.json` 向 `~/.qoder-cn/settings.json` 部署独立拦截 hook，原有采集 hook 保留。CN hook 使用 `--agent qoder-cn-auto`，优先采用宿主 `parent_business_info.product=cli/app`，其次识别 `LOONGSUITE_QODERCLI_FLAVOR=qoderclicn` 和祖先进程：Desktop 为 `qoder-cn`，CLI 为 `qoderclicn`，分别使用下表的 `block` / `deny` 协议；无法识别时按 CN Desktop 处理。托管规则配置 `"agents": ["qoder-cn", "qoderclicn"]` 可覆盖两端。两端的采集事件、被拦提示词和提示词裁决关联均保持 `gen_ai.agent.type=qoder-cn`，不归入国际版或 `qoder-app`。关闭拦截时只移除拦截 hook，保留采集。
+
 拦截时 stdout 必须是单一 JSON 行：
 
 | 运行面 | 事件 | stdout |
@@ -288,7 +290,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 
 | 字段 | 取值 |
 |------|------|
-| `agents` | `qoder`、`qodercli`、`openclaw`、`qwen-work-cn` |
+| `agents` | `qoder`、`qodercli`、`qoder-cn`、`qoderclicn`、`openclaw`、`qwen-work-cn` |
 | `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
 | `action` | 默认 `block`，命中后拦截并停止；`log` 记录命中后放行，继续检查后续规则，不提示宿主 |
 | `severity` | 可选风险等级字符串，仅用于本地诊断，不上报到采集事件 |

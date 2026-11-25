@@ -55,7 +55,7 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 
 | Field | Values |
 |-------|--------|
-| `agents` | `qoder`, `qodercli`, `openclaw`, `qwen-work-cn` |
+| `agents` | `qoder`, `qodercli`, `qoder-cn`, `qoderclicn`, `openclaw`, `qwen-work-cn` |
 | `events` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
 | `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
@@ -89,6 +89,8 @@ The local document also accepts optional `interceptor.scriptCache`, a 64-charact
 Files are checked every three seconds. Invalid documents or scripts not yet ready preserve the previous executable generation. In-flight requests retain their original generation and executor; executors are retired after their last request, including when rules are cleared or become pattern-only. Loading validates real paths and regular files; execution rechecks the file to reject symlinks.
 
 ## Decisions and telemetry
+
+Qoder CN installs a separate interceptor hook in `~/.qoder-cn/settings.json` while preserving its collection hooks. The `qoder-cn-auto` target prefers the host's `parent_business_info.product=cli/app`, then detects the CN CLI flavor or ancestor process: Desktop uses the `qoder-cn` surface and prompt `decision=block`, while CLI uses `qoderclicn` and `decision=deny`. Unidentified CN hosts default to Desktop. Configure rule `agents: ["qoder-cn", "qoderclicn"]` to cover both. Both surfaces retain `gen_ai.agent.type=qoder-cn` for collected events, blocked prompts and prompt verdict correlation. Disabling interception removes only interceptor hooks.
 
 File rules run in array order. `matches` preserves all known log and block hits. Top-level metadata identifies the final enforcing rule, or the first log hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known log hit followed by an error can retain both `matched=true` and `failOpen=true`.
 

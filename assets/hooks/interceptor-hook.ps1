@@ -56,7 +56,12 @@ if (-not $cli) {
 if (-not $cli -or -not (Test-Path $cli)) { exit 0 }
 
 try {
-    & $nodeBin $cli hook --agent qoder-auto @args
+    # Preserve an explicit regional target without a shadowing default flag.
+    if ($args -contains '--agent') {
+        & $nodeBin $cli hook @args
+    } else {
+        & $nodeBin $cli hook --agent qoder-auto @args
+    }
 } catch {
     exit 0
 }

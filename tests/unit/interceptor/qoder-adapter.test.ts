@@ -35,6 +35,12 @@ describe('Qoder adapter', () => {
     );
   });
 
+  it.each([['qoder-cn', 'block'], ['qoderclicn', 'deny']] as const)(
+    'renders CN %s UserPromptSubmit with the host protocol', (agent, decision) => {
+      expect(JSON.parse(renderQoderBlock(baseRequest({ agent }), 'nope'))).toEqual({ decision, reason: 'nope' });
+      expect(parseHookRequest({ hook_event_name: 'PreToolUse', tool_name: 'Bash' }, agent)?.agent).toBe(agent);
+    });
+
   it('renders PreToolUse the same way for both surfaces', () => {
     const expected = `${JSON.stringify({
       hookSpecificOutput: {
@@ -45,6 +51,8 @@ describe('Qoder adapter', () => {
     })}\n`;
     expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qoder' }), 'denied')).toBe(expected);
     expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qodercli' }), 'denied')).toBe(expected);
+    expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qoder-cn' }), 'denied')).toBe(expected);
+    expect(renderQoderBlock(baseRequest({ event: 'PreToolUse', agent: 'qoderclicn' }), 'denied')).toBe(expected);
   });
 
   it('renders PostToolUse by replacing the tool output', () => {
@@ -56,6 +64,8 @@ describe('Qoder adapter', () => {
     })}\n`;
     expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qoder' }), 'denied')).toBe(expected);
     expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qodercli' }), 'denied')).toBe(expected);
+    expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qoder-cn' }), 'denied')).toBe(expected);
+    expect(renderQoderBlock(baseRequest({ event: 'PostToolUse', agent: 'qoderclicn' }), 'denied')).toBe(expected);
   });
 
   it('keeps tool_response on parsed PostToolUse requests', () => {

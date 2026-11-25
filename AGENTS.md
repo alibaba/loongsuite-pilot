@@ -52,7 +52,7 @@
 | Agent | ID | 部署模式 | 采集基类 | Input 实现 | 声明文件 |
 |-------|----|---------|---------|-----------|---------|
 | Qoder IDE | `qoder` | Hook + Interceptor | `BaseIdeInput` | `inputs/qoder/` | `agents.d/qoder.json` |
-| Qoder CN | `qoder-cn` | Hook | `BaseIdeInput` / `BaseSqliteInput` | `inputs/qoder-cn*/` | `agents.d/qoder-cn.json` |
+| Qoder CN | `qoder-cn` | Hook + Interceptor | `BaseIdeInput` / `BaseSqliteInput` | `inputs/qoder-cn*/` | `agents.d/qoder-cn.json` |
 | Qoder for JetBrains | `qoder-jetbrains` | Detection-only（复用 Qoder 采集） | 复用 Qoder Input | `inputs/qoder*/` | `agents.d/qoder-jetbrains.json` |
 | Qoder Work | `qoder-work` | Hook | `BaseSqliteInput` / `BaseHookInput` | `inputs/qoder-work*/` | `agents.d/qoder-work.json` |
 | Qoder Work CN | `qoder-work-cn` | Hook | `BaseHookInput` / `BaseSessionInput` | `inputs/qoder-work*/` | `agents.d/qoder-work-cn.json` |
