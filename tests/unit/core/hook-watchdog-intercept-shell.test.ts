@@ -273,8 +273,8 @@ printf '%s' "\${QW_QODER_WORKER_RUNTIME_PATH-}" > "$HOME/qwen.env"
   it('preserves third-party overrides and plists while removing both Pilot plists', () => {
     const otherPlist = join(home, 'Library', 'LaunchAgents', 'com.third-party.runtime.plist');
     writeFileSync(otherPlist, 'third-party plist');
-    const qoder = join(home, 'other data', 'hooks', 'qoderwork-runtime-wrapper.mjs');
-    const qwen = `${wrapper}.third-party`;
+    const qoder = join(home, 'loongsuite-pilot-adapter', 'hooks', 'qoderwork-runtime-wrapper.mjs');
+    const qwen = join(home, '.loongsuite-pilot', 'hooks', 'qoderwork-runtime-wrapper.mjs.third-party');
     const result = runCleanup(qoder, qwen, 'qwen-work-cn');
     expect(result.qoder).toBe(qoder);
     expect(result.qwen).toBe(qwen);
