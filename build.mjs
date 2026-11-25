@@ -212,6 +212,19 @@ if (process.platform === 'darwin') {
   }
 }
 
+// Standalone local caller registration; no Collector start or deployment.
+await build({
+  entryPoints: {
+    'invocation-attributes': 'src/invocation-attributes/cli.ts',
+    'invocation-attributes-api': 'assets/hooks/shared/invocation-attribute-store.mjs',
+  },
+  outdir: 'dist',
+  platform: 'node',
+  format: 'esm',
+  target: 'es2022',
+  bundle: true,
+});
+
 await build({
   entryPoints: ['src/index.ts'],
   outfile: 'dist/index.js',

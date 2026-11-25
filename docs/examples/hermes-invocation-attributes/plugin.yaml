@@ -1,0 +1,5 @@
+name: hermes-invocation-attributes
+version: 0.0.1
+description: Example for a caller to register telemetry attributes on its own Hermes invocation
+provides_hooks:
+  - pre_llm_call

@@ -30,6 +30,6 @@ describe('native invocation attributes', () => {
     const event = { 'agentcore.task_id': 'native' };
     projectInvocationAttributes(event, { 'agentcore.task_id': 'changed', 'memory.enabled': false });
     projectInvocationAttributes(event, { 'memory.a': 'valid', 'trace_id': 'invalid' });
-    expect(event).toEqual({ 'agentcore.task_id': 'native', 'memory.enabled': false });
+    expect(JSON.parse(JSON.stringify(event))).toEqual({ 'agentcore.task_id': 'native', 'memory.enabled': false });
   });
 });

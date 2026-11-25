@@ -1,6 +1,7 @@
 export * from './client-type.js';
 export * from './deployment.js';
 export * from './events.js';
+import type { InvocationAttributeConfig } from '../invocation-attributes/config.js';
 
 /**
  * Configuration for a single tool listener.
@@ -144,6 +145,7 @@ export interface AnalyticsConfig {
   dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  invocationAttributes?: InvocationAttributeConfig;
   /** Global multimodal storage. */
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */

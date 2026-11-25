@@ -399,7 +399,7 @@ Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感�
 - key 会原样作为 span 属性名。**请避免以 `agent.` 开头**及其它保留前缀（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`）——这类 key 会被跳过。
 - 属性为 fill-only，绝不覆盖 span 已有属性。
 
-**3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
+**3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若一次调用会新建一个支持透传的 agent 子进程，调用方可以在创建子进程时设置独立环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。若多个请求复用同一个 Gateway 或 SDK 进程，不能依靠每次修改环境变量；候选版本的精确登记方式见[按次自定义属性](./invocation-attributes.md)。
 
 - 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
 

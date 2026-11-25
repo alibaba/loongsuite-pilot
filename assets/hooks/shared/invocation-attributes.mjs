@@ -4,11 +4,28 @@
 // Producer-only carrier. A trusted adapter snapshots it at its native invocation
 // boundary; the collector projects only admitted scalars, not this object.
 export const INVOCATION_ATTRIBUTES_FIELD = 'pilot.invocation.attributes';
+// In-process transport. Neither symbol is emitted in JSONL or passed to OTLP.
+export const INVOCATION_MESSAGE_ID_FIELD = Symbol.for('loongsuite.pilot.invocation.messageId');
+const PROJECTED_INVOCATION_KEYS = Symbol.for('loongsuite.pilot.invocation.attributeKeys');
 const MAX_ATTRIBUTES = 32;
 const MAX_ENCODED_BYTES = 16 * 1024;
 const KEY = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const SENSITIVE = /(^|[_.-])(?:token|secret|password|credential|cookie|authorization|api[_.-]?key|api[_.-]?header)([_.-]|$)/i;
 const RESERVED = /^(?:(?:agent|cost|error|event|gen_ai|git|host|observed|otel|pilot|process|resource|response|service|session|step|tool|trace|turn|usage|user|workspace)[_.-]|attributes$|resourceattributes$|parent_span_id$|span_id$|time_unix_nano$|constructor$|prototype$)/i;
+
+export function isInvocationAttributeKey(key) {
+  return typeof key === 'string' && KEY.test(key) && !RESERVED.test(key) && !SENSITIVE.test(key);
+}
+
+export function nativeInvocationMessageId(record) { return record[INVOCATION_MESSAGE_ID_FIELD]; }
+export function copyNativeInvocationMessageId(record, entry) {
+  const id = nativeInvocationMessageId(record);
+  if (typeof id === 'string') entry[INVOCATION_MESSAGE_ID_FIELD] = id;
+}
+
+export function projectedInvocationAttributeKeys(entry) {
+  return entry[PROJECTED_INVOCATION_KEYS] ?? [];
+}
 
 /** Strict policy for a single, already-associated native invocation. An empty
  * object is a valid snapshot. Invalid inputs never become partial attribution. */
@@ -42,7 +59,12 @@ export function projectInvocationAttributes(entry, input) {
   if (input === undefined) return;
   let attributes;
   try { attributes = parseInvocationAttributes(input); } catch { return; }
+  const keys = [];
   for (const [key, value] of Object.entries(attributes)) {
-    if (entry[key] === undefined) entry[key] = value;
+    if (entry[key] === undefined) {
+      entry[key] = value;
+      keys.push(key);
+    }
   }
+  if (keys.length) entry[PROJECTED_INVOCATION_KEYS] = [...new Set([...projectedInvocationAttributeKeys(entry), ...keys])];
 }

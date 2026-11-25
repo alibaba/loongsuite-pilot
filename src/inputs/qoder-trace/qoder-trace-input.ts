@@ -1,3 +1,4 @@
+import { copyNativeInvocationMessageId } from '../../../assets/hooks/shared/invocation-attributes.mjs';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -510,6 +511,7 @@ export class QoderTraceInput extends BaseInput {
       { preserveSafeCustomTopLevelFields: true, preserveMissingModels: true },
     );
     if (canonicalEntry) {
+      copyNativeInvocationMessageId(record, canonicalEntry);
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');
       return canonicalEntry;
     }

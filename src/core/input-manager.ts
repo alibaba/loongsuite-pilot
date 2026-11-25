@@ -26,6 +26,7 @@ import { resolveAgentSystem } from '../normalization/agent-system-map.js';
 import { applyInvocationIdentity } from '../normalization/invocation-identity.js';
 import { expandAgentInputEvents } from '../normalization/agent-input-dual-write.js';
 import type { InterceptResultLinker } from './intercept-result-linker.js';
+import type { InvocationAttributeJoin } from '../invocation-attributes/join.js';
 
 const logger = createLogger('InputManager');
 
@@ -99,6 +100,7 @@ export class InputManager extends EventEmitter {
     replacementMode: 'placeholder',
   };
   private traceLinker: TraceLinker | null = null;
+  private invocationAttributes: InvocationAttributeJoin | null = null;
   private interceptResultLinker: InterceptResultLinker | null = null;
   private multimodalProcessor: MultimodalProcessor | null = null;
   private readonly turnBoundaryProcessor = new TurnBoundaryProcessor();
@@ -139,6 +141,10 @@ export class InputManager extends EventEmitter {
 
   setTraceLinker(linker: TraceLinker): void {
     this.traceLinker = linker;
+  }
+
+  setInvocationAttributeJoin(join: InvocationAttributeJoin | null): void {
+    this.invocationAttributes = join;
   }
 
   /** Native delegation needs the final upstream context before a parent turn
@@ -457,6 +463,7 @@ export class InputManager extends EventEmitter {
     if (inputId === 'trae-cn-log') {
       for (const entry of entries) delete entry[UPSTREAM_CORRELATION_HASH_FIELD];
     }
+    if (this.invocationAttributes) await this.invocationAttributes.apply(inputId, entries);
     this.applyIdentity(entries);
 
     // Fill-only lifecycle enrichment. It never changes record order/count or
@@ -502,6 +509,8 @@ export class InputManager extends EventEmitter {
       });
     }
 
+    signal?.throwIfAborted();
+    if (this.invocationAttributes) await this.invocationAttributes.apply(inputId, entries);
     signal?.throwIfAborted();
     this.applyIdentity(entries);
     const prepared = this.applyPolicyAndMask(entries);
