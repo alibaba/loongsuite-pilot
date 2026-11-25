@@ -135,6 +135,44 @@ describe('MetricsWriter', () => {
     expect(rows[1].version).toBe('2.0.0');
   });
 
+  it('uses one userId across L1 and L2 while a dataflow snapshot is written', async () => {
+    let userId = '{original}';
+    const alarmManager = new AlarmManager({ ip: '127.0.0.1', version: '2.0.0', userId,
+      userIdProvider: () => userId });
+    writer = new MetricsWriter({
+      dataDir: tmpDir,
+      version: '2.0.0',
+      userId: 'startup',
+      userIdProvider: () => userId,
+      alarmManager,
+      getSnapshot: buildSnapshot,
+      getInterceptorStatus: async () => {
+        userId = 'corrected';
+        return unavailableInterceptorStatus(false);
+      },
+    });
+
+    vi.useRealTimers();
+    await writer.start();
+    const l1 = mockSendStatus.mock.calls.find(([stream]) => stream === 'pilot_status')?.[1];
+    const l2 = mockSendStatus.mock.calls.filter(([stream]) => stream === 'pilot_pipeline').map(([, row]) => row);
+    expect(l1?.user_id).toBe('{original}');
+    expect(l2).toHaveLength(3);
+    for (const row of l2) expect(row).toMatchObject({ user_id: '{original}', instance_id: l1.instance_id });
+    await (writer as any).writeAlarms();
+    expect(mockSendAlarm).toHaveBeenCalledWith('pilot_alarm', expect.objectContaining({
+      alarm_type: 'USER_ID_FORMAT_ALARM',
+      user_id: '{original}',
+    }));
+
+    mockSendStatus.mockClear();
+    await writer.stop();
+    expect(mockSendStatus).toHaveBeenCalledWith('pilot_status', expect.objectContaining({
+      user_id: 'corrected',
+      instance_id: l1.instance_id,
+    }));
+  });
+
   it('writes L1 metrics on start', async () => {
     writer = new MetricsWriter({
       dataDir: tmpDir,

@@ -475,7 +475,7 @@ function collectHookRows(hookTimings: readonly HookTimingStats[], identity: L2Id
 
 export class MetricsCollector {
   private readonly version: string;
-  private readonly userId: string;
+  private readonly userIdProvider: () => string;
   private readonly dataDir: string;
   private readonly canaryPolicy: string;
   private readonly agentsConfig: AgentsConfig;
@@ -522,9 +522,9 @@ export class MetricsCollector {
   private updaterConsecutiveFailures = 0;
   private lastInfraHealth: InfraHealthSnapshot | null = null;
 
-  constructor(opts: { version: string; userId: string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterExpected?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness; hostSn?: string; hostIdentityTags?: boolean }) {
+  constructor(opts: { version: string; userId: string; userIdProvider?: () => string; dataDir: string; canaryPolicy?: string; agentsConfig?: AgentsConfig; slsEndpoints?: SlsEndpoint[]; cmsWorkspace?: string; updaterExpected?: boolean; updaterLiveness?: (pidFile: string) => ProcessLiveness; hostSn?: string; hostIdentityTags?: boolean }) {
     this.version = opts.version;
-    this.userId = opts.userId;
+    this.userIdProvider = opts.userIdProvider ?? (() => opts.userId);
     this.dataDir = opts.dataDir;
     this.canaryPolicy = opts.canaryPolicy ?? '';
     this.agentsConfig = opts.agentsConfig ?? {};
@@ -554,10 +554,10 @@ export class MetricsCollector {
   }
 
   getUserId(): string {
-    return this.userId;
+    return this.userIdProvider();
   }
 
-  collectL1(snapshot: DataflowSnapshot): L1Metrics {
+  collectL1(snapshot: DataflowSnapshot, userId = this.getUserId()): L1Metrics {
     const now = Date.now();
     const cpuPercent = this.calcCpuPercent(now);
     const mem = process.memoryUsage();
@@ -604,7 +604,7 @@ export class MetricsCollector {
       ...(this.hostIdentityTags && this.hostSn ? { sn: this.hostSn } : {}),
       instance_id: this.instanceId,
       run_id: this.runId,
-      user_id: this.userId,
+      user_id: userId,
       pid: process.pid,
       cpu: String(cpuPercent),
       mem: String(Math.round(mem.rss / 1024 / 1024)),
@@ -649,7 +649,7 @@ export class MetricsCollector {
    * Returns null when there are no rows, so a freshly started
    * instance with no agents and no destinations ships nothing at all.
    */
-  collectL2(snapshot: DataflowSnapshot, hookTimings: readonly HookTimingStats[] = []): L2Metrics | null {
+  collectL2(snapshot: DataflowSnapshot, hookTimings: readonly HookTimingStats[] = [], userId = this.getUserId()): L2Metrics | null {
     const now = Date.now();
     const windowMs = Math.max(0, now - (this.l2LastCollectTime || this.startTimestamp * 1000));
     const identity = {
@@ -657,7 +657,7 @@ export class MetricsCollector {
       ip: this.localIp,
       instance_id: this.instanceId,
       run_id: this.runId,
-      user_id: this.userId,
+      user_id: userId,
       window_ms: String(windowMs),
       __time__: Math.floor(now / 1000),
     };

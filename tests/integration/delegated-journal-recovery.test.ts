@@ -6,7 +6,14 @@ import { createHash } from 'node:crypto';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
+import { InputManager } from '../../src/core/input-manager.js';
+import { createUserIdProvider, USER_ID_REFRESH_INTERVAL_MS } from '../../src/core/config-loader.js';
+import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
+import { INVOCATION_USER_ID_FIELD } from '../../src/normalization/invocation-identity.js';
 import type { AgentActivityEntry } from '../../src/types/index.js';
+import { MockFlusher } from '../helpers/mock-flusher.js';
+import { StateStore } from '../../src/checkpoints/state-store.js';
+import { HermesLogInput } from '../../src/inputs/hermes-log/hermes-log-input.js';
 
 afterEach(() => vi.useRealTimers());
 
@@ -93,6 +100,123 @@ it('restores a spilled turn after restart before accepting its final continuatio
     expect(new Set(f.llms().map(s => s.spanContext().spanId)).size).toBe(100);
   } finally { await flusher.shutdown(); await fs.rm(f.dir, { recursive: true, force: true }); }
 }, 30_000);
+
+it.each(['codex', 'hermes', 'openclaw'])('keeps the configured ID of a %s turn through refresh, restart, and acknowledgement', async agent => {
+  const f = await fixture();
+  const configPath = path.join(f.dir, 'config.json');
+  const rows = calls(agent, 2);
+  const close = { ...terminal(rows), 'agent.codex.turn_status': 'completed' } as AgentActivityEntry;
+  const output = new MockFlusher();
+  let active = f.create();
+  let clock = 0;
+  vi.stubEnv('LOONGSUITE_PILOT_USER_ID', '');
+  const attach = async (userId: string) => {
+    await active.flusher.start();
+    const input = new InputManager();
+    input.setUserIdProvider(createUserIdProvider({ initialUserId: userId, configPath, now: () => clock }));
+    const { journal, flusher } = active;
+    input.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry));
+    input.setFlusher(new MultiFlusher([output, flusher]));
+    return input;
+  };
+  try {
+    await fs.writeFile(configPath, '{"userId":"original"}');
+    let input = await attach('original');
+    await input.flushPreparedEntries(rows.slice(0, 2).map(row => ({ ...row })));
+    await fs.writeFile(configPath, '{"userId":"corrected"}');
+    clock = USER_ID_REFRESH_INTERVAL_MS;
+    await input.flushPreparedEntries(rows.slice(2).map(row => ({ ...row })));
+    expect(output.batchCalls.flat().map(row => row['user.id'])).toEqual(Array(4).fill('original'));
+    expect(f.llms()).toHaveLength(0);
+
+    await active.flusher.shutdown();
+    active = f.create();
+    input = await attach('corrected');
+    await input.flushPreparedEntries([{ ...close }]);
+    expect(f.llms()).toHaveLength(2);
+    expect(await active.journal.isAcknowledged({ ...close, 'user.id': 'original' })).toBe(true);
+    expect(await active.journal.isAcknowledged({ ...close, 'user.id': 'corrected' })).toBe(false);
+
+    await active.flusher.shutdown();
+    active = f.create();
+    input = await attach('corrected');
+    await input.flushPreparedEntries([{ ...close }]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('original');
+    expect(f.llms()).toHaveLength(2);
+
+    await input.flushPreparedEntries([{ ...close, [INVOCATION_USER_ID_FIELD]: 'separate-tenant' }]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('separate-tenant');
+    const newTurn = { ...rows[0], 'event.id': 'new-turn-request', 'gen_ai.turn.id': 'new-turn' };
+    await input.flushPreparedEntries([newTurn]);
+    expect(output.batchCalls.at(-1)?.[0]['user.id']).toBe('corrected');
+    expect(JSON.stringify(output.batchCalls)).not.toContain('configuredOwner');
+  } finally {
+    vi.unstubAllEnvs();
+    await active.flusher.shutdown();
+    await fs.rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+it.each(['pending', 'acknowledged'])('keeps the startup ID for a legacy %s turn after a same-process refresh', async checkpoint => {
+  const f = await fixture();
+  const { flusher, journal } = f.create();
+  const state = new StateStore(path.join(f.dir, 'state.json'));
+  const sourceDir = path.join(f.dir, 'hermes');
+  const sourceFile = path.join(sourceDir, 'hermes-agent-legacy.jsonl');
+  const configPath = path.join(f.dir, 'config.json');
+  const manager = new InputManager();
+  const output = new MockFlusher();
+  const startupUserId = 'legacy-configured';
+  const rows = calls('hermes', 1).map(row => ({ ...row, 'user.id': startupUserId }));
+  const sourcePrefix = rows.map(row => JSON.stringify(row) + '\n').join('');
+  let clock = 0;
+  vi.stubEnv('LOONGSUITE_PILOT_USER_ID', '');
+  try {
+    // Appending without the binder writes the legacy format without owner metadata.
+    const legacy = new CodexTurnJournal(f.dir, 10_000, ['hermes']);
+    await legacy.append(rows);
+    if (checkpoint === 'acknowledged') await legacy.acknowledge(rows);
+    await fs.mkdir(sourceDir);
+    await fs.writeFile(sourceFile, sourcePrefix);
+    const input = new HermesLogInput({ stateStore: state, sessionDir: sourceDir, pollIntervalMs: 3_600_000 });
+    const inputKey = `${input.id}:${sourceFile}`;
+    if (checkpoint === 'pending') {
+      state.setOffset(inputKey, Buffer.byteLength(sourcePrefix));
+      await state.save();
+    }
+
+    await fs.writeFile(configPath, JSON.stringify({ userId: startupUserId }));
+    const provider = createUserIdProvider({ initialUserId: startupUserId, configPath, now: () => clock });
+    expect(provider()).toBe(startupUserId);
+    await flusher.start();
+    manager.setUserIdProvider(provider);
+    manager.setConfiguredTurnUserIdBinder(entry => journal.bindConfiguredUserId(entry, startupUserId));
+    manager.setFlusher(new MultiFlusher([output, flusher]));
+    manager.registerInput(input);
+
+    await fs.writeFile(configPath, '{"userId":"corrected-configured"}');
+    clock = USER_ID_REFRESH_INTERVAL_MS;
+    expect(provider()).toBe('corrected-configured');
+    const close = terminal(rows);
+    await fs.appendFile(sourceFile, JSON.stringify(close) + '\n');
+    await manager.startInput(input.id);
+    const sourceSize = (await fs.stat(sourceFile)).size;
+    await vi.waitFor(() => expect(state.getPersistedState(inputKey)?.lastOffset).toBe(sourceSize));
+
+    const eventIds = new Set([...rows, close].map(row => row['event.id']));
+    expect.soft(output.batchCalls.flat().filter(row => eventIds.has(row['event.id'])).map(row => row['user.id'])).toEqual(
+      Array(checkpoint === 'pending' ? 1 : 3).fill(startupUserId),
+    );
+    expect.soft(f.llms()).toHaveLength(checkpoint === 'pending' ? 1 : 0);
+    expect.soft(await journal.isAcknowledged(rows[0])).toBe(true);
+    expect.soft(await journal.isAcknowledged({ ...rows[0], 'user.id': 'corrected-configured' })).toBe(false);
+  } finally {
+    vi.unstubAllEnvs();
+    await manager.stopAll();
+    await flusher.shutdown();
+    await fs.rm(f.dir, { recursive: true, force: true });
+  }
+});
 
 it('retains all turns when aggregate payload spills before any per-turn limit', async () => {
   const f = await fixture(); const { flusher } = f.create();

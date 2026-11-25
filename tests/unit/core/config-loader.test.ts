@@ -192,6 +192,11 @@ describe('ConfigLoader', () => {
       expect(config.userId).toBe('from-file');
     });
 
+    it('loads a numeric userId from config as a string', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ userId: 326220 });
+      expect((await loadConfig()).userId).toBe('326220');
+    });
+
     it('keeps legacy user.id config compatibility', async () => {
       mockReadJsonFile.mockResolvedValueOnce({
         'user.id': 'from-file',
@@ -199,6 +204,16 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.userId).toBe('from-file');
+    });
+
+    it('treats an empty/whitespace userId as unset and falls back to hostname', async () => {
+      const os = await import('node:os');
+      mockReadJsonFile.mockResolvedValueOnce({
+        userId: '   ',
+      });
+
+      const config = await loadConfig();
+      expect(config.userId).toBe(os.hostname());
     });
   });
 
