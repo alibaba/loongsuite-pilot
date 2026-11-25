@@ -11,7 +11,8 @@ import {
 } from '../types.js';
 import {
   PATTERN_BLOCKED_REASON,
-  substringRegexSource,
+  buildSubstringMatchPlan,
+  type SubstringMatchPlan,
   type ManagedInterceptorConfig,
   type ManagedPatternRule,
   type ManagedScriptRule,
@@ -53,7 +54,7 @@ export class ManagedRuleEngine implements HookEvaluator {
   private readonly scriptsById: ReadonlyMap<string, ResolvedScriptRule>;
   private readonly regex: ManagedRegexRunner;
   private readonly regexTimeoutMs: number;
-  private readonly patternSources = new Map<ManagedPatternRule, string>();
+  private readonly patternPlans = new Map<ManagedPatternRule, string | SubstringMatchPlan>();
 
   constructor(private readonly opts: ManagedRuleEngineOptions) {
     this.scriptsById = new Map(opts.rules.map(resolved => [resolved.rule.id, resolved]));
@@ -61,7 +62,7 @@ export class ManagedRuleEngine implements HookEvaluator {
     this.regex = opts.regex ?? new ManagedRegexRunner(this.regexTimeoutMs);
     for (const rule of opts.config.rules) {
       if (rule.kind === 'pattern') {
-        this.patternSources.set(rule, rule.match === 'substring' ? substringRegexSource(rule.keywords) : rule.pattern);
+        this.patternPlans.set(rule, rule.match === 'substring' ? buildSubstringMatchPlan(rule.keywords) : rule.pattern);
       }
     }
   }
@@ -106,7 +107,7 @@ export class ManagedRuleEngine implements HookEvaluator {
         const started = performance.now();
         const limitMs = Math.min(remaining, this.regexTimeoutMs);
         try {
-          const matched = await this.regex.test(this.patternSources.get(rule)!, text, limitMs, durationMs => {
+          const matched = await this.regex.test(this.patternPlans.get(rule)!, text, limitMs, durationMs => {
             if (durationMs >= MANAGED_REGEX_SLOW_MS) reportInterceptorDiagnostic(this.opts.onDiagnostic, {
               code: 'regex_slow', source: 'regex', reason: 'regular expression execution exceeded slow threshold',
               ruleId: rule.id, ruleVersion: rule.version, durationMs, limitMs: MANAGED_REGEX_SLOW_MS,

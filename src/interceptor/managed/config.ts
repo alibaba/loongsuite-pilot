@@ -248,14 +248,41 @@ export function compileManagedRegex(pattern: string, where = 'pattern'): RegExp 
   }
 }
 
-/** No Unicode flag: matching preserves String.includes UTF-16 code-unit semantics. */
-export function substringRegexSource(keywords: readonly string[]): string {
-  if (keywords.length === 0) return '[]';
-  return keywords.map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+/** An execution bound, not a limit on accepted keyword lists. */
+export const SUBSTRING_REGEX_CHUNK_CHARS = 2000;
+export interface SubstringMatchPlan {
+  kind: 'substring';
+  steps: ({ kind: 'regex'; source: string } | { kind: 'literal'; text: string })[];
+}
+
+/** Keep each native regex small; expanded single terms use a literal Worker scan. */
+export function buildSubstringMatchPlan(keywords: readonly string[]): SubstringMatchPlan {
+  const steps: SubstringMatchPlan['steps'] = [];
+  let sources: string[] = [];
+  let chars = 0;
+  const flush = () => {
+    if (sources.length) steps.push({ kind: 'regex', source: sources.join('|') });
+    sources = [];
+    chars = 0;
+  };
+  for (const keyword of keywords) {
+    const source = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (source.length > SUBSTRING_REGEX_CHUNK_CHARS) {
+      flush();
+      steps.push({ kind: 'literal', text: keyword });
+      continue;
+    }
+    const added = source.length + (sources.length ? 1 : 0);
+    if (chars + added > SUBSTRING_REGEX_CHUNK_CHARS) flush();
+    chars += source.length + (sources.length ? 1 : 0);
+    sources.push(source);
+  }
+  flush();
+  return { kind: 'substring', steps };
 }
 
 export function patternRuleMatches(rule: ManagedPatternRule, text: string): boolean {
-  if (rule.match === 'substring') return new RegExp(substringRegexSource(rule.keywords)).test(text);
+  if (rule.match === 'substring') return rule.keywords.some(keyword => text.includes(keyword));
   return compileManagedRegex(rule.pattern).test(text);
 }
 

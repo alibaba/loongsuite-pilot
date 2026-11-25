@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parseManagedInterceptorConfig, type ManagedRule } from '../../../src/interceptor/managed/config.js';
+import { parseManagedInterceptorConfig, buildSubstringMatchPlan, type ManagedRule } from '../../../src/interceptor/managed/config.js';
 import { ManagedRuleEngine } from '../../../src/interceptor/managed/engine.js';
 import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError } from '../../../src/interceptor/managed/regex-runner.js';
 import type { HookRequest } from '../../../src/interceptor/types.js';
@@ -135,6 +135,16 @@ describe('managed action', () => {
       expect(result.matches!.map(match => match.ruleId)).toEqual(['audit']);
     },
   );
+
+  it('gives a multi-chunk substring rule one Worker job and one budget, preserving earlier audits on timeout', async () => {
+    const keywords = ['a'.repeat(2000), 'b'.repeat(2000), '.*'.repeat(1000)];
+    const test = vi.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(new ManagedRegexTimeoutError());
+    const result = await engine([pattern('audit', 'log'), { ...pattern('chunks'), keywords }], { regex: { test } }).evaluate(request);
+    expect(result).toMatchObject({ action: 'allow', failOpen: true, ruleId: 'audit', evaluatedRules: ['audit', 'chunks'] });
+    expect(test).toHaveBeenCalledTimes(2);
+    expect(test.mock.calls[1]).toEqual([buildSubstringMatchPlan(keywords), 'MATCH', 200, expect.any(Function)]);
+    expect(result.matches!.map(match => match.ruleId)).toEqual(['audit']);
+  });
 
   it('retains audit matches after a later script timeout or rejected runner', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'action-'));

@@ -86,6 +86,18 @@ describe('managed regex matching thread', () => {
     }
   });
 
+  it('times out a whole structured plan as one job and recovers for the next plan', async () => {
+    const instance = runner();
+    const text = `${'a'.repeat(32)}!`;
+    const plan = { kind: 'substring' as const, steps: [
+      { kind: 'regex' as const, source: 'absent' },
+      { kind: 'regex' as const, source: '(a+)+$' },
+      { kind: 'literal' as const, text },
+    ] };
+    await expect(instance.test(plan, text, 150)).rejects.toBeInstanceOf(ManagedRegexTimeoutError);
+    await expect(instance.test({ kind: 'substring', steps: [{ kind: 'literal', text }] }, text)).resolves.toBe(true);
+  });
+
   it('rejects a queued match whose deadline elapsed during a slow match', async () => {
     const instance = runner();
     const slow = expect(instance.test('(a+)+$', `${'a'.repeat(32)}!`, 150))
