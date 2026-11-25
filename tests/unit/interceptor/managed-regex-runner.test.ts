@@ -1,6 +1,8 @@
 import type { Worker } from 'node:worker_threads';
+import { createContext, runInContext } from 'node:vm';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError } from '../../../src/interceptor/managed/regex-runner.js';
+import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError, REGEX_WORKER_SOURCE,
+  REGEX_CACHE_MAX_ENTRIES, REGEX_CACHE_MAX_SOURCE_CHARS } from '../../../src/interceptor/managed/regex-runner.js';
 
 const { terminationWarning } = vi.hoisted(() => ({ terminationWarning: vi.fn() }));
 vi.mock('../../../src/utils/logger.js', () => ({
@@ -20,6 +22,38 @@ afterEach(() => {
 });
 
 describe('managed regex matching thread', () => {
+  it('bounds the Worker cache by entries and source characters, reuses sources, and leaves oversized sources uncached', () => {
+    let dispatch!: (job: unknown) => void;
+    const replies: { matched: boolean }[] = [];
+    const compile = vi.fn(function (source: string) { return new RegExp(source); });
+    const context = createContext({ RegExp: compile, performance,
+      require: () => ({ parentPort: { on: (_event: string, listener: typeof dispatch) => { dispatch = listener; },
+        postMessage: (reply: { matched: boolean }) => replies.push(reply) } }) });
+    runInContext(REGEX_WORKER_SOURCE, context);
+    let id = 0;
+    const match = (pattern: string, text = pattern) => { dispatch({ id: ++id, pattern, text }); return replies.at(-1)!.matched; };
+    expect(match('first')).toBe(true);
+    expect(match('first', 'miss')).toBe(false);
+    expect(compile).toHaveBeenCalledTimes(1);
+    expect(match('replacement', 'first')).toBe(false);
+    expect(match('replacement')).toBe(true);
+    for (let index = 0; index < REGEX_CACHE_MAX_ENTRIES; index++) match(`item-${index}`);
+    expect(runInContext('cache.size', context)).toBe(REGEX_CACHE_MAX_ENTRIES);
+    const count = compile.mock.calls.length;
+    match('first');
+    expect(compile).toHaveBeenCalledTimes(count + 1);
+    // Empty alternatives keep native compilation cheap while exercising source budgets.
+    for (let index = 0; index < 4; index++) match('|'.repeat(REGEX_CACHE_MAX_SOURCE_CHARS / 3) + index, '');
+    expect(runInContext('sourceChars', context)).toBeLessThanOrEqual(REGEX_CACHE_MAX_SOURCE_CHARS);
+    expect(runInContext('cache.size', context)).toBeLessThan(REGEX_CACHE_MAX_ENTRIES);
+    const oversized = '|'.repeat(REGEX_CACHE_MAX_SOURCE_CHARS + 1);
+    const before = runInContext('[cache.size, sourceChars]', context);
+    match(oversized, '');
+    match(oversized, '');
+    expect(runInContext('[cache.size, sourceChars]', context)).toEqual(before);
+    expect(compile.mock.calls.filter(([source]) => source === oversized)).toHaveLength(2);
+  });
+
   it('reuses one thread for normal, invalid and subsequent successful matches', async () => {
     const instance = runner();
     await expect(instance.test('hello', 'hello')).resolves.toBe(true);

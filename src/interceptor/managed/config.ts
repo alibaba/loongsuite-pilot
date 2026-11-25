@@ -248,8 +248,14 @@ export function compileManagedRegex(pattern: string, where = 'pattern'): RegExp 
   }
 }
 
+/** No Unicode flag: matching preserves String.includes UTF-16 code-unit semantics. */
+export function substringRegexSource(keywords: readonly string[]): string {
+  if (keywords.length === 0) return '[]';
+  return keywords.map(keyword => keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+}
+
 export function patternRuleMatches(rule: ManagedPatternRule, text: string): boolean {
-  if (rule.match === 'substring') return rule.keywords.some(keyword => text.includes(keyword));
+  if (rule.match === 'substring') return new RegExp(substringRegexSource(rule.keywords)).test(text);
   return compileManagedRegex(rule.pattern).test(text);
 }
 

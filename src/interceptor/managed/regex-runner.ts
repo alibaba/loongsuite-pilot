@@ -7,12 +7,35 @@ const logger = createLogger('ManagedRegexRunner');
 export const MANAGED_REGEX_TIMEOUT_MS = 200;
 export const MANAGED_REGEX_SLOW_MS = 50;
 
-const REGEX_WORKER_SOURCE = `
+export const REGEX_CACHE_MAX_ENTRIES = 128;
+export const REGEX_CACHE_MAX_SOURCE_CHARS = 1024 * 1024;
+
+export const REGEX_WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
+const cache = new Map();
+let sourceChars = 0;
+function compiled(pattern) {
+  let regex = cache.get(pattern);
+  if (regex) {
+    cache.delete(pattern);
+    cache.set(pattern, regex);
+    return regex;
+  }
+  regex = new RegExp(pattern);
+  if (pattern.length > ${REGEX_CACHE_MAX_SOURCE_CHARS}) return regex;
+  while (cache.size >= ${REGEX_CACHE_MAX_ENTRIES} || sourceChars + pattern.length > ${REGEX_CACHE_MAX_SOURCE_CHARS}) {
+    const oldest = cache.keys().next().value;
+    sourceChars -= oldest.length;
+    cache.delete(oldest);
+  }
+  cache.set(pattern, regex);
+  sourceChars += pattern.length;
+  return regex;
+}
 parentPort.on('message', (job) => {
   try {
     const started = performance.now();
-    const matched = new RegExp(job.pattern).test(job.text);
+    const matched = compiled(job.pattern).test(job.text);
     parentPort.postMessage({ id: job.id, matched, executionMs: performance.now() - started });
   } catch (err) {
     parentPort.postMessage({ id: job.id, error: err instanceof Error ? err.message : String(err) });

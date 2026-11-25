@@ -11,6 +11,7 @@ import {
 } from '../types.js';
 import {
   PATTERN_BLOCKED_REASON,
+  substringRegexSource,
   type ManagedInterceptorConfig,
   type ManagedPatternRule,
   type ManagedScriptRule,
@@ -52,11 +53,17 @@ export class ManagedRuleEngine implements HookEvaluator {
   private readonly scriptsById: ReadonlyMap<string, ResolvedScriptRule>;
   private readonly regex: ManagedRegexRunner;
   private readonly regexTimeoutMs: number;
+  private readonly patternSources = new Map<ManagedPatternRule, string>();
 
   constructor(private readonly opts: ManagedRuleEngineOptions) {
     this.scriptsById = new Map(opts.rules.map(resolved => [resolved.rule.id, resolved]));
     this.regexTimeoutMs = opts.regexTimeoutMs ?? MANAGED_REGEX_TIMEOUT_MS;
     this.regex = opts.regex ?? new ManagedRegexRunner(this.regexTimeoutMs);
+    for (const rule of opts.config.rules) {
+      if (rule.kind === 'pattern') {
+        this.patternSources.set(rule, rule.match === 'substring' ? substringRegexSource(rule.keywords) : rule.pattern);
+      }
+    }
   }
 
   async evaluate(request: HookRequest): Promise<EvaluateHookResponse> {
@@ -91,25 +98,6 @@ export class ManagedRuleEngine implements HookEvaluator {
       if (rule.kind === 'pattern') {
         evaluatedRules.push(rule.id);
         const text = requestText();
-        if (rule.match === 'substring') {
-          let matched = false;
-          for (const keyword of rule.keywords) {
-            if (Date.now() >= deadline) {
-              failed = true;
-              return result();
-            }
-            matched = text.includes(keyword);
-            // A scan may consume the remaining budget, including the final scan.
-            if (Date.now() >= deadline) {
-              failed = true;
-              return result();
-            }
-            if (matched) break;
-          }
-          if (!matched) continue;
-          if (hit(rule, PATTERN_BLOCKED_REASON)) return result(true);
-          continue;
-        }
         const remaining = deadline - Date.now();
         if (remaining <= 0) {
           failed = true;
@@ -118,12 +106,17 @@ export class ManagedRuleEngine implements HookEvaluator {
         const started = performance.now();
         const limitMs = Math.min(remaining, this.regexTimeoutMs);
         try {
-          const matched = await this.regex.test(rule.pattern, text, limitMs, durationMs => {
+          const matched = await this.regex.test(this.patternSources.get(rule)!, text, limitMs, durationMs => {
             if (durationMs >= MANAGED_REGEX_SLOW_MS) reportInterceptorDiagnostic(this.opts.onDiagnostic, {
               code: 'regex_slow', source: 'regex', reason: 'regular expression execution exceeded slow threshold',
               ruleId: rule.id, ruleVersion: rule.version, durationMs, limitMs: MANAGED_REGEX_SLOW_MS,
             });
           });
+          // A queued result can arrive after the shared request deadline.
+          if (Date.now() >= deadline) {
+            failed = true;
+            return result();
+          }
           if (!matched) continue;
           if (hit(rule, PATTERN_BLOCKED_REASON)) return result(true);
           continue;

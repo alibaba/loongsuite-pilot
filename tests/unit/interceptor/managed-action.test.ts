@@ -4,11 +4,14 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseManagedInterceptorConfig, type ManagedRule } from '../../../src/interceptor/managed/config.js';
 import { ManagedRuleEngine } from '../../../src/interceptor/managed/engine.js';
+import { ManagedRegexRunner, ManagedRegexCancelledError, ManagedRegexTimeoutError } from '../../../src/interceptor/managed/regex-runner.js';
 import type { HookRequest } from '../../../src/interceptor/types.js';
 
 const dirs: string[] = [];
+const runners: ManagedRegexRunner[] = [];
 afterEach(async () => {
   vi.restoreAllMocks();
+  for (const runner of runners.splice(0)) runner.stop();
   await Promise.all(dirs.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
 });
 const request: HookRequest = { agent: 'qoder', event: 'PreToolUse', prompt: 'MATCH', raw: {} };
@@ -16,7 +19,9 @@ const base = { version: '1', agents: ['qoder'], events: ['PreToolUse'] };
 const pattern = (id: string, action?: string) => ({ ...base, kind: 'pattern', id, match: 'substring', keywords: ['MATCH'],
   ...(action === undefined ? {} : { action }), title: id, message: `reminder ${id}` });
 function engine(rules: unknown[], options: Record<string, unknown> = {}): ManagedRuleEngine {
-  return new ManagedRuleEngine({ config: parseManagedInterceptorConfig({ interceptor: { rules } }), rules: [], runners: {}, ...options });
+  const regex = new ManagedRegexRunner();
+  runners.push(regex);
+  return new ManagedRuleEngine({ config: parseManagedInterceptorConfig({ interceptor: { rules } }), rules: [], runners: {}, regex, ...options });
 }
 
 describe('managed action', () => {
@@ -81,40 +86,55 @@ describe('managed action', () => {
   });
 
   it('retains audit matches when the shared budget expires before another substring rule', async () => {
-    const evaluator = engine([pattern('first', 'log'), pattern('second', 'log')], { budgetMs: 10 });
-    // Deadline, first rule, first keyword before/after scan; next rule is expired.
-    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0)
-      .mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(11);
+    let now = 0;
+    const test = vi.fn(async () => { now = 9; return true; });
+    const evaluator = engine([pattern('first', 'log'), pattern('second', 'log')], { budgetMs: 10, regex: { test } });
+    vi.spyOn(Date, 'now').mockImplementation(() => now++);
+    // Expire just after an accepted audit result, before entering the next rule.
     const result = await evaluator.evaluate(request);
     expect(result).toMatchObject({ action: 'allow', matched: true, failOpen: true,
       ruleId: 'first', evaluatedRules: ['first'] });
     expect(result.matches).toHaveLength(1);
   });
 
-  it.each([false, true])('stops within a keyword list when the budget expires (prior audit=%s)', async priorAudit => {
+  it.each([false, true])('discards an expired Worker result and preserves earlier audits (prior audit=%s)', async priorAudit => {
+    let now = 0;
+    const test = vi.fn(async () => { now = 10; return true; });
+    if (priorAudit) test.mockImplementationOnce(async () => true);
     const evaluator = engine([
       ...(priorAudit ? [pattern('audit', 'log')] : []),
       { ...pattern('list'), keywords: ['absent', 'MATCH'] },
       pattern('unreached'),
-    ], { budgetMs: 10 });
-    // Allow the audit, rule entry and first scan, then expire before the matching keyword.
-    const clock = vi.spyOn(Date, 'now');
-    for (let i = 0; i < (priorAudit ? 7 : 4); i++) clock.mockReturnValueOnce(0);
-    clock.mockReturnValue(10);
+    ], { budgetMs: 10, regex: { test } });
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     const result = await evaluator.evaluate(request);
     expect(result).toMatchObject({ action: 'allow', failOpen: true,
       evaluatedRules: priorAudit ? ['audit', 'list'] : ['list'] });
     expect(result.matches!.map(match => match.ruleId)).toEqual(priorAudit ? ['audit'] : []);
     if (priorAudit) expect(result).toMatchObject({ matched: true, ruleId: 'audit' });
     else expect(result).not.toHaveProperty('matched');
+    expect(test).toHaveBeenCalledTimes(priorAudit ? 2 : 1);
   });
 
-  it.each(['MATCH', 'absent'])('fails open when the final keyword scan exhausts the budget (%s)', async keyword => {
-    const evaluator = engine([{ ...pattern('list'), keywords: [keyword] }, pattern('unreached')], { budgetMs: 10 });
-    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(10);
+  it.each([true, false])('fails open when a Worker result arrives after the deadline (matched=%s)', async matched => {
+    let now = 0;
+    const test = vi.fn(async () => { now = 10; return matched; });
+    const evaluator = engine([pattern('list'), pattern('unreached')], { budgetMs: 10, regex: { test } });
+    vi.spyOn(Date, 'now').mockImplementation(() => now);
     const result = await evaluator.evaluate(request);
     expect(result).toEqual({ action: 'allow', failOpen: true, matches: [], evaluatedRules: ['list'] });
+    expect(test).toHaveBeenCalledOnce();
   });
+
+  it.each([new ManagedRegexTimeoutError(), new ManagedRegexCancelledError(), new Error('compile failed')])(
+    'preserves audit matches and fails open after a substring Worker error: %s', async error => {
+      const test = vi.fn().mockResolvedValueOnce(true).mockRejectedValueOnce(error).mockResolvedValueOnce(false);
+      const result = await engine([pattern('audit', 'log'), pattern('broken'), pattern('after')], { regex: { test } }).evaluate(request);
+      expect(result).toMatchObject({ action: 'allow', matched: true, failOpen: true, ruleId: 'audit',
+        evaluatedRules: ['audit', 'broken', 'after'] });
+      expect(result.matches!.map(match => match.ruleId)).toEqual(['audit']);
+    },
+  );
 
   it('retains audit matches after a later script timeout or rejected runner', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'action-'));
