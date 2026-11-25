@@ -2111,6 +2111,94 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(toolResult['gen_ai.tool.call.duration']).toBe(2037);
   });
 
+  it.each([
+    { name: 'native tool execution before the planner metadata is finalized', start: 2, end: 3, resultIndex: 2, expectedStart: 2, expectedEnd: 3, measured: 1000 },
+    { name: 'a tool result already consumed by the next planner', start: 5, end: 13, resultIndex: 2, expectedStart: 5, expectedEnd: 8 },
+    { name: 'a tool with no completion timestamp and a consuming planner', start: 4, resultIndex: 2, expectedStart: 4, expectedEnd: 8 },
+    { name: 'a tool result delivered across collection cycles', start: 5, end: 13, resultIndex: 2, expectedStart: 4, expectedEnd: 8, pending: true },
+    { name: 'a background tool result after the next planner step', start: 5, end: 13, resultIndex: 4, expectedStart: 5, expectedEnd: 13, measured: 8000 },
+  ])('preserves causal Antigravity tool timing for $name', async (testCase) => {
+    const root = path.join(tmpDir, 'tool-timing');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'timing', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const baseSec = 1_778_005_100;
+    const callId = 'call-timing';
+    const turn = protoStringField(12, '492c6b8f-0aff-4686-a5a2-d98e74089426');
+    const ts = (offset: number) => new Date((baseSec + offset) * 1000).toISOString();
+    const nativeTime = (field: number, offset: number) => protoBytesField(field, protoTimestamp(baseSec + offset));
+    const usage = (index: number, end: number) => encodeGeneratorMetadata({
+      model: 'Gemini 4 Neon',
+      usage: { inputTokens: 10, totalOutputTokens: 5, responseId: `response-${index}` },
+      timestampSec: baseSec + end,
+      stepIndices: [index],
+    });
+    createConversationDb(path.join(convDir, 'timing.db'), {
+      genRows: [[0, usage(1, 4)], [1, usage(3, 11)]],
+      stepRows: [
+        [0, concatBytes(turn, nativeTime(1, 0))],
+        [1, concatBytes(turn, nativeTime(1, 1), nativeTime(8, 4))],
+        [3, concatBytes(turn, nativeTime(1, 8), nativeTime(8, 11))],
+        [testCase.resultIndex, concatBytes(
+          turn, nativeTime(1, testCase.start), nativeTime(32, testCase.start),
+          ...(testCase.end === undefined ? [] : [nativeTime(8, testCase.end)]),
+          protoBytesField(4, concatBytes(protoStringField(1, callId), protoStringField(2, 'run_command'))),
+        )],
+      ],
+    });
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const first = [
+      { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: ts(0), content: 'Check the workspace.' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: ts(1), tool_calls: [{ id: callId, name: 'run_command', args: { CommandLine: 'pwd' } }] },
+    ];
+    const followup = [
+      { step_index: testCase.resultIndex, type: 'GENERIC', status: 'DONE', created_at: ts(testCase.start), content: 'Tool output' },
+      { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: ts(8), content: 'Done.' },
+    ].sort((a, b) => a.step_index - b.step_index);
+    const lines = (steps: object[]) => steps.map(step => JSON.stringify(step)).join('\n') + '\n';
+    await fs.writeFile(transcriptPath, lines(testCase.pending ? first : [...first, ...followup]));
+
+    const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const { flusher, spans } = captureTraceSpans();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    try {
+      await input.start();
+      await input.stop();
+      await flusher.sendBatch(entries);
+      if (testCase.pending) {
+        expect(entries.some(entry => entry['event.name'] === 'tool.result')).toBe(false);
+        const offset = entries.length;
+        await fs.appendFile(transcriptPath, lines(followup));
+        await input.start();
+        await input.stop();
+        await flusher.sendBatch(entries.slice(offset));
+      }
+      await flusher.flush();
+    } finally {
+      await input.stop();
+      await flusher.shutdown();
+    }
+
+    const actual = entries.filter(entry => entry['gen_ai.tool.call.id'] === callId);
+    expect(actual.map(entry => [entry['event.name'], entry.time_unix_nano])).toEqual([
+      ['tool.call', `${BigInt(baseSec + testCase.expectedStart) * 1_000_000_000n}`],
+      ['tool.result', `${BigInt(baseSec + testCase.expectedEnd) * 1_000_000_000n}`],
+    ]);
+    expect(actual[1]?.['gen_ai.tool.call.duration']).toBe(testCase.measured);
+    const tool = spans.find(span => span.attributes['gen_ai.tool.call.id'] === callId);
+    expect(tool?.startTime).toEqual([baseSec + testCase.expectedStart, 0]);
+    expect(tool?.endTime).toEqual([baseSec + testCase.expectedEnd, 0]);
+    const model = spans.find(span => span.attributes['gen_ai.response.id'] === 'response-3');
+    expect(model?.startTime).toEqual([baseSec + 8, 0]);
+    const steps = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(steps.map(span => span.endTime).sort((a, b) => a[0] - b[0])).toEqual(
+      [Math.max(4, testCase.expectedEnd), 11].sort((a, b) => a - b).map(second => [baseSec + second, 0]),
+    );
+  });
+
   it('rejects bare file://, root /, Windows drive roots, and remote UNC URIs and prioritizes native workspace fields', () => {
     const bareFile = protoStringField(1, 'file://');
     const rootFile = protoStringField(1, 'file:///');

@@ -142,6 +142,11 @@ The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
 validation against a real WorkBuddy transcript.
 
+Antigravity tool timing prefers the native SQLite execution start. When the next
+model call in the same turn consumes a matched tool result, its request start can
+bound the tool span end if the recorded completion is missing or inconsistent.
+Pilot omits `gen_ai.tool.call.duration` when it uses that bound.
+
 Codex collection is transcript-backed. Pilot uses the lightweight
 `SessionStart` and `UserPromptSubmit` hooks to discover the effective
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails

@@ -124,6 +124,24 @@ function plannerFinishReason(step: AntigravityTranscriptStep | undefined): 'canc
   return step?.toolCalls.length ? 'tool_call' : 'stop';
 }
 
+function resolveLlmTiming(
+  usage: AntigravityUsageEvent,
+  stepInfo: AntigravityStepInfo | undefined,
+  isRetry: boolean,
+): { requestMs: number; responseMs: number; durationMs: number } {
+  const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
+  const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
+  // Retry records carry their own completion time. For a primary call, SQLite
+  // step completion can lag the usage record or be a stale creation timestamp.
+  const completionMs = isRetry ? usage.timestampMs : Math.max(stepInfo?.completedAtMs ?? 0, usage.timestampMs);
+  const nativeStartMs = stepInfo?.createdAtMs;
+  const requestMs = !isRetry && nativeStartMs !== undefined && nativeStartMs < completionMs
+    ? nativeStartMs
+    : Math.max(1, completionMs - Math.max(1, durationMs));
+  const responseMs = completionMs > requestMs ? completionMs : requestMs + Math.max(1, durationMs);
+  return { requestMs, responseMs, durationMs };
+}
+
 function preferredUsageIdentity(usage: AntigravityUsageEvent): string | undefined {
   for (const prefix of NATIVE_ID_PREFIXES) {
     const identity = usage.identities.find((id) => id.startsWith(prefix));
@@ -1031,6 +1049,7 @@ export class AntigravityInput extends BaseInput {
     // - latestFollowupStepIndex & latestCompletedStepIndex (so stuck/backgrounded RUNNING steps
     //   never stall later completed steps or get permanently dropped)
     const prevPlannerByStepIndex = new Map<number, AntigravityTranscriptStep | undefined>();
+    const nextPlannerByStepIndex = new Map<number, AntigravityTranscriptStep>();
     const stepPositionByIndex = new Map<number, number>();
     const turnPromptStepSet = new Set<number>();
     const turnGroups: Array<{ startStep: number; steps: number[] }> = [];
@@ -1092,6 +1111,7 @@ export class AntigravityInput extends BaseInput {
           }
         } else {
           if (step.type === 'PLANNER_RESPONSE') {
+            if (lastPlanner) nextPlannerByStepIndex.set(lastPlanner.stepIndex, step);
             lastPlanner = step;
             currentGroupHasPlanner = true;
             if (step.stepIndex > latestFollowupStepIndex) {
@@ -1429,10 +1449,11 @@ export class AntigravityInput extends BaseInput {
       return true;
     };
 
-    // Precompute per-turn primary provider and per-step LLM completion timestamp
-    // from SQLite usage events (excluding context-compaction CHECKPOINT steps).
+    // Precompute the LLM boundaries for matching tool calls and results.
+    // Context-compaction CHECKPOINT records are outside the planner interaction.
     const turnProviderMap = new Map<string, string>();
     const stepCompletionMsMap = new Map<number, number>();
+    const stepRequestMsMap = new Map<number, number>();
     if (snapshot) {
       for (const usage of snapshot.events) {
         if (usage.isRetry || this.isCompactionOnlyUsage(usage, transcript)) continue;
@@ -1440,8 +1461,8 @@ export class AntigravityInput extends BaseInput {
         const primaryIdx = linkedStep?.stepIndex ?? usage.stepIndices[0];
         if (linkedStep) {
           const info = stepInfos.get(linkedStep.stepIndex);
-          const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
-          const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
+          const { requestMs, durationMs } = resolveLlmTiming(usage, info, false);
+          if (!stepRequestMsMap.has(linkedStep.stepIndex)) stepRequestMsMap.set(linkedStep.stepIndex, requestMs);
           let completedMs = Math.max(info?.completedAtMs ?? 0, usage.timestampMs);
           if (info?.createdAtMs !== undefined && completedMs <= info.createdAtMs) {
             completedMs = info.createdAtMs + Math.max(1, durationMs || 1);
@@ -1464,6 +1485,30 @@ export class AntigravityInput extends BaseInput {
       }
     }
 
+    const resolveToolResultTiming = (
+      callMs: number,
+      plannerIndex: number,
+      turnId: string,
+      result: AntigravityTranscriptStep,
+      resultInfo: AntigravityStepInfo | undefined,
+    ): { resultMs: number; durationMs?: number } => {
+      const recordedEndMs = resultInfo?.completedAtMs ?? result.createdAtMs;
+      const nextPlanner = nextPlannerByStepIndex.get(plannerIndex);
+      if (nextPlanner && result.stepIndex < nextPlanner.stepIndex && resolveTurnForStep(nextPlanner.stepIndex) === turnId) {
+        const nextRequestMs = stepRequestMsMap.get(nextPlanner.stepIndex)
+          ?? stepInfos.get(nextPlanner.stepIndex)?.createdAtMs;
+        if (nextRequestMs !== undefined && nextRequestMs > callMs &&
+            (recordedEndMs === undefined || recordedEndMs <= callMs || recordedEndMs > nextRequestMs)) {
+          // buildInputMessagesDelta includes this earlier, matched result in
+          // the next planner's input. Its request is an upper bound on when
+          // the result was available, not a measured command duration.
+          return { resultMs: nextRequestMs };
+        }
+      }
+      const resultMs = Math.max(callMs, recordedEndMs ?? callMs);
+      return { resultMs, durationMs: resultMs > callMs ? resultMs - callMs : undefined };
+    };
+
     // 1) Drain any pending tool calls from previous poll cycles whose tool results have now landed
     const remainingPending: PendingToolCall[] = [];
     for (const pending of prevCursor.pendingToolCalls) {
@@ -1483,10 +1528,9 @@ export class AntigravityInput extends BaseInput {
           resultInfo?.createdAtMs ??
           resultStep.createdAtMs ??
           Date.now();
-        const rawResultTsMs =
-          resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? effectiveCallTsMs;
-        const resultTsMs = Math.max(effectiveCallTsMs, rawResultTsMs);
-        const durationMs = resultTsMs - effectiveCallTsMs;
+        const { resultMs: resultTsMs, durationMs } = resolveToolResultTiming(
+          effectiveCallTsMs, pending.plannerStepIndex, pending.turnId, resultStep, resultInfo,
+        );
         const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
         let resultPayload: JsonValue = resultStep.content ?? null;
         if (resultMediaParts.length > 0) {
@@ -1531,7 +1575,7 @@ export class AntigravityInput extends BaseInput {
                   : 'antigravity.tool_failed',
               }
             : {}),
-          ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
+          ...(durationMs !== undefined ? { 'gen_ai.tool.call.duration': durationMs } : {}),
           time_unix_nano: toUnixNanoString(resultTsMs),
         });
         if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
@@ -1609,11 +1653,14 @@ export class AntigravityInput extends BaseInput {
             const callId = resolveToolCallId(step.stepIndex, i, tc.id);
             const toolSpanId = hashEventId([sessionId, turnId, stepId, callId, 'tool'], 16);
 
-            // Prefer native tool execution start time (steps.metadata field 32)
-            const callTsMs = Math.max(
-              plannerCompletedMs,
-              resultInfo?.executionStartedAtMs ?? plannerCompletedMs,
-            );
+            // The native execution start can precede planner finalization.
+            // Trust it within this planner's execution, and use completion as
+            // a fallback only when there is no usable execution timestamp.
+            const nativeStartMs = resultInfo?.executionStartedAtMs;
+            const plannerRequestMs = stepRequestMsMap.get(step.stepIndex);
+            const callTsMs = nativeStartMs !== undefined &&
+              (plannerRequestMs === undefined || nativeStartMs >= plannerRequestMs)
+              ? nativeStartMs : plannerCompletedMs;
 
             const callEntry = buildAgentActivityEntry({
               'event.id': hashEventId([sessionId, turnId, stepId, callId, 'tool.call'], 32),
@@ -1636,10 +1683,9 @@ export class AntigravityInput extends BaseInput {
             entries.push(callEntry);
 
             if (resultStep && !isToolStepStillActive(resultStep, resultInfo)) {
-              const rawResultTsMs =
-                resultInfo?.completedAtMs ?? resultStep.createdAtMs ?? callTsMs;
-              const resultTsMs = Math.max(callTsMs, rawResultTsMs);
-              const durationMs = resultTsMs - callTsMs;
+              const { resultMs: resultTsMs, durationMs } = resolveToolResultTiming(
+                callTsMs, step.stepIndex, turnId, resultStep, resultInfo,
+              );
               const resultMediaParts = await getStepMedia(resultStep, resultTsMs, 'input');
               let resultPayload: JsonValue = resultStep.content ?? null;
               if (resultMediaParts.length > 0) {
@@ -1673,7 +1719,7 @@ export class AntigravityInput extends BaseInput {
                         : 'antigravity.tool_failed',
                     }
                   : {}),
-                ...(durationMs > 0 ? { 'gen_ai.tool.call.duration': durationMs } : {}),
+                ...(durationMs !== undefined ? { 'gen_ai.tool.call.duration': durationMs } : {}),
                 time_unix_nano: toUnixNanoString(resultTsMs),
               });
               if (resultMediaParts.length > 0) attachMultimodalMetadataForEntry(resultEntry);
@@ -1810,29 +1856,7 @@ export class AntigravityInput extends BaseInput {
         const totalOutputTokens = usage.totalOutputTokens;
         const totalTokens = totalInputTokens + totalOutputTokens;
 
-        // gen_metadata field 9.4 (and steps.metadata field 8) is generation completion time.
-        // For retries, keep the retry's own timestamp/duration instead of reusing parent step bounds.
-        // For primary calls, take max(steps.completedAtMs, usage.timestampMs) to avoid stale
-        // completedAtMs === createdAtMs snapshots, and guarantee >= +1ms non-zero span duration
-        // (surviving otel-util-genai readNanoMs millisecond truncation).
-        const durationNs = (usage.ttftNs ?? 0) + (usage.streamDurationNs ?? 0);
-        const durationMs = durationNs > 0 ? Math.max(1, Math.round(durationNs / 1_000_000)) : 0;
-        let respTsMs = isRetryUsage
-          ? usage.timestampMs
-          : Math.max(linkedStepInfo?.completedAtMs ?? 0, usage.timestampMs);
-        // Derive request start at least 1ms before completion when duration is absent,
-        // keeping respTsMs anchored at the true completion timestamp (and >= +1ms span duration
-        // so otel-util-genai readNanoMs never truncates to 0ms).
-        const derivedReqTsMs = Math.max(1, respTsMs - Math.max(1, durationMs || 1));
-        const reqTsMs =
-          !isRetryUsage &&
-          linkedStepInfo?.createdAtMs !== undefined &&
-          linkedStepInfo.createdAtMs < respTsMs
-            ? linkedStepInfo.createdAtMs
-            : derivedReqTsMs;
-        if (respTsMs <= reqTsMs) {
-          respTsMs = reqTsMs + Math.max(1, durationMs || 1);
-        }
+        const { requestMs: reqTsMs, responseMs: respTsMs } = resolveLlmTiming(usage, linkedStepInfo, isRetryUsage);
         const reqTimeNano = BigInt(Math.floor(reqTsMs)) * 1_000_000n;
         const respTimeNano = BigInt(Math.floor(respTsMs)) * 1_000_000n;
 

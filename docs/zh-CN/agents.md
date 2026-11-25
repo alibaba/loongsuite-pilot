@@ -120,6 +120,10 @@ Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失
 Windows 验证使用安装后的 Pilot 产物，在 `PATH` 中没有 Node 的情况下从安装器固定的
 `node-bin` 解析 Node，并用真实 WorkBuddy transcript 通过严格 JSONL 校验。
 
+Antigravity 优先使用 SQLite 记录的工具执行起点。同一轮次的下一次模型调用已使用匹配的
+工具结果时，如果记录的工具结束时间缺失或与调用顺序不一致，Pilot 可以用该模型请求的
+起点作为工具 Span 结束时间的上界，并省略 `gen_ai.tool.call.duration`。
+
 Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `SessionStart` 和 `UserPromptSubmit` Hook 发现当前实际生效的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
