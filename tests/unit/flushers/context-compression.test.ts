@@ -17,13 +17,21 @@ function event(name: string, offset: number, extra = {}) {
   return buildAgentActivityEntry({ ...base, 'event.name': name, 'event.id': `${name}-${offset}`,
     time_unix_nano: String(BigInt(start + offset) * 1_000_000n), ...extra });
 }
-async function flush(records: AgentActivityEntry[], captureMessageContent = true) {
+async function flush(records: AgentActivityEntry[], captureMessageContent = true, splitAt?: number) {
   const spans: ReadableSpan[] = [];
   const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'compression-test',
     captureMessageContent, protocol: 'http/protobuf',
     endpoints: [{ endpoint: 'http://localhost:4318/v1/traces' }] }, undefined,
   () => ({ export(batch, done) { spans.push(...batch); done({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }));
-  try { await flusher.sendBatch(records); await flusher.flush(); return spans; }
+  try {
+    if (splitAt !== undefined) {
+      await flusher.sendBatch(records.slice(0, splitAt));
+      expect(spans).toHaveLength(0);
+    }
+    await flusher.sendBatch(records.slice(splitAt ?? 0));
+    await flusher.flush();
+    return spans;
+  }
   finally { await flusher.shutdown(); }
 }
 
@@ -204,7 +212,7 @@ describe('context compression through the real flusher and SDK', () => {
     }
   });
 
-  it('numbers OpenClaw ReAct steps across an internal summary request and suppresses stale input', async () => {
+  it('keeps the OpenClaw turn open across a compaction attempt and suppresses stale input', async () => {
     const agentType = { 'gen_ai.agent.type': 'openclaw' };
     const step = (ordinal: number) => ({ ...agentType, 'gen_ai.step.id': `run:model:${ordinal}`,
       'gen_ai.provider.name': 'qwen', 'gen_ai.request.model': 'qwen-plus' });
@@ -215,10 +223,12 @@ describe('context compression through the real flusher and SDK', () => {
       event('gen_ai.context.compress.start', 100, agentType),
       event('llm.request', 150, step(2)),
       event('gen_ai.context.compress', 1000, { ...agentType, 'gen_ai.context.compress.status': 'success' }),
+      event('other', 1001, { ...agentType, 'agent.openclaw.hook': 'llm_output', 'gen_ai.turn.end': false }),
       event('llm.request', 1100, { ...step(3), 'gen_ai.conversation.compacted': true,
         'gen_ai.context.content.availability': 'unavailable' }),
       event('llm.response', 1200, { ...step(3), 'gen_ai.response.id': 'after' }),
-    ]);
+      event('other', 1201, { ...agentType, 'agent.openclaw.hook': 'llm_output', 'gen_ai.turn.end': true }),
+    ], true, 6);
     const rounds = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
     expect(rounds.map(span => span.attributes['gen_ai.react.round'])).toEqual([1, 2]);
     const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');

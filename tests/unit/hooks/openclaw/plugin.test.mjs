@@ -107,8 +107,10 @@ it.each([true, false])('installs the native compaction branch for the next reque
   const handlers = registerPlugin(await loadPlugin(), { captureMessageContent });
   const ctx = { runId: 'run', sessionId: 's1', sessionKey: 'agent:main:compact' };
   const file = path.join(tmpDir, 'session.jsonl');
+  await handlers.before_agent_run({ prompt: 'old prompt' }, ctx);
   handlers.llm_input({ prompt: 'old prompt', historyMessages: [], model: 'qwen' }, ctx);
   handlers.model_call_started({ callId: 'before', model: 'qwen' }, ctx);
+  handlers.before_message_write({ message: { role: 'assistant', stopReason: 'toolUse', content: [] } }, ctx);
   handlers.before_compaction({ messageCount: 3 }, ctx);
   vi.advanceTimersByTime(3000);
   const entries = [
@@ -123,12 +125,22 @@ it.each([true, false])('installs the native compaction branch for the next reque
   const persist = () => fs.writeFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
   persist();
   handlers.after_compaction({ messageCount: 2, compactedCount: 0, sessionFile: file }, ctx);
+  handlers.agent_end({ success: true }, ctx);
+  handlers.llm_output({ assistantTexts: [] }, ctx);
+  await handlers.before_agent_run({ prompt: 'new input' }, ctx);
   entries.push({ type: 'message', id: 'next', parentId: 'native-cp',
     message: { role: 'user', content: 'new input' } });
   persist();
   handlers.model_call_started({ callId: 'after', model: 'qwen' }, ctx);
+  handlers.before_message_write({ message: { role: 'assistant', stopReason: 'stop', content: [] } }, ctx);
+  handlers.llm_output({ assistantTexts: ['complete'] }, ctx);
 
   const records = readOutputRecords();
+  const outputs = records.filter(record => record['agent.openclaw.hook'] === 'llm_output');
+  expect(outputs.map(record => record['gen_ai.turn.end'])).toEqual([false, true]);
+  const reentry = records.filter(record => record['agent.openclaw.hook'] === 'before_agent_run').at(-1);
+  expect(reentry['gen_ai.turn.start']).toBe(false);
+  expect(reentry['gen_ai.input.messages_delta']).toBeUndefined();
   const operation = records.find(record => record['event.name'] === 'gen_ai.context.compress');
   const after = records.filter(record => record['event.name'] === 'llm.request').at(-1);
   expect(operation).toMatchObject({

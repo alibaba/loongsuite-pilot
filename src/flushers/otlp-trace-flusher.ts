@@ -1354,7 +1354,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (entry['agent.openclaw.collection'] === 'cron-lifecycle-v1') {
         return entry['agent.openclaw.hook'] === 'cron_finished' && entry['gen_ai.turn.end'] === true;
       }
-      return entry['agent.openclaw.hook'] === 'llm_output'
+      return (entry['agent.openclaw.hook'] === 'llm_output' && entry['gen_ai.turn.end'] !== false)
         || (entry['agent.openclaw.compatibility'] === 'legacy'
           && (entry['agent.openclaw.hook'] === 'agent_end' || entry['agent.openclaw.hook'] === 'legacy_cleanup')
           && entry['gen_ai.turn.end'] === true);

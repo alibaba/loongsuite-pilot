@@ -870,6 +870,7 @@ function resetCompletedRunState(run) {
   run.pendingToolInputMessages.length = 0;
   run.persistedToolCallIds.clear();
   run.perCallUsage.clear();
+  run.lastAssistantFinishReason = undefined;
 }
 
 function reactivateRun(run, event, ctx) {
@@ -1408,12 +1409,13 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
+  const resumingCompactedTurn = !run.completed && run.turnStartEmitted && run.compactedContext?.replacementPending;
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "before_agent_run",
     "gen_ai.turn.start": !run.turnStartEmitted,
-    "gen_ai.input.messages_delta": run.userPromptText
+    "gen_ai.input.messages_delta": run.userPromptText && !resumingCompactedTurn
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
     "gen_ai.system_instructions": run.systemPrompt
@@ -1599,19 +1601,22 @@ function handleLlmOutput(event, ctx, userId, emit) {
 
   flushUnmatchedModelResponses(run, userId, emit);
 
-  // llm_output is a run-level aggregate in OpenClaw, not a single model call.
-  // Keep it as the explicit flush boundary and diagnostic checksum only. The
-  // canonical per-call tokens/output/finish reason are emitted exactly once by
-  // before_message_write, avoiding both final-span inflation and AGENT double
-  // counting.
+  // llm_output carries aggregate usage for an attempt. Per-call usage stays
+  // on the response emitted from before_message_write.
   const aggregate = normalizeUsage(event?.usage);
   const summed = sumCallUsage(run);
   const observedCalls = run.perCallUsage.size;
+  const pendingCompression = compressionStarts.get(run.sessionKey || run.sessionId);
+  // A context-overflow attempt can emit llm_output before the same run
+  // submits its first ordinary request on the installed context.
+  const awaitingCompactedRequest = (pendingCompression?.run === run || run.compactedContext?.replacementPending)
+    && !["stop", "cancelled"].includes(run.lastAssistantFinishReason);
 
   const record = {
     ...buildCommonFields(run, run.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "llm_output",
+    "gen_ai.turn.end": run.cronExecution ? undefined : !awaitingCompactedRequest,
     "agent.openclaw.aggregate_usage.input_tokens": aggregate.input,
     "agent.openclaw.aggregate_usage.output_tokens": aggregate.output,
     "agent.openclaw.aggregate_usage.cache_read_input_tokens": aggregate.cacheRead,
@@ -1628,7 +1633,7 @@ function handleLlmOutput(event, ctx, userId, emit) {
   };
   emit(record);
   persistCronContext(run);
-  completeRun(run);
+  if (!awaitingCompactedRequest) completeRun(run);
 }
 
 function handleBeforeToolCall(event, ctx, userId, emit) {
@@ -1922,6 +1927,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       || (message.usage && typeof message.usage === "object")
       || typeof message.responseId === "string";
     if (!rawOutputMessages && !hasTerminalMetadata) return;
+    run.lastAssistantFinishReason = finishReason;
     // The converter accumulates request deltas; it does not copy responses
     // into the next request. Persisted assistant messages are observed input
     // for the following model call, before the matching tool results.

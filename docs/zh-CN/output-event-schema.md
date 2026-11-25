@@ -343,6 +343,8 @@ DSH 使用已生效的 compact checkpoint ID，模型流开始时读取原生 `d
 两条路径都将原生摘要映射为 `CompactionPart`。成功替换后，完整快照覆盖旧的消息增量。
 快照缺失时省略压缩后的输入消息，防止旧历史被拼回。
 OpenClaw 的普通 ReAct 步骤按可配对的模型调用编号，压缩摘要请求仍由独立压缩 Span 表示。
+等待压缩后请求时，OpenClaw 将中间尝试的 `llm_output` 标为 `gen_ai.turn.end=false`，
+同一轮的续跑由最终 `llm_output` 收口。
 
 Codex 的 `gen_ai.context.retained_message_ids` 来自 native retained-source metadata。
 `agent.codex.context.sampled_through_sequence` 保留原生采样边界。
