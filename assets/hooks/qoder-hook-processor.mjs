@@ -715,7 +715,8 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
 function modelKey(value) {
   if (typeof value !== 'string' || value.length > 512) return undefined;
   const key = value.trim();
-  return key && key.toLowerCase() !== 'unknown' ? key : undefined;
+  const lower = key.toLowerCase();
+  return key && lower !== 'unknown' && lower !== 'custom_model' ? key : undefined;
 }
 
 function reportedAssistantModel(row) {

@@ -143,16 +143,22 @@ export function parseAttachedImagePaths(raw: string | null | undefined): string[
 }
 
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
-  const dbPaths = resolveAllQoderDbPaths();
-  if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
+  return readSqliteTokensFromCandidates(sessionId, resolveAllQoderDbPaths(), isIdeaDbPath);
+}
 
+/** Read each product's own candidates without mixing usage and model rows across DBs. */
+export async function readSqliteTokensFromCandidates(
+  sessionId: string,
+  dbPaths: readonly string[],
+  withRequestModels: (dbPath: string) => boolean,
+): Promise<SqliteTokenResult> {
   let modelOnly: SqliteTokenResult | undefined;
   for (const dbPath of dbPaths) {
     let rows: SqliteTokenRow[];
     try {
-      rows = isIdeaDbPath(dbPath)
+      rows = withRequestModels(dbPath)
         ? await readSqliteTokenRows(dbPath, sessionId, true).catch(error => {
-          // Older JetBrains clients may omit chat_record or its model metadata.
+          // Older clients may omit chat_record or its model metadata.
           logger.debug('sqlite request-model query failed', { sessionId, dbPath, error: String(error) });
           return readSqliteTokenRows(dbPath, sessionId, false);
         })
@@ -218,7 +224,7 @@ function readSqliteTokenRows(dbPath: string, sessionId: string, withRequestModel
     ), request_models AS (
       SELECT request_id, MIN(model) AS request_model
       FROM recorded_models
-      WHERE length(model) BETWEEN 1 AND 512 AND lower(model) != 'unknown'
+      WHERE length(model) BETWEEN 1 AND 512 AND lower(model) NOT IN ('unknown', 'custom_model')
       GROUP BY request_id
       HAVING COUNT(DISTINCT model) = 1
     )

@@ -319,7 +319,18 @@ interface ResponseGroup {
 function isMissingModel(value: unknown): boolean {
   if (typeof value !== 'string') return true;
   const key = value.trim().toLowerCase();
-  return !key || key === 'auto' || key === 'unknown';
+  return !key || key === 'auto' || key === 'unknown' || key === 'custom_model';
+}
+
+/** Older Hook history can contain the custom-model category in place of an ID. */
+export function discardQoderCustomModelPlaceholder(entry: AgentActivityEntry): void {
+  const isCustomPlaceholder = (value: unknown) =>
+    typeof value === 'string' && value.trim().toLowerCase() === 'custom_model';
+  if (isCustomPlaceholder(entry['gen_ai.request.model'])) {
+    delete entry['gen_ai.request.model'];
+    delete entry['agent.qoder.selected_request_model'];
+  }
+  if (isCustomPlaceholder(entry['gen_ai.response.model'])) delete entry['gen_ai.response.model'];
 }
 
 // The CLI's own request id, written by the hook from the transcript's usage

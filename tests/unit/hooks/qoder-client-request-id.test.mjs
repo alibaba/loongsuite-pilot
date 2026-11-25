@@ -42,6 +42,8 @@ describe('Qoder model selection in native prompts', () => {
     [{ businessIdentity: { product: 'app', model_key: 'qmodel_latest' } }, undefined, 'qmodel_latest', undefined],
     [{ businessModelKey: 'auto' }, 'routed-model', 'auto', 'routed-model'],
     [{}, 'auto', undefined, undefined],
+    [{ businessModelKey: 'dfmodel' }, 'custom_model', 'dfmodel', undefined],
+    [{ businessModelKey: 'custom_model' }, ' CUSTOM_MODEL ', undefined, undefined],
   ])('keeps requested and reported models separate (%j)', (promptFields, reported, requested, responseModel) => {
     const records = buildFrom([
       { ...userRow('explain spans'), ...promptFields },
