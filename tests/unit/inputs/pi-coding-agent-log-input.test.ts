@@ -186,6 +186,8 @@ describe('PiCodingAgentLogInput', () => {
       stateStore: stateStore as never,
       logDir: tmpDir,
       agentEnabled: agentType => agentType !== 'disabled-code',
+      // Agent filtering is independent of how the production work budget splits a poll.
+      historyReplay: { cpuNow: () => 0 },
     });
     const entries: AgentActivityEntry[] = [];
     input.on('entries', batch => entries.push(...batch));

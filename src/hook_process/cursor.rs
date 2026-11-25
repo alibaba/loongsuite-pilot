@@ -819,10 +819,13 @@ impl Journal {
         if !discard.is_empty() {
             self.rewrite(&[], Some(&discard))?;
         }
+        let mut first_error = None;
         for stop in stops {
-            recover_stop(root, policy, self, &stop, current)?;
+            if let Err(error) = recover_stop(root, policy, self, &stop, current) {
+                first_error.get_or_insert(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     fn read_unlocked(&self) -> Result<Vec<Value>, String> {

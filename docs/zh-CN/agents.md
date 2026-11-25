@@ -79,7 +79,7 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 | Qoder Work | `qoder-work` | Hook 和本地数据源。 |
 | Qoder Work CN | `qoder-work-cn` | Hook 和本地数据源。 |
 | Qwen Code CLI | `qwen-code-cli` | Hook 集成；Stop 时解析 qwen-code transcript JSONL。 |
-| Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
+| Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。Hook 与 segment 缺少用量时，从 Flash CLI 补充已匹配的模型调用用量。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 | 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |

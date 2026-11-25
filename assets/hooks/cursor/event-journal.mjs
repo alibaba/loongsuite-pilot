@@ -12,12 +12,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { fileURLToPath } from 'node:url';
 
 function pilotDataDir() {
-  return process.env.LOONGSUITE_PILOT_DATA_DIR || path.join(os.homedir(), '.loongsuite-pilot');
+  const configured = process.env.LOONGSUITE_PILOT_DATA_DIR;
+  if (configured) return configured;
+  // The deployed Hook lives in <dataDir>/hooks even when the agent did not
+  // inherit the environment of the installer or service.
+  const deployedDataDir = fileURLToPath(new URL('../../', import.meta.url));
+  if (fs.existsSync(new URL('../cursor-config-path', import.meta.url))
+    || fs.existsSync(path.join(deployedDataDir, 'config.json'))) return deployedDataDir;
+  return path.join(os.homedir(), '.loongsuite-pilot');
 }
 
-const JOURNAL_DIR = path.join(pilotDataDir(), 'state', 'cursor');
+export const CURSOR_DATA_DIR = pilotDataDir();
+const JOURNAL_DIR = path.join(CURSOR_DATA_DIR, 'state', 'cursor');
 const JOURNAL_FILE = path.join(JOURNAL_DIR, 'event-journal.jsonl');
 const JOURNAL_LOCK_FILE = path.join(JOURNAL_DIR, 'event-journal.lock');
 const JOURNAL_LOCK_TIMEOUT_MS = 3000;
@@ -28,20 +37,23 @@ function ensureJournalDir() {
   fs.mkdirSync(JOURNAL_DIR, { recursive: true });
 }
 
-export function appendEvent(event) {
+export function appendEvent(event, prepareForAppend) {
   ensureJournalDir();
-  withJournalLock(() => {
-    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(event) + '\n', 'utf-8');
+  return withJournalLock(() => {
+    const stored = prepareForAppend ? prepareForAppend(event, readJournal()) : event;
+    fs.appendFileSync(JOURNAL_FILE, JSON.stringify(stored) + '\n', 'utf-8');
+    return stored;
   });
+}
+
+function readJournal() {
+  if (!fs.existsSync(JOURNAL_FILE)) return [];
+  return parseJournalContent(fs.readFileSync(JOURNAL_FILE, 'utf-8'));
 }
 
 export function readAllEvents() {
   ensureJournalDir();
-  return withJournalLock(() => {
-    if (!fs.existsSync(JOURNAL_FILE)) return [];
-    const content = fs.readFileSync(JOURNAL_FILE, 'utf-8');
-    return parseJournalContent(content);
-  });
+  return withJournalLock(readJournal);
 }
 
 export function rewriteJournal(remainingEvents, snapshotEvents = null) {
@@ -113,7 +125,8 @@ function parseJournalContent(content) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
-      events.push(JSON.parse(trimmed));
+      const event = JSON.parse(trimmed);
+      if (event && typeof event === 'object' && !Array.isArray(event)) events.push(event);
     } catch {
       // skip corrupted lines
     }
