@@ -24,11 +24,13 @@ import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
 import { QoderTranscriptSource } from '../qoder-trace/transcript-source.js';
 import { QoderLegacyHookReader } from '../qoder-trace/legacy-hook-reader.js';
+import { LruMap } from '../../multimodal/uploader/lru-set.js';
 
 // Written by the runtime wrapper that launches qoderclicn. Kept separate from
 // the international build's file so a machine running both keeps the two
 // streams apart.
 const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
+const SESSION_ANCHOR_LIMIT = 500;
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -58,8 +60,8 @@ export class QoderCnTraceInput extends BaseInput {
 
   // Persists across collect() cycles: tracks the last anchor turn.id and its
   // max step counter per session so orphan turns from later cycles can be
-  // merged into the correct turn.
-  private readonly sessionAnchor = new Map<string, { turnId: string; maxStep: number }>();
+  // merged into the correct turn. Evict by capacity so idle sessions can resume.
+  private readonly sessionAnchor = new LruMap<{ turnId: string; maxStep: number }>(SESSION_ANCHOR_LIMIT);
 
   constructor(opts: QoderCnTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });

@@ -6,6 +6,8 @@ import { execSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
 import { QoderCnSqliteInput } from '../../../src/inputs/qoder-cn-sqlite/qoder-cn-sqlite-input.js';
 import { SQLITE_SYNC_PAGE } from '../../../src/utils/node-sqlite.ts';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { StateStore } from '../../../src/checkpoints/state-store.js';
+import type { SqliteRow } from '../../../src/inputs/base/base-sqlite-input.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
 
 describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
@@ -43,9 +45,10 @@ describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
     expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(2);
   });
 
-  it('reads at most one page and resumes from the rowid cursor', async () => {
+  it('drains multiple bounded pages and resumes from the last rowid', async () => {
     stateStore.setRowId('qoder-cn-sqlite', 0);
-    const total = SQLITE_SYNC_PAGE + 1;
+    const perCycle = 10 * SQLITE_SYNC_PAGE;
+    const total = perCycle + 1;
     const values: string[] = [];
     for (let i = 0; i < total; i++) {
       values.push(`('m-${i}','sess','req-${i}','assistant','{"prompt_tokens":1,"completion_tokens":1}',${i})`);
@@ -56,12 +59,46 @@ describe.skipIf(!hasNodeSqlite())('QoderCnSqliteInput', () => {
     );
 
     const first = await collectOnce(makeInput());
-    expect(first).toHaveLength(SQLITE_SYNC_PAGE);
-    expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(SQLITE_SYNC_PAGE);
+    expect(first).toHaveLength(perCycle);
+    expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(perCycle);
 
     const second = await collectOnce(makeInput());
     expect(second).toHaveLength(1);
     expect(stateStore.getRowId('qoder-cn-sqlite')).toBe(total);
+  });
+
+  it.each([
+    { failingRow: 2, total: 2 },
+    { failingRow: SQLITE_SYNC_PAGE, total: SQLITE_SYNC_PAGE + 1 },
+  ])('retries a transient transform failure at the page tail ($failingRow of $total)', async ({ failingRow, total }) => {
+    const checkpointPath = path.join(tmpDir, 'checkpoints.json');
+    const firstState = new StateStore(checkpointPath);
+    firstState.setRowId('qoder-cn-sqlite', 0);
+    const values = Array.from({ length: total }, (_, index) => {
+      const row = index + 1;
+      return `('message-${row}','session','request','assistant','{"prompt_tokens":1,"completion_tokens":1}',${row})`;
+    });
+    execSql(dbPath, `INSERT INTO chat_message VALUES ${values.join(',')}`);
+
+    class FailsAtPageTail extends QoderCnSqliteInput {
+      protected override async transformRow(row: SqliteRow): Promise<AgentActivityEntry | null> {
+        if (row.rowid === failingRow) throw new Error('temporary normalization failure');
+        return super.transformRow(row);
+      }
+    }
+
+    const first = await collectOnce(new FailsAtPageTail({ stateStore: firstState, dbPath }));
+    const resumedState = new StateStore(checkpointPath);
+    await resumedState.load();
+    const savedRowId = resumedState.getRowId('qoder-cn-sqlite');
+    const resumed = await collectOnce(new QoderCnSqliteInput({ stateStore: resumedState, dbPath }));
+    expect(savedRowId).toBe(failingRow - 1);
+    expect(first.map(entry => entry['event.id'])).toEqual(
+      Array.from({ length: failingRow - 1 }, (_, index) => `message-${index + 1}`),
+    );
+    expect(resumed.map(entry => entry['event.id'])).toEqual(
+      Array.from({ length: total - failingRow + 1 }, (_, index) => `message-${failingRow + index}`),
+    );
   });
 
   function makeInput(): QoderCnSqliteInput {

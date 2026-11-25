@@ -1,6 +1,10 @@
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { CollectionMethod } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
+import { SQLITE_SYNC_PAGE } from '../../utils/node-sqlite.js';
 import { BaseInput, type InputOptions } from './base-input.js';
+
+const MAX_PAGES_PER_CYCLE = 10;
 
 export interface SqliteInputOptions extends InputOptions {
   /** Path to the SQLite database file. */
@@ -37,39 +41,48 @@ export abstract class BaseSqliteInput extends BaseInput {
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const lastRowId = this.stateStore.getRowId(this.id);
-    let rows: SqliteRow[];
-
-    try {
-      rows = await this.readNewRows(lastRowId);
-    } catch (err) {
-      this.logger.error('failed to read SQLite rows', { error: String(err) });
-      return [];
-    }
-
-    if (rows.length === 0) return [];
-
     const entries: AgentActivityEntry[] = [];
-    let maxRowId = lastRowId;
+    let cursor = lastRowId;
 
-    for (const row of rows) {
+    for (let page = 0; page < MAX_PAGES_PER_CYCLE; page++) {
+      let rows: SqliteRow[];
       try {
-        const entry = await this.transformRow(row);
-        if (entry) entries.push(entry);
-        if (row.rowid > maxRowId) maxRowId = row.rowid;
+        rows = await this.readNewRows(cursor, SQLITE_SYNC_PAGE);
       } catch (err) {
-        this.logger.warn('row transform failed', { rowid: row.rowid, error: String(err) });
+        this.logger.error('failed to read SQLite rows', { error: String(err) });
+        break;
       }
+
+      const previousCursor = cursor;
+      for (const row of rows) {
+        try {
+          const entry = await this.transformRow(row);
+          if (entry) entries.push(entry);
+          cursor = Math.max(cursor, row.rowid);
+        } catch (err) {
+          this.logger.warn('row transform failed', { rowid: row.rowid, error: String(err) });
+        }
+      }
+
+      // Leave a failed trailing row for the next poll instead of paging past it.
+      if (rows.length < SQLITE_SYNC_PAGE || cursor === previousCursor
+        || cursor !== rows.at(-1)?.rowid || page + 1 === MAX_PAGES_PER_CYCLE) {
+        break;
+      }
+      await yieldToEventLoop();
+      if (!this.running) break;
     }
 
-    this.stateStore.setRowId(this.id, maxRowId);
+    // BaseInput saves after queuing the accumulated entries from this cycle.
+    if (cursor !== lastRowId) this.stateStore.setRowId(this.id, cursor);
     return entries;
   }
 
   /**
-   * Query the database for rows with rowid > lastRowId.
-   * Override in subclass to implement specific SQL queries.
+   * Query at most `limit` rows with rowid > lastRowId in ascending rowid order.
+   * Apply the limit in SQL so the synchronous reader materializes only one page.
    */
-  protected abstract readNewRows(lastRowId: number): Promise<SqliteRow[]>;
+  protected abstract readNewRows(lastRowId: number, limit: number): Promise<SqliteRow[]>;
 
   /**
    * Transform a database row into a normalized AgentActivityEntry.
