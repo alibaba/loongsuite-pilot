@@ -48,6 +48,7 @@ MAX_PENDING_INPUT_RECORDS = 128
 MAX_PENDING_INPUT_BYTES = 2 * 1024 * 1024
 MAX_VALUE_DEPTH = 8
 MAX_RESOURCE_FIELD_VALUE_LENGTH = 512
+LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS = 5_000_000_000
 LOG_RETENTION_SECONDS = 7 * 24 * 60 * 60
 RAW_SEGMENT_BYTES = 100 * 1024 * 1024
 _RAW_WRITE_LOCK = threading.Lock()
@@ -86,6 +87,7 @@ _SESSIONS: Dict[str, Dict[str, Any]] = {}
 _EVICTED_TURNS: Dict[str, Any] = {}
 _TTFT_API: contextvars.ContextVar = contextvars.ContextVar("pilot_hermes_ttft", default=None)
 _ACTIVE_DELEGATION = contextvars.ContextVar("pilot_hermes_delegation", default=None)
+_LEGACY_SYSTEM_INSTRUCTIONS = contextvars.ContextVar("pilot_hermes_legacy_system", default=None)
 _ACTIVE_INCOMING = contextvars.ContextVar("pilot_hermes_incoming", default=None)
 _GATEWAY_DELIVERY = contextvars.ContextVar("pilot_hermes_gateway_delivery", default=None)
 
@@ -1005,7 +1007,7 @@ def _tool_definitions(request: Any) -> List[Dict[str, Any]]:
     return output
 
 
-def _text_parts(value: Any) -> List[Dict[str, str]]:
+def _text_parts(value: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
     """Normalize a provider text payload (str / block list / nested parts) into text parts."""
     if isinstance(value, str):
         blocks: List[Any] = [value]
@@ -1029,17 +1031,19 @@ def _text_parts(value: Any) -> List[Dict[str, str]]:
                 text = block.get("content")
         else:
             text = None
+        if isinstance(text, str) and ascii_only:
+            # Match 4.16's last-resort payload rewrite before bounding the text.
+            text = text.encode("ascii", errors="ignore").decode("ascii")
         if isinstance(text, str) and text.strip():
             parts.append({"type": "text", "content": _truncate(text)})
     return parts
 
 
-def _system_instructions(request: Any) -> List[Dict[str, str]]:
+def _system_instructions(request: Any, ascii_only: bool = False) -> List[Dict[str, str]]:
     """Extract the system prompt from a provider request body.
 
-    Hermes never replays system messages through conversation_history, so the
-    request body built for the provider is the only place the prompt is
-    observable. Shapes differ per provider: Anthropic/Bedrock keep it in a
+    Hermes never replays system messages through conversation_history. Shapes
+    differ per provider: Anthropic/Bedrock keep the prompt in a
     top-level "system" field, Responses uses top-level "instructions", Gemini
     nests it under systemInstruction.parts, and OpenAI-compatible providers
     carry it as leading system/developer messages.
@@ -1052,7 +1056,7 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
 
     for key in ("system", "instructions", "systemInstruction", "system_instruction"):
         if key in body:
-            parts = _text_parts(body.get(key))
+            parts = _text_parts(body.get(key), ascii_only)
             if parts:
                 return parts
 
@@ -1065,10 +1069,124 @@ def _system_instructions(request: Any) -> List[Dict[str, str]]:
             continue
         if message.get("role") not in ("system", "developer"):
             continue
-        parts.extend(_text_parts(message.get("content")))
+        parts.extend(_text_parts(message.get("content"), ascii_only))
         if len(parts) >= MAX_PARTS:
             break
     return parts[:MAX_PARTS]
+
+
+def _clear_legacy_system_instructions() -> None:
+    try:
+        _LEGACY_SYSTEM_INSTRUCTIONS.set(None)
+    except Exception:
+        pass
+
+
+def _install_legacy_system_observer() -> None:
+    """Read 4.16 instructions after native provider request conversion.
+
+    That release's synchronous pre_api_request hook omits request.body. Keep
+    only bounded text parts in the caller's context, never the conversation,
+    credentials or tool definitions. Other releases keep their native hooks.
+    """
+    try:
+        import hermes_cli
+        if (getattr(hermes_cli, "__version__", None),
+                getattr(hermes_cli, "__release_date__", None)) != ("0.10.0", "2026.4.16"):
+            return
+        module = sys.modules.get("run_agent") or sys.modules.get("__main__")
+        owner = getattr(module, "AIAgent", None)
+
+        def observe(original: Callable, modes: tuple) -> Callable:
+            @functools.wraps(original)
+            def observed(agent: Any, *args: Any, **kwargs: Any) -> Any:
+                try:
+                    observed._pilot_legacy_system_context.set(None)
+                except Exception:
+                    pass
+                # Native results and exceptions retain their original behavior.
+                body = original(agent, *args, **kwargs)
+                try:
+                    session_id = getattr(agent, "session_id", None)
+                    mode = getattr(agent, "api_mode", None)
+                    if isinstance(session_id, str) and session_id and mode in modes:
+                        parts = observed._pilot_legacy_system_extract(
+                            {"body": body},
+                            ascii_only=bool(getattr(agent, "_force_ascii_payload", False)))
+                        if parts:
+                            observed._pilot_legacy_system_context.set(
+                                (session_id, mode, time.monotonic_ns(), parts))
+                except Exception:
+                    pass
+                return body
+
+            observed._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+            observed._pilot_legacy_system_extract = _system_instructions
+            return observed
+
+        # Responses preflight can replace/normalize instructions after building.
+        # The other three modes finish provider conversion in the builder.
+        for name, names, modes in (
+            ("_build_api_kwargs", ["self", "api_messages"],
+             ("chat_completions", "anthropic_messages", "bedrock_converse")),
+            ("_preflight_codex_api_kwargs", ["self", "api_kwargs", "allow_stream"],
+             ("codex_responses",)),
+        ):
+            original = getattr(owner, name, None)
+            if not callable(original):
+                continue
+            if hasattr(original, "_pilot_legacy_system_context"):
+                # Rediscovery hands existing wrappers the new module's state.
+                original._pilot_legacy_system_context = _LEGACY_SYSTEM_INSTRUCTIONS
+                original._pilot_legacy_system_extract = _system_instructions
+                continue
+            parameters = inspect.signature(original).parameters
+            values = list(parameters.values())
+            if (list(parameters) != names
+                    or any(p.kind != inspect.Parameter.POSITIONAL_OR_KEYWORD
+                           for p in values[:2])
+                    or (len(values) == 3 and (
+                        values[2].kind != inspect.Parameter.KEYWORD_ONLY
+                        or values[2].default is not False))):
+                continue
+            setattr(owner, name, observe(original, modes))
+    except Exception:
+        pass
+
+
+def _request_system_instructions(payload: Dict[str, Any], metadata: Dict[str, Any],
+                                 capture_content: bool) -> List[Dict[str, str]]:
+    pending = None
+    try:
+        pending = _LEGACY_SYSTEM_INSTRUCTIONS.get()
+    except Exception:
+        pass
+    finally:
+        _clear_legacy_system_instructions()
+    if not capture_content:
+        return []
+    if metadata.get("system_instructions"):
+        return metadata["system_instructions"]
+    # These native fields are the same call's provider kwargs, before Hermes'
+    # JSON serializer applies its string cap. Select by field/role, never text.
+    if payload.get("api_mode") == "chat_completions":
+        parts = _system_instructions({"body": {"messages": payload.get("request_messages")}})
+        if parts:
+            return parts
+    parts = _system_instructions({"body": {"system": payload.get("system_prompt"),
+                                           "messages": payload.get("request_messages")}})
+    if parts:
+        return parts
+    if any(key in payload for key in ("request", "request_messages", "system_prompt")):
+        return _system_instructions(payload.get("request"))
+    try:
+        if (pending and pending[0] == payload.get("session_id")
+                and pending[1] == payload.get("api_mode")
+                and 0 <= time.monotonic_ns() - pending[2] <= LEGACY_SYSTEM_INSTRUCTIONS_TTL_NS):
+            return pending[3]
+    except Exception:
+        pass
+    return []
 
 
 def _install_request_metadata_observer() -> bool:
@@ -2162,6 +2280,7 @@ def _handle_on_session_start(now_ns: int, payload: Dict[str, Any]) -> None:
 
 
 def _handle_pre_llm_call(now_ns: int, payload: Dict[str, Any]) -> None:
+    _install_legacy_system_observer()
     _TTFT_API.set(None)
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
@@ -2243,14 +2362,7 @@ def _handle_pre_api_request(now_ns: int, payload: Dict[str, Any]) -> None:
                 if turn["capture_content"]
                 else []
             ),
-            "system_instructions": (
-                metadata.get("system_instructions") or _system_instructions({"body": {
-                    "messages": payload.get("request_messages"),
-                    "system": payload.get("system_prompt"),
-                }}) or _system_instructions(payload.get("request"))
-                if turn["capture_content"]
-                else []
-            ),
+            "system_instructions": _request_system_instructions(payload, metadata, turn["capture_content"]),
             "context_truncated": bool(metadata.get("truncated") or
                                       (isinstance(request, dict) and request.get("_truncated") and not metadata)),
         },
@@ -2544,6 +2656,9 @@ _HANDLERS: Dict[str, Callable[[int, Dict[str, Any]], None]] = {
 def _safe_callback(hook_name: str) -> Callable[..., None]:
     def callback(**kwargs: Any) -> None:
         try:
+            if hook_name in ("pre_llm_call", "post_llm_call", "api_request_error",
+                             "on_session_end", "on_session_finalize"):
+                _clear_legacy_system_instructions()
             if hook_name == "pre_llm_call":
                 _retry_run_completion_observer()
                 # Discovery may run from cli_agent_setup_mixin's run_agent
