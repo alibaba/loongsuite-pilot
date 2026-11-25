@@ -219,7 +219,7 @@ function emitBlockedPrompt(
   if (!opts.emitBlockedPrompt) return;
   if (verdict.failOpen || verdict.action !== 'block') return;
   if (request.event !== 'UserPromptSubmit') return;
-  if (request.agent !== 'qoder' && request.agent !== 'qodercli') return;
+  if (!['qoder', 'qodercli', 'qoder-cn', 'qoderclicn'].includes(request.agent)) return;
   try {
     void Promise.resolve(opts.emitBlockedPrompt(buildBlockedQoderPromptEntry(request, Date.now(), verdict)))
       .catch(err => logger.warn('blocked prompt emit failed', { error: String(err) }));

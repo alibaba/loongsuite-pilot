@@ -58,4 +58,13 @@ if [[ -z "$CLI" && -f "$CURRENT_FILE" ]]; then
 fi
 [[ -n "$CLI" && -f "$CLI" ]] || exit 0
 
-"$NODE_BIN" "$CLI" hook --agent qoder-auto "$@" || true
+# An explicit regional target must precede the default rather than be shadowed.
+HAS_AGENT=false
+for arg in "$@"; do
+  if [[ "$arg" == '--agent' ]]; then HAS_AGENT=true; break; fi
+done
+if [[ "$HAS_AGENT" == true ]]; then
+  "$NODE_BIN" "$CLI" hook "$@" || true
+else
+  "$NODE_BIN" "$CLI" hook --agent qoder-auto "$@" || true
+fi

@@ -9,6 +9,7 @@ export const PROMPT_CORRELATION_FIELD = 'agent.pilot.interceptor.correlation';
 export const PROMPT_MATCH_WINDOW_MS = 5000;
 
 export function promptAgentType(value: unknown): string | null {
+  if (value === 'qoder-cn' || value === 'qoderclicn') return 'qoder-cn';
   if (value === 'qodercli' || value === 'qoder-cli') return 'qoder-cli';
   if (value === 'qoder-app') return value;
   if (['qoder', 'qoder-idea', 'qoder-jetbrains'].includes(String(value))) return 'qoder';
@@ -37,7 +38,7 @@ export function promptKeyFromRequest(request: HookRequest): PromptVerdictKey | n
   return { phase: 'UserPromptSubmit', sessionId: request.sessionId, agentType,
     promptHash: promptHash(request.prompt),
     requestId: hasId ? promptRequestId(id) : randomUUID(),
-    ...((request.agent === 'qoder' || request.agent === 'qodercli') && id === undefined
+    ...(['qoder', 'qodercli', 'qoder-cn', 'qoderclicn'].includes(request.agent) && id === undefined
       ? { missingRequestId: true as const } : {}),
     ...(request.agent === 'qoder' && product === undefined ? { missingAgentType: true as const } : {}) };
 }
