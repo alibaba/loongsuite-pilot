@@ -13,9 +13,9 @@ Wukong 与其它 agent 完全不同：**没有 hook、没有 JSONL 落盘、没�
 
 ```
 Wukong 守护进程
-  └─ ~/.real/daemon.sock（unix socket，进程存活标志）
-       └─ WukongInput.checkAvailability() 检测 socket 存在 + wukong-cli service status 为 running
-            └─ WukongInput.onStart() 基线：wukong-cli agent data list_tasks 获取全部任务
+  └─ ~/.real/daemon.sock + 悟空进程
+       └─ WukongInput.checkAvailability() 检测 socket 和进程后执行 wukong-cli service status
+            └─ 首次可用时建立基线：wukong-cli agent data list_tasks 获取全部任务
                  → 对每个 task 调 wukong-cli agent data get_spark_agui_messages 记录已见消息数
             └─ 定时轮询（默认 60s）：
                  wukong-cli agent data list_tasks
@@ -27,10 +27,10 @@ Wukong 守护进程
 
 | 关键组件 | 路径 / 命令 | 说明 |
 |---|---|---|
-| 守护进程存活标志 | `~/.real/daemon.sock` | Wukong 客户端启动后创建，socket 不存在 = 未运行 |
+| 守护进程 | `~/.real/daemon.sock` + `DingTalkReal` / `DingTalkReal.exe` | 悟空退出后 socket 文件可能仍然存在，Pilot 在每次调用 CLI 前同时确认进程 |
 | CLI 可执行文件（macOS） | `/Applications/Wukong.app/Contents/MacOS/wukong-cli` | 固定路径，不依赖 PATH |
 | CLI 可执行文件（其他平台） | `wukong-cli`（需在 PATH 中） | 依赖 PATH 查找 |
-| 服务状态命令 | `wukong-cli service status` | 输出需匹配 `/running/i` |
+| 服务状态命令 | `wukong-cli service status` | 输出需确认服务正在运行 |
 | 任务列表命令 | `wukong-cli agent data list_tasks --json '{...}'` | 分页返回 `items` + `hasMore` + `nextCursor` |
 | 消息列表命令 | `wukong-cli agent data get_spark_agui_messages --json '{"conversationId":"..."}'` | 返回 `messages` 数组 |
 | Pilot 游标 | `~/.loongsuite-pilot/logs/input-state.json` 的 `wukong` 条目 | `extra.seenCounts`：`session_id → 已处理消息数` |
@@ -60,7 +60,7 @@ Wukong 数据未出现时，**按以下顺序逐步排查，勿跳步**：
 ls -la ~/.real/daemon.sock
 ```
 
-不存在 → Wukong 客户端未运行，`checkAvailability()` 直接返回 false，Input 不会启动。让用户先启动 Wukong。
+确认悟空进程已启动后再执行下方 CLI 命令。仅凭 socket 文件无法判断进程是否存活，直接运行 CLI 可能重新打开悟空窗口。
 
 ### 1.2 wukong-cli 可执行 + 服务状态
 
@@ -73,7 +73,7 @@ command -v wukong-cli || true
 "$WUKONG_CLI" service status   # 或 wukong-cli service status
 ```
 
-预期输出中包含 `running`（大小写不敏感）。若报错或输出不含 `running`：
+预期输出确认服务正在运行。若报错或输出显示服务已停止：
 
 - Wukong 客户端已崩溃或正在重启
 - CLI 二进制路径不对（macOS 上必须是 App Bundle 内路径，其他平台必须在 PATH 中）
