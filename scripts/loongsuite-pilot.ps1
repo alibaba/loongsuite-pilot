@@ -14,7 +14,12 @@
 
 $CliArgs = @($args)
 $Command = if ($CliArgs.Count -ge 1) { [string]$CliArgs[0] } else { "status" }
-$SubArgs = if ($CliArgs.Count -ge 2) { [string[]]$CliArgs[1..($CliArgs.Count - 1)] } else { @() }
+# Two statements on purpose. As an `if` *expression* this value gets pipeline-
+# enumerated, so a single sub-argument came back as a bare string: `$SubArgs[0]`
+# then returned a Char and `@SubArgs` splatted the string character by character,
+# which is why `agent list` / `span-attr list` always hit the usage text.
+$SubArgs = @()
+if ($CliArgs.Count -ge 2) { $SubArgs = @($CliArgs[1..($CliArgs.Count - 1)]) }
 $ErrorActionPreference = "Stop"
 
 # ============================================================
@@ -1988,6 +1993,8 @@ const finish = (code) => {
   process.exit(code);
 };
 const request = http.request({
+  // Keep the local probe off Node's environment-configured global proxy.
+  agent: false,
   host: "127.0.0.1",
   port: Number(process.argv[1]),
   path: "/metrics-summary.json",
@@ -2010,7 +2017,13 @@ timer = setTimeout(() => {
 '@
 
     try {
-        & $nodeBin -e $probe $Port $DATA_DIR *> $null
+        # The probe goes in over stdin instead of as an argv string: PowerShell's
+        # native-argument path rewrites double quotes inside a multi-line argument,
+        # so `require("node:http")` reached node as `require(node:http)` and this
+        # check failed on every run: status printed "dashboard: unavailable" while
+        # the dashboard was serving fine. The wrapper itself uses single quotes only,
+        # which survives arg-passing, and stdin avoids CLM-blocked .NET statics.
+        $probe | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))" $Port $DATA_DIR *> $null
         return $LASTEXITCODE -eq 0
     } catch {
         return $false
@@ -2391,7 +2404,7 @@ function Cmd-Deploy {
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
     # No collector restart afterwards -- see the shell cmd_deploy for why.
-    & $nodeBin $entry "deploy" @SubArgs
+    & $nodeBin --no-warnings $entry "deploy" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2420,7 +2433,7 @@ function Cmd-TokenUsage {
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
-    & $nodeBin $entry "token-usage" @SubArgs
+    & $nodeBin --no-warnings $entry "token-usage" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2448,7 +2461,7 @@ function Cmd-Worker {
 
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
-    & $nodeBin $entry "worker" @SubArgs
+    & $nodeBin --no-warnings $entry "worker" @SubArgs
     exit $LASTEXITCODE
 }
 
@@ -2479,7 +2492,10 @@ function Cmd-Agent {
     $env:LOONGSUITE_PILOT_DATA_DIR = $DATA_DIR
     $env:LOONGSUITE_PILOT_CACHE_DIR = $CACHE_DIR
     $env:AGENT_DATA_COLLECTION_CONFIG = $CONFIG_FILE
-    & $nodeBin $entry "agent" @SubArgs
+    # --no-warnings: the script runs under $ErrorActionPreference = "Stop", where a
+    # native command's stderr (node's experimental-feature notices) becomes a
+    # terminating error even when the stream is redirected away.
+    & $nodeBin --no-warnings $entry "agent" @SubArgs
     $result = $LASTEXITCODE
     if ($result -ne 0) { exit $result }
 
@@ -2508,7 +2524,7 @@ function Cmd-SpanAttr {
         if (-not $nodeBin) { Write-Error "[span-attr] node runtime not found"; exit 1 }
         $js = @'
 const fs = require("fs");
-const file = process.argv[1], op = process.argv[2], key = process.argv[3], value = process.argv[4];
+const [file, op, key, value] = JSON.parse(process.env.LOONGSUITE_PILOT_SPAN_ATTR_ARGS);
 const RESERVED = ["gen_ai.","git.","workspace.","event.","trace_","user.","cost_","agent.","time_unix_nano","observed_time_unix_nano"];
 const isReserved = k => RESERVED.some(p => k === p || k.indexOf(p) === 0);
 function read() { try { const o = JSON.parse(fs.readFileSync(file, "utf-8").replace(/^\uFEFF/, "")); return (o && typeof o === "object" && !Array.isArray(o)) ? o : {}; } catch { return {}; } }
@@ -2525,9 +2541,29 @@ if (op === "set") {
   if (ks.length === 0) { console.log("(no custom span attributes)"); } else { for (const k of ks) console.log(k + "=" + o[k]); }
 }
 '@
-        $rest = if ($SubArgs.Count -ge 2) { $SubArgs[1..($SubArgs.Count - 1)] } else { @() }
-        & $nodeBin -e $js $SPAN_ATTR_FILE $sub @rest
-        exit $LASTEXITCODE
+        # Preserve native argument conversion while keeping empty strings and quotes.
+        $spanArgs = @(
+            $SPAN_ATTR_FILE
+            foreach ($argument in $SubArgs) {
+                foreach ($value in $argument) {
+                    if ($null -ne $value) { [string]$value }
+                }
+            }
+        )
+        # Keep the code on stdin and send the exact Unicode arguments through the environment.
+        $previousArgs = $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS
+        try {
+            $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = ConvertTo-Json -InputObject $spanArgs -Compress
+            $js | & $nodeBin --no-warnings -e "eval(require('fs').readFileSync(0,'utf8'))"
+            $result = $LASTEXITCODE
+        } finally {
+            if ($null -eq $previousArgs) {
+                Remove-Item Env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS -ErrorAction SilentlyContinue
+            } else {
+                $env:LOONGSUITE_PILOT_SPAN_ATTR_ARGS = $previousArgs
+            }
+        }
+        exit $result
     }
 
     Write-Host "Usage: loongsuite-pilot span-attr <set|unset|list|clear>"
