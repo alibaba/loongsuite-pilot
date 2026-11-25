@@ -304,7 +304,7 @@ describe('Orchestrator', () => {
       const dataDir = path.join(homeDir, 'pilot-data');
       fs.mkdirSync(path.join(dataDir, 'configs', 'managed'), { recursive: true });
       fs.writeFileSync(path.join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
-        kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', pattern: 'block',
+        kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', keywords: ['block'],
       }] } }));
       const workerStart = vi.spyOn(interceptorWorker, 'startInterceptorWorker').mockResolvedValue({
         port: 18791, managedActive: true, stop: vi.fn().mockResolvedValue(undefined),

@@ -90,7 +90,7 @@ describe('managed script runner generation lifecycle', () => {
     const c = new ManagedInterceptor({ dataDir, platform: 'win32', createRunners: () => ({ powershell }) });
     controllers.push(c);
     c.reload();
-    await writeRules(dataDir, [{ ...probe, kind: 'pattern', shell: undefined, match: 'substring', pattern: 'hello' }]);
+    await writeRules(dataDir, [{ ...probe, kind: 'pattern', shell: undefined, match: 'substring', keywords: ['hello'] }]);
     c.reload();
     expect(powershell.stop).toHaveBeenCalledOnce();
     await expect(c.evaluate(request)).resolves.toMatchObject({ action: 'block', ruleId: 'policy' });

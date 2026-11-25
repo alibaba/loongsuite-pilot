@@ -83,7 +83,7 @@ async function writeRules(dataDir: string): Promise<void> {
   await writeFile(join(dir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
     kind: 'pattern', id: 'worker-probe', version: '1', agents: ['qoder'],
     events: ['UserPromptSubmit', 'PreToolUse'],
-    match: 'substring', pattern: 'WORKER_THREAD_PROBE_BLOCK', message: 'worker isolation probe',
+    match: 'substring', keywords: ['WORKER_THREAD_PROBE_BLOCK'], message: 'worker isolation probe',
   }] } }));
 }
 
@@ -237,7 +237,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
       kind: 'pattern', id: 'prompt-policy', version: '3', action: 'log', agents: ['qodercli'],
-      events: ['UserPromptSubmit'], match: 'substring', pattern: 'PROMPT_LOG_PROBE',
+      events: ['UserPromptSubmit'], match: 'substring', keywords: ['PROMPT_LOG_PROBE'],
     }] } }));
     let collector = new Collector(dataDir);
     const { port } = await collector.waitFor('ready');
@@ -292,7 +292,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     const file = join(dir, 'interceptor.json');
     const scope = { kind: 'pattern', id: 'repeat-policy', version: '1', action: 'log', agents: ['qodercli'],
       events: ['UserPromptSubmit'] };
-    await writeFile(file, JSON.stringify({ interceptor: { rules: [{ ...scope, match: 'substring', pattern: 'a' }] } }));
+    await writeFile(file, JSON.stringify({ interceptor: { rules: [{ ...scope, match: 'substring', keywords: ['a'] }] } }));
     let collector = new Collector(dataDir);
     const { port } = await collector.waitFor('ready');
     const prompt = `${'a'.repeat(32)}!`;
@@ -348,7 +348,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await mkdir(dir, { recursive: true });
     const marker = 'WHOLE_CONTENT_PROBE';
     const rule = { kind: 'pattern', id: 'whole-content', version: '1', agents: ['qoder'],
-      events: ['PreToolUse', 'PostToolUse'], match: 'substring', pattern: marker,
+      events: ['PreToolUse', 'PostToolUse'], match: 'substring', keywords: [marker],
       title: marker, message: marker };
     const file = join(dir, 'interceptor.json');
     await writeFile(file, JSON.stringify({ interceptor: { rules: [rule] } }));
@@ -401,7 +401,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await mkdir(dir, { recursive: true });
     const file = join(dir, 'interceptor.json');
     const rule = { kind: 'pattern', id: 'primary', version: '1', agents: ['qoder', 'qodercli'],
-      events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'], match: 'substring', pattern: 'AUDIT_PROBE',
+      events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'], match: 'substring', keywords: ['AUDIT_PROBE'],
       message: 'this reminder must not reach the host in audit mode' };
     const write = (rules: unknown[]) => writeFile(file, JSON.stringify({ interceptor: { rules } }));
     await write([rule]);
@@ -506,7 +506,7 @@ describe('interceptor Worker isolation (real processes and HTTP)', () => {
     await mkdir(dir, { recursive: true });
     await writeFile(join(dir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
       kind: 'pattern', id: 'audit-burst', version: '1', action: 'log', agents: ['qoder'],
-      events: ['PreToolUse'], match: 'substring', pattern: 'AUDIT_BURST',
+      events: ['PreToolUse'], match: 'substring', keywords: ['AUDIT_BURST'],
     }] } }));
     const collector = new Collector(dataDir, 'all');
     const { port } = await collector.waitFor('ready');

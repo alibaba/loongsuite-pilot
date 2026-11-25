@@ -54,7 +54,7 @@ describe.skipIf(process.platform === 'win32')('initial interceptor status in the
       await writeFile(join(versionDir, 'package.json'), '{"version":"startup-status-test"}');
       await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
         kind: 'pattern', id: 'startup', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
-        match: 'substring', pattern: 'STARTUP_STATUS_PROBE',
+        match: 'substring', keywords: ['STARTUP_STATUS_PROBE'],
       }] } }));
       const config = join(root, 'config.json');
       await writeFile(config, JSON.stringify({ enabled: true, dataDir, agents: disabledAgents,

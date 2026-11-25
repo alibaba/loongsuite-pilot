@@ -195,7 +195,7 @@ export class ManagedInterceptor {
       rules: published.rules.map(rule => [
         rule.kind, rule.id, rule.version, rule.agents, rule.events, rule.action,
         rule.title ?? '', rule.message ?? '', rule.severity ?? '',
-        rule.kind === 'pattern' ? [rule.match, rule.pattern] : null,
+        rule.kind === 'pattern' ? [rule.match, rule.match === 'substring' ? rule.keywords : rule.pattern] : null,
         rule.kind === 'script' ? rule.shell : null,
         rule.kind === 'http' ? rule.url : null,
       ]),

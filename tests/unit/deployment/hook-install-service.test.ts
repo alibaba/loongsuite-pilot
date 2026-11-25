@@ -520,7 +520,7 @@ describe('hook install service', () => {
             agents: ['qoder'],
             events: ['PreToolUse'],
             match: 'substring',
-            pattern: 'mcp__browser',
+            keywords: ['mcp__browser'],
           }],
         },
       }));

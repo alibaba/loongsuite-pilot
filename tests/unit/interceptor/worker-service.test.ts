@@ -209,7 +209,7 @@ describe('interceptor worker supervisor', () => {
     await writeFile(configPath, JSON.stringify(mode === undefined ? {} : { interceptor: { mode } }));
     await mkdir(join(dataDir, 'configs', 'managed'), { recursive: true });
     await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
-      kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', pattern: 'blocked',
+      kind: 'pattern', id: 'cached', version: '1', agents: ['qodercli'], events: ['UserPromptSubmit'], match: 'substring', keywords: ['blocked'],
     }] } }));
     vi.stubEnv('AGENT_DATA_COLLECTION_CONFIG', configPath);
     vi.stubEnv('LOONGSUITE_PILOT_INTERCEPTOR_MODE', '');

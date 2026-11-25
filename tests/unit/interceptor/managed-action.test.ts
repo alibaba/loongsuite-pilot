@@ -13,7 +13,7 @@ afterEach(async () => {
 });
 const request: HookRequest = { agent: 'qoder', event: 'PreToolUse', prompt: 'MATCH', raw: {} };
 const base = { version: '1', agents: ['qoder'], events: ['PreToolUse'] };
-const pattern = (id: string, action?: string) => ({ ...base, kind: 'pattern', id, match: 'substring', pattern: 'MATCH',
+const pattern = (id: string, action?: string) => ({ ...base, kind: 'pattern', id, match: 'substring', keywords: ['MATCH'],
   ...(action === undefined ? {} : { action }), title: id, message: `reminder ${id}` });
 function engine(rules: unknown[], options: Record<string, unknown> = {}): ManagedRuleEngine {
   return new ManagedRuleEngine({ config: parseManagedInterceptorConfig({ interceptor: { rules } }), rules: [], runners: {}, ...options });
@@ -65,7 +65,7 @@ describe('managed action', () => {
 
   it('applies audit semantics to regex hits too', async () => {
     const test = vi.fn(async () => true);
-    const result = await engine([{ ...pattern('regex', 'log'), match: 'regex' }], { regex: { test } }).evaluate(request);
+    const result = await engine([{ ...pattern('regex', 'log'), match: 'regex', pattern: 'MATCH' }], { regex: { test } }).evaluate(request);
     expect(result).toMatchObject({ action: 'allow', matched: true, ruleId: 'regex' });
     expect(result.matches).toHaveLength(1);
     expect(test).toHaveBeenCalledWith('MATCH', 'MATCH', expect.any(Number), expect.any(Function));

@@ -31,12 +31,21 @@ interface ManagedRuleBase {
   message?: string;
 }
 
-export interface ManagedPatternRule extends ManagedRuleBase {
+export interface ManagedRegexRule extends ManagedRuleBase {
   kind: 'pattern';
-  match: ManagedPatternMatch;
-  /** User-authored source. Regex runs in a terminable Worker; substring is literal. */
+  match: 'regex';
+  /** User-authored regex source, run in a terminable Worker. */
   pattern: string;
 }
+
+export interface ManagedSubstringRule extends ManagedRuleBase {
+  kind: 'pattern';
+  match: 'substring';
+  /** Case-sensitive literals; any keyword is sufficient to match. */
+  keywords: string[];
+}
+
+export type ManagedPatternRule = ManagedRegexRule | ManagedSubstringRule;
 
 export interface ManagedScriptRule extends ManagedRuleBase {
   kind: 'script';
@@ -156,14 +165,29 @@ function parsePatternRule(value: Record<string, unknown>, where: string): Manage
   if (value.match !== 'regex' && value.match !== 'substring') {
     throw new ManagedConfigError(`${where}.match must be "regex" or "substring"`);
   }
+  if (value.match === 'substring') {
+    if (!Array.isArray(value.keywords) || value.keywords.length === 0) {
+      throw new ManagedConfigError(`${where}.keywords must be a non-empty array`);
+    }
+    const keywords = value.keywords.map((keyword, index) => {
+      const key = `${where}.keywords[${index}]`;
+      if (typeof keyword !== 'string') throw new ManagedConfigError(`${key} must be a string`);
+      if (keyword.length === 0) throw new ManagedConfigError(`${key} must not be empty`);
+      if (keyword.length > MAX_RULE_PATTERN_CHARS) {
+        throw new ManagedConfigError(`${key} is longer than ${MAX_RULE_PATTERN_CHARS} characters`);
+      }
+      return keyword;
+    });
+    return { kind: 'pattern', ...parseRuleBase(value, where), match: 'substring', keywords };
+  }
   if (typeof value.pattern !== 'string') throw new ManagedConfigError(`${where}.pattern must be a string`);
   const pattern = value.pattern;
   if (pattern.length === 0) throw new ManagedConfigError(`${where}.pattern must not be empty`);
   if (pattern.length > MAX_RULE_PATTERN_CHARS) {
     throw new ManagedConfigError(`${where}.pattern is longer than ${MAX_RULE_PATTERN_CHARS} characters`);
   }
-  if (value.match === 'regex') compileManagedRegex(pattern, where);
-  return { kind: 'pattern', ...parseRuleBase(value, where), match: value.match, pattern };
+  compileManagedRegex(pattern, where);
+  return { kind: 'pattern', ...parseRuleBase(value, where), match: 'regex', pattern };
 }
 
 function parseHttpRule(value: Record<string, unknown>, where: string): ManagedHttpRule {
@@ -225,7 +249,7 @@ export function compileManagedRegex(pattern: string, where = 'pattern'): RegExp 
 }
 
 export function patternRuleMatches(rule: ManagedPatternRule, text: string): boolean {
-  if (rule.match === 'substring') return text.includes(rule.pattern);
+  if (rule.match === 'substring') return rule.keywords.some(keyword => text.includes(keyword));
   return compileManagedRegex(rule.pattern).test(text);
 }
 

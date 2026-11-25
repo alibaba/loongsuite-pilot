@@ -265,7 +265,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
         "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
         "action": "log",
         "match": "substring",
-        "pattern": "RULE_PROBE",
+        "keywords": ["RULE_PROBE", "SECOND_PROBE"],
         "title": "命令规则预览",
         "message": "操作命中本地规则"
       },
@@ -296,11 +296,13 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 | `severity` | 可选风险等级字符串，仅用于本地诊断，不上报到采集事件 |
 | `kind` | `pattern`、`script`；`http` 仅保留格式占位，记录警告并跳过，不发请求 |
 | `match` | pattern 规则的 `substring` 或 `regex` |
+| `keywords` | `substring` 必填：非空字符串列表，每项不能为空且最多 2000 字符；任一项命中即可，区分大小写并保留空格 |
+| `pattern` | `regex` 必填的字符串，最多 2000 字符；`substring` 忽略此字段 |
 | `shell` | script 规则的 `sh` 或 `powershell`，本机仅执行平台匹配的脚本 |
 
 规则固定按用户输入、工具名、工具输入、工具输出的顺序合并文本；对象递归提取字符串、数字和布尔叶子。`raw`、会话等元数据及规则的 title/message 不参与匹配。旧 `fields` 键兼容接受并忽略，不能缩小范围。
 
-子串采用字面匹配。正则使用 JavaScript RegExp 语法并拒绝前瞻和后顾，在独立 Worker 中执行。默认 200ms 预算包括排队时间；超时终止线程，确认退出后按需重建。终止失败时告警并停止后续正则检查，重启 collector 恢复。pattern 命中原因为 `[PATTERN_BLOCKED]`。
+子串仅读取 `keywords`，采用区分大小写的字面匹配；旧子串配置需将 `pattern` 的值迁移为单元素 `keywords` 数组。正则使用 JavaScript RegExp 语法并拒绝前瞻和后顾，在独立 Worker 中执行。默认 200ms 预算包括排队时间；超时终止线程，确认退出后按需重建。终止失败时告警并停止后续正则检查，重启 collector 恢复。pattern 命中原因为 `[PATTERN_BLOCKED]`。
 
 ### 正则与接口转义
 

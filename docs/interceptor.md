@@ -34,7 +34,7 @@ Write the following document to `<dataDir>/configs/managed/interceptor.json`. Th
         "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
         "action": "log",
         "match": "substring",
-        "pattern": "RULE_PROBE",
+        "keywords": ["RULE_PROBE", "SECOND_PROBE"],
         "title": "Command rule preview",
         "message": "This operation matches a local rule"
       },
@@ -60,11 +60,13 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 | `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
 | `match` | `substring` or `regex` for a pattern rule. |
+| `keywords` | Required for `substring`: a nonempty array of nonempty strings, each at most 2000 characters. Any keyword matches; case and whitespace are preserved. |
+| `pattern` | Required string for `regex`, at most 2000 characters. Ignored for `substring`. |
 | `shell` | `sh` or `powershell` for a script rule; only the local platform's shell runs. |
 
 Rules match one text assembled in order from user input, tool name, tool input, and tool output. Objects contribute string, number, and boolean leaves. Raw protocol data, session metadata, and rule titles/messages are excluded. The retired `fields` key is accepted and ignored.
 
-Substring matching is literal. Patterns use JavaScript RegExp syntax, rejecting lookahead and lookbehind; matching runs in a dedicated Worker. Its default 200ms budget includes queueing. Timeout ends the task and terminates the thread before a replacement can be created. A failed termination logs a warning and disables further regex execution until the collector restarts. Pattern hits use `[PATTERN_BLOCKED]` as their reason.
+Substring matching checks only `keywords` as case-sensitive literals; move old substring `pattern` values into a single-element `keywords` array. Regex patterns use JavaScript RegExp syntax, rejecting lookahead and lookbehind; matching runs in a dedicated Worker. Its default 200ms budget includes queueing. Timeout ends the task and terminates the thread before a replacement can be created. A failed termination logs a warning and disables further regex execution until the collector restarts. Pattern hits use `[PATTERN_BLOCKED]` as their reason.
 
 ### Scripts and cache namespaces
 

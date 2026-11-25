@@ -6,10 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorService, type InterceptorService } from '../../../src/interceptor/daemon/lifecycle.js';
 import {
   MAX_RULE_SEVERITY_CHARS,
+  MAX_RULE_PATTERN_CHARS,
   managedInterceptorPath,
   managedScriptFileName,
   managedScriptsDir,
   parseManagedInterceptorConfig,
+  patternRuleMatches,
   platformManagedShell,
   type ManagedScriptRule,
 } from '../../../src/interceptor/managed/config.js';
@@ -105,7 +107,7 @@ describe('parseManagedInterceptorConfig', () => {
   });
 
   it.each([
-    { kind: 'pattern', match: 'substring', pattern: 'TOKEN' },
+    { kind: 'pattern', match: 'substring', keywords: ['TOKEN'] },
     { kind: 'script', shell: 'sh' },
     { kind: 'http', url: 'https://audit.example.com/' },
   ])('accepts optional severity metadata for $kind rules', extra => {
@@ -176,7 +178,42 @@ describe('parseManagedInterceptorConfig', () => {
     expect(() => parseManagedInterceptorConfig(doc)).toThrow();
   });
 
-  it('accepts in-process regex and substring rules', () => {
+  it.each([
+    undefined, null, 'TOKEN', [], [null], [1], [{}], [''], ['valid', ''], ['x'.repeat(MAX_RULE_PATTERN_CHARS + 1)],
+  ])('rejects invalid substring keywords %j even with a legacy pattern', keywords => {
+    expect(() => parseManagedInterceptorConfig({ interceptor: { rules: [{
+      kind: 'pattern', id: 'bad-keywords', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
+      match: 'substring', keywords, pattern: 'legacy',
+    }] } })).toThrow('interceptor.rules[0].keywords');
+  });
+
+  it('preserves literal keywords and ignores pattern for substring rules', () => {
+    const keywords = ['foo.bar', ' second ', '秘密', 'x'.repeat(MAX_RULE_PATTERN_CHARS)];
+    const parsed = parseManagedInterceptorConfig({ interceptor: { rules: [{
+      kind: 'pattern', id: 'keywords', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
+      match: 'substring', keywords, pattern: { ignored: true },
+    }] } }).rules[0];
+    expect(parsed).toMatchObject({ match: 'substring', keywords });
+    expect(parsed).not.toHaveProperty('pattern');
+    if (parsed.kind !== 'pattern') throw new Error('expected pattern rule');
+    for (const keyword of keywords) expect(patternRuleMatches(parsed, `prefix${keyword}suffix`)).toBe(true);
+    for (const miss of ['fooXbar', 'second', 'FOO.BAR', 'legacy']) expect(patternRuleMatches(parsed, miss)).toBe(false);
+  });
+
+  it('keeps regex pattern as a required string and ignores keywords', () => {
+    const base = { kind: 'pattern', id: 'regex', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
+      match: 'regex', keywords: ['legacy'] };
+    for (const pattern of [undefined, ['foo'], null, 1]) {
+      expect(() => parseManagedInterceptorConfig({ interceptor: { rules: [{ ...base, pattern }] } })).toThrow('.pattern');
+    }
+    const parsed = parseManagedInterceptorConfig({ interceptor: { rules: [{ ...base, pattern: 'foo.bar' }] } }).rules[0];
+    expect(parsed).not.toHaveProperty('keywords');
+    if (parsed.kind !== 'pattern') throw new Error('expected pattern rule');
+    expect(patternRuleMatches(parsed, 'fooXbar')).toBe(true);
+    expect(patternRuleMatches(parsed, 'legacy')).toBe(false);
+  });
+
+  it('accepts in-process regex rules', () => {
     expect(parseManagedInterceptorConfig({
       interceptor: {
         rules: [{
@@ -278,7 +315,7 @@ describe('parseManagedInterceptorConfig', () => {
             version: '1',
             events: ['UserPromptSubmit'],
             match: 'substring',
-            pattern: 'TOKEN',
+            keywords: ['TOKEN'],
           },
           rule('ak-leak-sh', '1'),
           {
@@ -300,6 +337,34 @@ describe('ManagedInterceptor pattern rules', () => {
   const controllers: ManagedInterceptor[] = [];
   afterEach(() => {
     for (const c of controllers.splice(0)) c.stop();
+  });
+
+  it('matches any keyword and reloads changed keywords without a version change', async () => {
+    const dataDir = await makeDataDir();
+    const c = new ManagedInterceptor({ dataDir });
+    controllers.push(c);
+    const base = { kind: 'pattern', id: 'keywords', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'],
+      match: 'substring', pattern: 'ignored', action: 'block' };
+    const writeKeywords = (keywords: string[]) => writeFile(managedInterceptorPath(dataDir), JSON.stringify({
+      interceptor: { rules: [{ ...base, keywords }] },
+    }));
+    try {
+      await writeKeywords(['foo.bar', ' second ', '秘密']);
+      c.reload();
+      for (const prompt of ['xxfoo.barxx', 'xx second xx', '带秘密的文本']) {
+        await expect(c.evaluate(request({ prompt }))).resolves.toMatchObject({ action: 'block', ruleId: 'keywords' });
+      }
+      for (const prompt of ['fooXbar', 'second', 'FOO.BAR', 'ignored', 'unrelated']) {
+        await expect(c.evaluate(request({ prompt }))).resolves.toMatchObject({ action: 'allow', matched: false });
+      }
+      await writeKeywords(['replacement']);
+      c.reload();
+      await expect(c.evaluate(request({ prompt: 'xxfoo.barxx' }))).resolves.toMatchObject({ action: 'allow' });
+      await expect(c.evaluate(request({ prompt: 'replacement' }))).resolves.toMatchObject({ action: 'block' });
+    } finally {
+      c.stop();
+      await rm(dataDir, { recursive: true, force: true });
+    }
   });
 
   it.each([
@@ -331,7 +396,7 @@ describe('ManagedInterceptor pattern rules', () => {
     const dataDir = await makeDataDir();
     const base = { kind: 'pattern', version: '1', agents: ['qoder'], events: ['UserPromptSubmit'], match: 'substring' };
     await writeFile(managedInterceptorPath(dataDir), JSON.stringify({ interceptor: { rules: [
-      { ...base, id: 'first', pattern: 'absent-1' }, { ...base, id: 'second', pattern: 'absent-2' },
+      { ...base, id: 'first', keywords: ['absent-1'] }, { ...base, id: 'second', keywords: ['absent-2'] },
     ] } }));
     const c = new ManagedInterceptor({ dataDir });
     controllers.push(c);
@@ -379,7 +444,7 @@ describe('ManagedInterceptor pattern rules', () => {
 
   it('ignores legacy fields selection while preserving agents and events filters', async () => {
     const dataDir = await makeDataDir();
-    const base = { kind: 'pattern', version: '1', events: ['PreToolUse'], match: 'substring', pattern: 'abc' };
+    const base = { kind: 'pattern', version: '1', events: ['PreToolUse'], match: 'substring', keywords: ['abc'] };
     await writeFile(managedInterceptorPath(dataDir), JSON.stringify({
       interceptor: {
         rules: [
@@ -978,7 +1043,7 @@ describeUnix('interceptor service with managed rules', () => {
     });
   });
 
-  it('treats substring patterns as literals', async () => {
+  it('treats each substring keyword as a literal through the HTTP service', async () => {
     const dataDir = await makeDataDir();
     await writeFile(managedInterceptorPath(dataDir), JSON.stringify({
       interceptor: {
@@ -989,7 +1054,7 @@ describeUnix('interceptor service with managed rules', () => {
           version: '1',
           events: ['UserPromptSubmit'],
           match: 'substring',
-          pattern: 'foo.bar',
+          keywords: ['other.keyword', 'foo.bar'],
         }],
       },
     }));
@@ -1028,7 +1093,7 @@ describeUnix('interceptor service with managed rules', () => {
           version: '1',
           events: ['UserPromptSubmit'],
           match: 'substring',
-          pattern: 'LTAI',
+          keywords: ['LTAI'],
           message: 'pattern would also hit',
         }],
       },

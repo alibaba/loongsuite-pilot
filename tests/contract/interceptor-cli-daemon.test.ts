@@ -72,7 +72,7 @@ describe('interceptor cli/daemon contract', () => {
     await mkdir(join(dataDir, 'configs', 'managed'), { recursive: true });
     await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
       kind: 'pattern', id: 'contract-block', version: '1', agents: ['qoder'],
-      events: ['UserPromptSubmit'], match: 'substring', pattern: 'CONTRACT_BLOCK',
+      events: ['UserPromptSubmit'], match: 'substring', keywords: ['CONTRACT_BLOCK'],
     }] } }));
 
     const env = {
