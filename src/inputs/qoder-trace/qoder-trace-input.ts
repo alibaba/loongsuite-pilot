@@ -307,7 +307,14 @@ export class QoderTraceInput extends BaseInput {
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
       const { result: { matchedDbPath }, enrichedEntries } = ideSqliteSnapshots.get(sessionId)!;
       for (let i = 0; i < sessionEntries.length; i++) {
-        Object.assign(sessionEntries[i], enrichedEntries[i]);
+        const entry = sessionEntries[i];
+        const enriched = enrichedEntries[i];
+        Object.assign(entry, enriched);
+        // Model-only enrichment can remove a placeholder from the snapshot.
+        // Object.assign cannot carry that deletion back to the original event.
+        if (Object.hasOwn(entry, 'gen_ai.response.model') && !Object.hasOwn(enriched, 'gen_ai.response.model')) {
+          delete entry['gen_ai.response.model'];
+        }
       }
 
       // Fix agent type when hook processor couldn't detect qoder-idea (Node < 22 fallback).
