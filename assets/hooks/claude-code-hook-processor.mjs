@@ -769,7 +769,7 @@ function readStopTranscript(state, stop) {
   const boundary = {
     promptId: stop.promptId,
     sourceIdentity,
-    firstPrompt: anonymousError && offset > 0 && Boolean(sourceIdentity),
+    firstPrompt: !stop.promptId && offset > 0 && Boolean(sourceIdentity),
   };
   let parsed = parseClaudeTranscript(stop.transcriptPath, offset, boundary);
   const onlyTurn = parsed.turns.length === 1 ? parsed.turns[0] : undefined;

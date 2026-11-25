@@ -284,8 +284,8 @@ export function parseClaudeTranscript(transcriptPath, byteOffset = 0, stopBounda
       const isMeta = isMetaRecord(record);
 
       if (stopBoundary && !isMeta && !isToolResultContent(msg.content)) {
-        // An unkeyed StopFailure after a committed turn can only own the
-        // immediately following prompt. A later API error is not its error.
+        // A Stop without a prompt ID can only own the first prompt after a
+        // verified cursor. Keep the next prompt for its own Stop.
         if (stopBoundary.firstPrompt) {
           if (firstPromptId !== undefined && (!promptId || promptId !== firstPromptId)) {
             nextOffset = lineStart;

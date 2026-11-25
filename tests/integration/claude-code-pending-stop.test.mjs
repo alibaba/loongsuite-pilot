@@ -155,6 +155,57 @@ describe('Claude Code late Stop transcript', () => {
     expect(await collect()).toEqual([]);
   });
 
+  test.each(['second reply', undefined])('a queued Stop without prompt_id leaves the next prompt unread with reply %s', async (reply) => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first prompt', 0)));
+    stop('prompt-a', 'first reply');
+    fs.appendFileSync(transcriptPath, records(
+      answer('response-a', 'first reply', 1),
+      user('prompt-b', 'second prompt', 2), answer('response-b', 'second reply', 3),
+    ));
+    stop(undefined, reply);
+    const nextPromptOffset = fs.statSync(transcriptPath).size;
+    fs.appendFileSync(transcriptPath, records(user('prompt-c', 'third prompt', 4)));
+    expect(fs.readdirSync(queue)).toHaveLength(2);
+
+    const first = (await collect()).filter((event) => event['event.name'] === 'llm.response');
+    expect(first.map((event) => event['gen_ai.response.id'])).toEqual(['response-a', 'response-b']);
+    const checkpoint = path.join(dataDir, 'state', 'claude-code', 'sessions', 'session.json');
+    const { transcript_offset: savedOffset } = JSON.parse(fs.readFileSync(checkpoint, 'utf8'));
+
+    fs.appendFileSync(transcriptPath, records(answer('response-c', 'third reply', 5)));
+    stop('prompt-c', 'third reply');
+    const spans = await exportSpans(await collect());
+    const response = spans.find((span) => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(response?.attributes).toMatchObject({
+      'gen_ai.response.id': 'response-c', 'gen_ai.usage.input_tokens': 120, 'gen_ai.usage.output_tokens': 8,
+    });
+    const entry = spans.find((span) => span.attributes['gen_ai.span.kind'] === 'ENTRY');
+    expect(entry.attributes['gen_ai.input.messages']).toContain('third prompt');
+    expect(entry.spanContext().traceId).toBe(response.spanContext().traceId);
+    expect(savedOffset).toBe(nextPromptOffset);
+    expect(fs.readdirSync(queue)).toEqual([]);
+    expect(await collect()).toEqual([]);
+  });
+
+  test('a queued Stop without prompt_id waits for its own response when only a later reply is visible', async () => {
+    fs.writeFileSync(transcriptPath, records(user('prompt-a', 'first prompt', 0)));
+    stop('prompt-a', 'first reply');
+    fs.appendFileSync(transcriptPath, records(answer('response-a', 'first reply', 1)));
+    const nextPromptOffset = fs.statSync(transcriptPath).size;
+    fs.appendFileSync(transcriptPath, records(user('prompt-b', 'second prompt', 2)));
+    stop(undefined, 'same reply');
+    fs.appendFileSync(transcriptPath, records(
+      user('prompt-c', 'third prompt', 3), answer('response-c', 'same reply', 4),
+    ));
+
+    const entries = await collect();
+    expect(entries.filter((event) => event['event.name'] === 'llm.response').map((event) => event['gen_ai.response.id']))
+      .toEqual(['response-a']);
+    const checkpoint = path.join(dataDir, 'state', 'claude-code', 'sessions', 'session.json');
+    expect(JSON.parse(fs.readFileSync(checkpoint, 'utf8')).transcript_offset).toBe(nextPromptOffset);
+    expect(fs.readdirSync(queue)).toHaveLength(1);
+  });
+
   test('a full queue falls back to reading the visible calls when this session has no pending Stop', () => {
     fs.mkdirSync(queue, { recursive: true });
     const now = Date.now();
