@@ -927,3 +927,144 @@ async fn old_unsegmented_all_output_uses_its_modified_date() {
     assert_eq!(service.run_cleanup().await, (1, 0));
     assert!(!file.exists());
 }
+
+#[tokio::test]
+async fn openclaw_sdk_retention_uses_acknowledged_offsets_and_keeps_the_active_segment() {
+    use crate::checkpoints::{InputStatePatch, StateStore};
+    use crate::sdk::{
+        outbox::Outbox,
+        policy::{Delivery, Init, Policy},
+    };
+    use crate::utils::file_identity::identity_from_open;
+
+    let fixture = Fixture::new();
+    let root = fixture.0.path().canonicalize().unwrap();
+    let name = format!("openclaw-{}.jsonl", date(14));
+    fixture.write(&format!("logs/openclaw/{name}"), b"sealed\n");
+    let history = root.join("logs/openclaw");
+    let sealed = history.join(&name);
+    let active = format!(
+        "openclaw-{}.segment-000000000001-{}.jsonl",
+        date(14),
+        "a".repeat(32)
+    );
+    std::fs::write(history.join(&active), b"active\n").unwrap();
+    std::fs::write(history.join(format!("{name}.active")), &active).unwrap();
+    let sealed_identity = identity_from_open(&std::fs::File::open(&sealed).unwrap()).unwrap();
+    let active_identity =
+        identity_from_open(&std::fs::File::open(history.join(&active)).unwrap()).unwrap();
+    let state = Arc::new(StateStore::new(root.join("logs/input-state.json")));
+    state.update("openclaw-plugin-log", InputStatePatch {
+        extra: Some(serde_json::json!({
+            "hookLogDir": history, "hookLogPrefix": "openclaw",
+            "hookLogOffsets":{&name: sealed_identity.size, &active: active_identity.size},
+            "hookLogIdentities":{
+                &name: sealed_identity.checkpoint_key(), &active: active_identity.checkpoint_key()
+            }
+        })),
+        ..Default::default()
+    });
+    state.save().await.unwrap();
+    let persisted = std::fs::read_to_string(root.join("logs/input-state.json")).unwrap();
+
+    let sdk_dir = root.join("state/standalone-openclaw-sdk");
+    let init = serde_json::json!({"data_dir":sdk_dir,"resource_dir":root});
+    let policy = serde_json::json!({"agents":["openclaw"],"hcd":{"agent_configs":{
+        "openclaw":{"collection":{"enabled":true,"profile":"openclaw_plugin_v1",
+            "allowed_roots":[root],"pilot_host":{"data_dir":root},
+            "sources":[{"id":"history","type":"hook_jsonl","path":history}]}}
+    }}});
+    let parsed_init: Init = serde_json::from_value(init.clone()).unwrap();
+    let namespace =
+        Policy::parse(policy.clone(), &parsed_init).unwrap().agents["openclaw"].namespace();
+    let manager = Arc::new(super::super::InputManager::new());
+    let sdk = Arc::new(super::super::sdk_agent::SdkAgent::new(
+        "openclaw-plugin-log",
+        init,
+        policy,
+        &manager,
+        sdk_dir.clone(),
+        &state,
+    ));
+    let service = LogRetentionService::new(&root, config())
+        .with_state_store(Arc::clone(&state))
+        .with_openclaw_sdk(Some(sdk));
+    // Legacy state alone must not authorize retention in SDK mode.
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    let delivery = Delivery::default();
+    let outbox = Outbox::open(&sdk_dir.join("outbox"), delivery.clone()).unwrap();
+    outbox
+        .enqueue_hook(br#"{"event.id":"pending-openclaw"}"#)
+        .unwrap();
+    outbox.checkpoint(&namespace, &persisted).unwrap();
+
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    assert!(sealed.is_file());
+    let (batch, _) = outbox.read_batch(&delivery).unwrap();
+    outbox.ack(&batch).unwrap();
+    // Cleanup must be driven by the SDK cursor even without a legacy entry.
+    state.load_checkpoint_text("{}").unwrap();
+    assert_eq!(service.run_cleanup().await, (1, 0));
+    assert!(!sealed.exists());
+    assert!(history.join(active).is_file());
+}
+
+#[tokio::test]
+async fn openclaw_fallback_retention_waits_for_legacy_reader_start() {
+    use crate::checkpoints::{InputStatePatch, StateStore};
+    use crate::core::input_manager::LiveInput;
+    use crate::sdk::{outbox::Outbox, policy::Delivery};
+    use crate::utils::file_identity::identity_from_open;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let fixture = Fixture::new();
+    let root = fixture.0.path().canonicalize().unwrap();
+    let name = format!("openclaw-{}.jsonl", date(14));
+    let file = fixture.write(&format!("logs/openclaw/{name}"), b"sealed\n");
+    old_mtime(&file, 14);
+    let history = root.join("logs/openclaw");
+    let identity = identity_from_open(&std::fs::File::open(&file).unwrap()).unwrap();
+    let state = Arc::new(StateStore::new(root.join("logs/input-state.json")));
+    state.update(
+        "openclaw-plugin-log",
+        InputStatePatch {
+            extra: Some(serde_json::json!({
+                "hookLogDir": history, "hookLogPrefix": "openclaw",
+                "hookLogOffsets": {&name: identity.size},
+                "hookLogIdentities": {&name: identity.checkpoint_key()}
+            })),
+            ..Default::default()
+        },
+    );
+    state.save().await.unwrap();
+    let queue = Outbox::open(
+        &root.join("state/standalone-openclaw-sdk/outbox"),
+        Delivery::default(),
+    )
+    .unwrap();
+    queue
+        .enqueue_hook(br#"{"event.id":"pending-openclaw"}"#)
+        .unwrap();
+    let running = Arc::new(AtomicBool::new(false));
+    let running_probe = running.clone();
+    let legacy = LiveInput::new(
+        "openclaw-plugin-log",
+        "openclaw",
+        "plugin",
+        move || running_probe.load(Ordering::Acquire),
+        || Box::pin(async { Ok(()) }),
+        || Box::pin(async {}),
+    );
+    let service = LogRetentionService::new(&root, config())
+        .with_state_store(state)
+        .with_openclaw_legacy(Some(&legacy));
+    assert_eq!(service.run_cleanup().await, (0, 0));
+    queue
+        .ack(&queue.read_batch(&Delivery::default()).unwrap().0)
+        .unwrap();
+    assert_eq!(service.run_cleanup().await, (0, 0));
+
+    running.store(true, Ordering::Release);
+    assert_eq!(service.run_cleanup().await, (1, 0));
+    assert!(!file.exists());
+}

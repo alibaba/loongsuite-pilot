@@ -109,6 +109,10 @@ SDK 公告 `PILOT_CAP_CODEX_HOOK_CONTROL` 时，宿主可以向 `apply_policy` �
 
 脱敏沿用原 `MaskConfig` 和处理管道。启用本地拦截的敏感类型也会纳入活动脱敏。嵌入实例使用库内置规则，不从宿主工作目录或 HOME 搜索规则文件。SDK 日志按实例保存、轮转并脱敏，不接管宿主日志出口。
 
+### OpenClaw plug-in history
+
+The development profile `openclaw_plugin_v1` accepts one authorized `hook_jsonl` directory from the OpenClaw host plug-in. The full Pilot uses this SDK collector on the regular path and continues to own plug-in deployment and output. Streaming events, subagent identifiers, invocation logs, and the existing interceptor are supplied by the host plug-in. The collector reuses the existing parser and imports its input checkpoint.
+
 ## 活动、监控与背压
 
 `on_activity` 接收多条独立 JSON 视图，沿用现有 Pilot 事件格式作为 `aah.activity.v2` 的兼容基线。数据在交付前序列化一次，SQLite 事务同时接收事件和对应进度；重试、恢复复用原始字节及 `event.id`。

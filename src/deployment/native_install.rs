@@ -144,6 +144,11 @@ pub(super) async fn run_with_retirement(
                                     &paths.cache_dir,
                                     &paths.data_dir,
                                 )?;
+                                let _history_ownership = if operation == "rollback-package" && manifest.runtime == "node" {
+                                    Some(lock_legacy_history_for_rollback(&paths.data_dir).await?)
+                                } else {
+                                    None
+                                };
                                 let publish = matches!(operation, "publish-package" | "rollback-package");
                                 let files = service_files(
                                     &paths.source_dir,
@@ -290,6 +295,66 @@ pub(super) async fn run_with_retirement(
         5_000,
     )
     .await
+}
+
+struct LegacyHistoryRollback {
+    sdk_locks: Vec<fs::File>,
+    collector: crate::utils::SingleInstanceLock,
+}
+
+impl Drop for LegacyHistoryRollback {
+    fn drop(&mut self) {
+        self.sdk_locks.clear();
+        self.collector.release();
+    }
+}
+
+async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRollback> {
+    use crate::sdk::hook_history::{canonical_data_dir, LegacyHistoryOwnership, PROFILES};
+    let data = canonical_data_dir(data)?;
+    let collector_path = data.join("collector.lock");
+    crate::utils::source_access::private_path(&collector_path)?;
+    let collector = crate::utils::acquire_single_instance_lock(
+        collector_path
+            .to_str()
+            .context("Pilot collector lock path is not UTF-8")?,
+        None,
+    )
+    .lock
+    .context("Pilot collector is still running; stop it before rolling back to Node")?;
+    let mut ownership = LegacyHistoryRollback {
+        sdk_locks: Vec::new(),
+        collector,
+    };
+    let mut profiles = Vec::new();
+    for profile in PROFILES {
+        if profile.has_outbox(&data)? {
+            profiles.push(profile);
+        }
+    }
+    if profiles.is_empty() {
+        return Ok(ownership);
+    }
+    let checkpoint_path = data.join("logs/input-state.json");
+    crate::utils::source_access::private_path(&checkpoint_path)?;
+    let legacy = crate::checkpoints::StateStore::new(checkpoint_path);
+    legacy
+        .load_for_handoff()
+        .await
+        .context("Could not read the legacy checkpoint; current version retained")?;
+    for profile in profiles {
+        match profile.export_checkpoint(&data, &legacy).await
+            .with_context(|| format!("Could not transfer {} history checkpoint; current version retained", profile.agent))?
+        {
+            LegacyHistoryOwnership::Pending => anyhow::bail!(
+                "{} SDK activity is still queued. Start the current release and let delivery finish before retrying the rollback",
+                profile.agent
+            ),
+            LegacyHistoryOwnership::Ready(Some(lock)) => ownership.sdk_locks.push(lock),
+            LegacyHistoryOwnership::Ready(None) => {}
+        }
+    }
+    Ok(ownership)
 }
 
 /// The previous pointer authorizes the rollback target, including an installed

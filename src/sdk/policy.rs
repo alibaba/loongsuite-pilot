@@ -123,6 +123,9 @@ pub struct PilotHostState {
 }
 impl AgentPlan {
     pub(super) fn checkpoint_key(&self) -> &'static str {
+        if let Some(profile) = super::hook_history::find(&self.agent) {
+            return profile.listener;
+        }
         match self.profile.as_str() {
             "codex_rollout_v1" => "codex-transcript",
             "codex_aborted_turn_v1" => "codex-aborted-turn",
@@ -378,7 +381,8 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex" | "qoder-cn"),
+                matches!(agent, "qoder" | "codex" | "qoder-cn")
+                    || super::hook_history::find(agent).is_some(),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -427,7 +431,7 @@ impl Policy {
                     (agent, profile),
                     ("qoder", "qoder_trace_v1")
                         | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
-                ),
+                ) || super::hook_history::find(agent).is_some_and(|item| item.profile == profile),
                 "unsupported agent/profile: {agent}/{profile}"
             );
             let roots = collection
@@ -523,6 +527,12 @@ impl Policy {
                     kind: kind.into(),
                     path: resolved,
                 });
+            }
+            if super::hook_history::find(agent).is_some() {
+                anyhow::ensure!(
+                    parsed.len() == 1 && parsed[0].kind == "hook_jsonl",
+                    "this profile requires exactly one hook_jsonl source"
+                );
             }
             if agent == "codex" {
                 anyhow::ensure!(
@@ -679,10 +689,14 @@ impl Policy {
         } else {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
+        let standalone_managed_hook = hooks["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent == "openclaw"));
         hooks["managed_host_rules"] = Value::Bool(
-            ["qoder", "codex", "qoder-cn"]
-                .into_iter()
-                .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
+            (standalone_managed_hook
+                || ["qoder", "codex", "qoder-cn"]
+                    .into_iter()
+                    .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object()))
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
         );
         hooks["embedded_codex"] = serde_json::json!(init.codex_home.is_some());

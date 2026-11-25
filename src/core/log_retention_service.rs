@@ -64,6 +64,8 @@ pub struct LogRetentionService {
     pressure: std::sync::Mutex<Option<JoinHandle<()>>>,
     cleanup_gate: tokio::sync::Mutex<()>,
     state_store: Option<std::sync::Arc<crate::checkpoints::StateStore>>,
+    openclaw_sdk: Option<std::sync::Arc<super::sdk_agent::SdkAgent>>,
+    openclaw_legacy: Option<std::sync::Weak<super::input_manager::LiveInput>>,
     hermes_trace: Option<std::sync::Weak<crate::flushers::OtlpTraceFlusher>>,
 }
 
@@ -77,6 +79,8 @@ impl LogRetentionService {
             pressure: std::sync::Mutex::new(None),
             cleanup_gate: tokio::sync::Mutex::new(()),
             state_store: None,
+            openclaw_sdk: None,
+            openclaw_legacy: None,
             hermes_trace: None,
         }
     }
@@ -86,6 +90,22 @@ impl LogRetentionService {
         store: std::sync::Arc<crate::checkpoints::StateStore>,
     ) -> Self {
         self.state_store = Some(store);
+        self
+    }
+
+    pub(super) fn with_openclaw_sdk(
+        mut self,
+        sdk: Option<std::sync::Arc<super::sdk_agent::SdkAgent>>,
+    ) -> Self {
+        self.openclaw_sdk = sdk;
+        self
+    }
+
+    pub(super) fn with_openclaw_legacy(
+        mut self,
+        input: Option<&std::sync::Arc<super::input_manager::LiveInput>>,
+    ) -> Self {
+        self.openclaw_legacy = input.map(std::sync::Arc::downgrade);
         self
     }
 
@@ -163,13 +183,48 @@ impl LogRetentionService {
             let logs = self.logs_dir.clone();
             let expiry = date_cutoff(self.config.hook_history_days);
             let trace = self.hermes_trace.clone();
+            let openclaw_sdk = self.openclaw_sdk.clone();
+            let openclaw_legacy = self.openclaw_legacy.clone();
             tokio::task::spawn_blocking(move || {
-                clean_raw_sources(&logs, &store, &expiry, pressure_only, |source| {
-                    trace
-                        .as_ref()
-                        .and_then(std::sync::Weak::upgrade)
-                        .is_some_and(|trace| trace.has_pending_hermes_source(source))
-                })
+                let sdk_checkpoint = openclaw_sdk.as_ref().map(|sdk| {
+                    match sdk.acknowledged_checkpoint("openclaw") {
+                        Ok(state) => state,
+                        Err(error) => {
+                            logger("LogRetention").warn(
+                                "OpenClaw SDK checkpoint unavailable for retention",
+                                Some(&fields(serde_json::json!({"error": error.to_string()}))),
+                            );
+                            None
+                        }
+                    }
+                });
+                let sdk_checkpoint = sdk_checkpoint.or_else(|| {
+                    let input = openclaw_legacy.as_ref()?;
+                    let running = input.upgrade().is_some_and(|input| input.running());
+                    if running {
+                        return None;
+                    }
+                    let profile = crate::sdk::hook_history::find("openclaw")?;
+                    let data = logs.parent()?;
+                    let has_outbox = crate::sdk::hook_history::canonical_data_dir(data)
+                        .and_then(|data| profile.has_outbox(&data));
+                    // Until the legacy reader starts, its shared cursor has
+                    // not been validated against the previous SDK owner.
+                    has_outbox.unwrap_or(true).then_some(None)
+                });
+                clean_raw_sources(
+                    &logs,
+                    &store,
+                    sdk_checkpoint,
+                    &expiry,
+                    pressure_only,
+                    |source| {
+                        trace
+                            .as_ref()
+                            .and_then(std::sync::Weak::upgrade)
+                            .is_some_and(|trace| trace.has_pending_hermes_source(source))
+                    },
+                )
             })
             .await
             .unwrap_or((0, 1, 0))
@@ -495,6 +550,7 @@ fn raw_history_directory(dir: &Path) -> bool {
 fn clean_raw_sources(
     logs: &Path,
     store: &crate::checkpoints::StateStore,
+    sdk_openclaw: Option<Option<crate::checkpoints::InputState>>,
     expiry: &str,
     pressure_only: bool,
     protects_hermes: impl Fn(&str) -> bool,
@@ -505,10 +561,16 @@ fn clean_raw_sources(
     };
     let closed_before = date_cutoff(2);
     let (mut deleted, mut errors, mut bytes) = (0, 0, 0_u64);
-    for input in store.keys() {
-        let Some(state) = store.persisted_input(&input) else {
-            continue;
-        };
+    let states = store
+        .keys()
+        .into_iter()
+        .filter(|input| sdk_openclaw.is_none() || input != "openclaw-plugin-log")
+        .filter_map(|input| store.persisted_input(&input).map(|state| (input, state)));
+    let sdk_state = sdk_openclaw
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map(|state| ("openclaw-plugin-log".to_owned(), state.clone()));
+    for (input, state) in states.chain(sdk_state) {
         let Some(extra) = state.extra() else { continue };
         let (Some(dir), Some(prefix)) = (
             extra["hookLogDir"].as_str(),

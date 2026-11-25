@@ -28,6 +28,7 @@ type WriteHook = Arc<
         + Send
         + Sync,
 >;
+type HandoffValidator = fn(&InputState) -> bool;
 
 /// One input's persisted checkpoint.
 ///
@@ -166,6 +167,10 @@ impl InputState {
         let fields = Arc::make_mut(&mut self.fields);
         let current = std::mem::replace(&mut fields[index].1, JVal::Null);
         fields[index].1 = normalize_extra(current);
+    }
+
+    pub(crate) fn from_json(value: serde_json::Value) -> Option<Self> {
+        Self::from_jval(json_file::from_value(value))
     }
 
     fn from_jval(value: JVal) -> Option<Self> {
@@ -318,6 +323,7 @@ fn mark_collect_mutation(data: &mut StoreData, key: Option<&str>) {
 #[derive(Default)]
 struct StoreData {
     states: OrderedMap<InputState>,
+    initial_read_incomplete: bool,
     revision: u64,
     persisted_revision: u64,
     input_revisions: HashMap<String, u64>,
@@ -490,21 +496,73 @@ impl StateStore {
     /// Loads the file. Missing or corrupt JSON becomes an empty map.
     /// Revisions reset to zero, so a following `save` is a no-op until a mutation.
     pub async fn load(&self) {
-        self.load_values(super::state_json::read_json(&self.file_path).await);
+        let (parsed, read_complete) = match tokio::fs::read_to_string(&self.file_path).await {
+            Ok(text) => {
+                let parsed = super::state_json::parse(&text);
+                let read_complete = matches!(parsed, Some(JVal::Object(_)));
+                (parsed, read_complete)
+            }
+            Err(error) => (None, error.kind() == std::io::ErrorKind::NotFound),
+        };
+        self.load_values(parsed, read_complete);
+    }
+
+    pub(crate) async fn load_for_handoff(&self) -> anyhow::Result<()> {
+        self.load_values(self.read_for_handoff().await?, true);
+        Ok(())
+    }
+
+    pub(crate) async fn check_for_handoff(
+        &self,
+        required_input: Option<(&str, HandoffValidator)>,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.mu.lock().unwrap().initial_read_incomplete,
+            "legacy checkpoint was not loaded; repair it and restart Pilot before switching history collection"
+        );
+        let checkpoint = self.read_for_handoff().await?;
+        if let Some((input, validate)) = required_input {
+            let stored = match checkpoint {
+                Some(JVal::Object(entries)) => entries
+                    .into_iter()
+                    .find(|(key, _)| key == input)
+                    .and_then(|(_, value)| InputState::from_jval(value)),
+                _ => None,
+            };
+            let data = self.mu.lock().unwrap();
+            anyhow::ensure!(
+                stored.as_ref().is_some_and(validate) && data.states.get(input) == stored.as_ref(),
+                "authoritative legacy checkpoint for {input} is missing, invalid, or has changed; restore it and restart Pilot before switching history collection"
+            );
+        }
+        Ok(())
+    }
+
+    async fn read_for_handoff(&self) -> anyhow::Result<Option<JVal>> {
+        crate::utils::source_access::private_path(&self.file_path)?;
+        match tokio::fs::read_to_string(&self.file_path).await {
+            Ok(text) => super::state_json::parse(&text)
+                .filter(|value| matches!(value, JVal::Object(_)))
+                .map(Some)
+                .ok_or_else(|| anyhow::anyhow!("invalid legacy checkpoint")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
     }
 
     pub(crate) fn load_checkpoint_text(&self, text: &str) -> anyhow::Result<()> {
         let parsed = super::state_json::parse(text)
             .filter(|value| matches!(value, JVal::Object(_)))
             .ok_or_else(|| anyhow::anyhow!("invalid SDK checkpoint"))?;
-        self.load_values(Some(parsed));
+        self.load_values(Some(parsed), true);
         Ok(())
     }
 
-    fn load_values(&self, parsed: Option<JVal>) {
+    fn load_values(&self, parsed: Option<JVal>, read_complete: bool) {
         let mut data = self.mu.lock().unwrap();
         mark_collect_mutation(&mut data, None);
         data.states.clear();
+        data.initial_read_incomplete = !read_complete;
         data.revision = 0;
         data.persisted_revision = 0;
         data.input_revisions.clear();

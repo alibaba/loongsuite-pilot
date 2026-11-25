@@ -13,6 +13,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 const MAX_PENDING_AUDITS: usize = 128;
+const OPENCLAW_AUDIT_PAIR_TTL: Duration = Duration::from_secs(30);
+const MAX_OPENCLAW_AUDIT_PAIRS: usize = 256;
 
 pub struct Hooks {
     stop: Arc<AtomicBool>,
@@ -80,7 +82,48 @@ enum Audit {
         _slot: AuditSlot,
         activity: Value,
         blocked_prompt: Option<Box<Verdict>>,
+        openclaw_pair: Option<Box<OpenClawAuditPair>>,
     },
+}
+
+enum OpenClawAuditPair {
+    Middleware(OpenClawAuditKey, String),
+    Persist(OpenClawAuditKey, Option<String>),
+}
+
+#[derive(Eq, Hash, PartialEq)]
+struct OpenClawAuditKey {
+    digest: String,
+    tool_name: String,
+    tool_use_id: String,
+}
+
+impl OpenClawAuditPair {
+    fn from_verdict(verdict: &Verdict) -> Option<Self> {
+        if verdict.status != "verdict"
+            || verdict.action != "allow"
+            || verdict.guardrail.as_ref().is_some_and(|guardrail| {
+                guardrail.tool_action() != crate::interceptor::ToolVerdictAction::Allow
+            })
+        {
+            return None;
+        }
+        let request = verdict.request.as_ref()?;
+        let digest = request.raw.get("openclaw_post_tool_audit_key")?.as_str()?;
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let key = OpenClawAuditKey {
+            digest: digest.to_owned(),
+            tool_name: request.tool_name.clone()?,
+            tool_use_id: request.tool_use_id.clone()?,
+        };
+        match request.raw.get("openclaw_hook")?.as_str()? {
+            "tool_result_middleware" => Some(Self::Middleware(key, request.session_id.clone()?)),
+            "tool_result_persist" => Some(Self::Persist(key, request.session_id.clone())),
+            _ => None,
+        }
+    }
 }
 
 // Reserve a writer slot at admission so a slow durable writer cannot occupy
@@ -204,6 +247,8 @@ impl Hooks {
             std::thread::Builder::new()
                 .name("pilot-hook-audit".into())
                 .spawn(move || {
+                    let mut written_openclaw_pairs: HashMap<OpenClawAuditKey, (Instant, String)> =
+                        HashMap::new();
                     for entry in audit_rx {
                         match entry {
                             Audit::Busy => {
@@ -215,14 +260,45 @@ impl Hooks {
                                 _slot,
                                 activity,
                                 blocked_prompt,
+                                openclaw_pair,
                             } => {
+                                let openclaw_pair = openclaw_pair.map(|pair| *pair);
+                                if let Some(OpenClawAuditPair::Persist(key, session)) =
+                                    &openclaw_pair
+                                {
+                                    if written_openclaw_pairs.get(key).is_some_and(
+                                        |(time, seen)| {
+                                            time.elapsed() < OPENCLAW_AUDIT_PAIR_TTL
+                                                && session.as_ref().is_none_or(|id| id == seen)
+                                        },
+                                    ) {
+                                        written_openclaw_pairs.remove(key);
+                                        continue;
+                                    }
+                                }
                                 if let Some(verdict) = blocked_prompt {
                                     record_blocked_prompt(&audit_queue, &audit_settings, &verdict);
                                 }
-                                if let Err(error) =
-                                    audit_queue.enqueue_hook(activity.to_string().as_bytes())
+                                let written = match audit_queue
+                                    .enqueue_hook(activity.to_string().as_bytes())
                                 {
-                                    audit_queue.alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
+                                    Ok(()) => true,
+                                    Err(error) => {
+                                        audit_queue
+                                            .alarm("SDK_HOOK_RECORD_FULL", &error.to_string());
+                                        false
+                                    }
+                                };
+                                if let Some(OpenClawAuditPair::Middleware(key, session)) =
+                                    openclaw_pair.filter(|_| written)
+                                {
+                                    written_openclaw_pairs.retain(|_, (time, _)| {
+                                        time.elapsed() < OPENCLAW_AUDIT_PAIR_TTL
+                                    });
+                                    if written_openclaw_pairs.len() < MAX_OPENCLAW_AUDIT_PAIRS {
+                                        written_openclaw_pairs
+                                            .insert(key, (Instant::now(), session));
+                                    }
                                 }
                             }
                         }
@@ -547,6 +623,15 @@ impl Endpoint {
             false
         };
         let slot = job.audit_slot.take()?;
+        let openclaw_pair = if sent
+            && self.channel == "local"
+            && packet.agent == "openclaw"
+            && packet.event == "PostToolUse"
+        {
+            OpenClawAuditPair::from_verdict(&verdict).map(Box::new)
+        } else {
+            None
+        };
         let activity = json!({
             "event.id":uuid::Uuid::new_v4().to_string(), "event.name":"other",
             "time_unix_nano":chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0).to_string(),
@@ -568,6 +653,7 @@ impl Endpoint {
             _slot: slot,
             activity,
             blocked_prompt,
+            openclaw_pair,
         })
     }
 
@@ -878,6 +964,9 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
                 endpoint.stop.load(Ordering::Relaxed),
             );
         }
+        if unavailable && packet.agent == "openclaw" {
+            return Verdict::unavailable("callback_failed", false);
+        }
         verdict
     };
     let guardrail = (channel == "local" && trusted["managed_host_rules"] == true)
@@ -901,7 +990,11 @@ fn process(endpoint: &Endpoint, job: &Job, deadline: Instant) -> Verdict {
         },
         Some(("allow", _)) => Verdict {
             request,
-            status: "verdict",
+            status: if packet.agent == "openclaw" && verdict["failOpen"] == true {
+                "fail_open"
+            } else {
+                "verdict"
+            },
             guardrail,
             ..Verdict::allow()
         },
