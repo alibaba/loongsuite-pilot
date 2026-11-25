@@ -45,12 +45,13 @@ beforeEach(async () => {
     ['grok-build', '.grok', 'grok-build-loongsuite-pilot-hook.sh', 'stop'],
     ['codex', '.codex', 'codex-loongsuite-pilot-hook.sh', 'Stop'],
     ['claude-code', '.claude', 'claude-code-loongsuite-pilot-hook.sh', 'Stop'],
+    ['cursor', '.cursor', 'cursor-loongsuite-pilot-hook.sh', 'stop'],
   ]) {
     await fs.mkdir(path.join(root, home), { recursive: true });
     await fs.writeFile(path.join(pilot, 'agents.d', id + '.json'), JSON.stringify({
       id, displayName: id, deployMode: 'hook', detection: { paths: [path.join(root, home)], commands: [] },
       hook: { settingsPath: path.join(root, home, 'hooks.json'),
-        systemSettingsPath: path.join(root, 'etc', id + '.toml'),
+        systemSettingsPath: path.join(root, 'etc', id + (id === 'claude-code' ? '.json' : '.toml')),
         hookCommand: '$PILOT_DATA/hooks/' + script, events: [event], format: 'nested' },
     }));
   }
@@ -83,17 +84,23 @@ describe('scope env at existing installation entry points', () => {
     expect(() => parseHookArgs(['install', '--home', 'grok-build=/tmp/other'])).toThrow('cannot be combined');
   });
 
-  it('automatically installs four agents from inherited env while unsupported hooks stay in home', async () => {
+  it('automatically installs shared hooks from inherited env while unsupported hooks stay in home', async () => {
     expect(await runEagerInjection()).toBe(0);
     for (const id of ['grok-build', 'codex']) {
       expect(await fs.readFile(path.join(root, 'etc', id + '.toml'), 'utf8')).toContain('loongsuite-pilot:' + id);
     }
     expect(JSON.parse(await fs.readFile(path.join(root, '.pi/agent/settings.json'), 'utf8')).theme).toBe('keep');
     expect(await fs.readFile(path.join(root, '.dsh/cordis.patch.yml'), 'utf8')).toContain('PILOT-OBSERVABILITY-MANAGED');
-    expect(await fs.readFile(path.join(root, '.claude/hooks.json'), 'utf8')).toContain('Stop');
+    const claudePath = path.join(root, 'etc/claude-code.json');
+    const claudeSettings = JSON.parse(await fs.readFile(claudePath, 'utf8'));
+    expect(claudeSettings.hooks.Stop).toHaveLength(1);
+    expect(await fs.stat(path.join(root, '.claude/hooks.json')).catch(() => null)).toBeNull();
+    expect(await fs.readFile(path.join(root, '.cursor/hooks.json'), 'utf8')).toContain('stop');
     const state = JSON.parse(await fs.readFile(path.join(data, 'deployed-agents.json'), 'utf8'));
     expect(state['grok-build'].hookScope).toBe('system');
     expect(state.codex.hookScope).toBe('system');
+    expect(state['claude-code'].hookScope).toBe('system');
+    expect(state['claude-code'].hookSettingsPath).toBe(claudePath);
     expect(state.dsh.dshPatchPath).toBe(path.join(root, '.dsh/cordis.patch.yml'));
     expect(await runEagerInjection()).toBe(0);
   });

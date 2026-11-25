@@ -13,6 +13,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROCESSOR="$SCRIPT_DIR/claude-code-hook-processor.mjs"
+PILOT_DATA_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+export LOONGSUITE_PILOT_DATA_DIR="${LOONGSUITE_PILOT_DATA_DIR:-$PILOT_DATA_DIR}"
 EMPTY_RESULT='{}'
 SUBCOMMAND="${1:-unknown}"
 
@@ -124,7 +126,7 @@ sort_version_dirs_desc() {
   done | sort -r | cut -d'|' -f2-
 }
 
-NODE_PIN_FILE="$HOME/.loongsuite-pilot/node-bin"
+NODE_PIN_FILE="$LOONGSUITE_PILOT_DATA_DIR/node-bin"
 NODE_BIN=""
 
 # 1. pinned node
