@@ -9,6 +9,16 @@ PROCESSOR="$SCRIPT_DIR/codebuddy-hook-event-writer.mjs"
 SUBCOMMAND="${1:-unknown}"
 NODE_BIN=""
 
+# Prefer the shared resolver: the installer writes the node pin under the
+# configured data/cache directory, not necessarily $HOME/.loongsuite-pilot —
+# a custom data dir with no system node must still find the managed runtime.
+NODE_RUNTIME="$SCRIPT_DIR/shared/node-runtime.sh"
+if [[ -f "$NODE_RUNTIME" ]]; then
+  # shellcheck source=shared/node-runtime.sh
+  source "$NODE_RUNTIME"
+  NODE_BIN="$(resolve_pilot_node_bin || true)"
+fi
+
 for candidate in \
   "$HOME/.loongsuite-pilot/node-bin" \
   "$HOME/.volta/bin/node" \
