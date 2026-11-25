@@ -2331,17 +2331,18 @@ impl HookStrategy {
                     .map(|value| value.to_string())
                     .or_else(|| interceptor.matcher.clone())
                     .or_else(|| hook_config.matcher.clone());
+                let command = format_hook_command(
+                    &interceptor.hook_command,
+                    event,
+                    hook_config.event_subcommand,
+                    &def.id,
+                );
                 HookDefinition {
                     agent_id: def.id.clone(),
                     settings_path: hook_config.settings_path.clone(),
                     settings_syntax: hook_config.settings_syntax,
                     hook_json_path: vec!["hooks".into(), event.clone()],
-                    hook_command: format_hook_command(
-                        &interceptor.hook_command,
-                        event,
-                        hook_config.event_subcommand,
-                        &def.id,
-                    ),
+                    hook_command: command.clone(),
                     matcher,
                     exec_args: None,
                     history_dir: None,
@@ -2361,6 +2362,7 @@ impl HookStrategy {
                                 commands.push(wrap_legacy_ps1_command(&interceptor.hook_command));
                             }
                         }
+                        commands.retain(|alias| alias != &command);
                         Some(commands)
                     },
                     use_nested_format: Some(hook_config.format.as_str() == "nested"),
@@ -2384,7 +2386,7 @@ impl HookStrategy {
     }
 
     fn is_interceptor_definition(&self, def: &AgentDefinition, hook: &HookDefinition) -> bool {
-        self.resource_roots.is_some()
+        (def.id == "qoder-cn" || self.resource_roots.is_some())
             && self
                 .build_interceptor_definitions(def)
                 .iter()
