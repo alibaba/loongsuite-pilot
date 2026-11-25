@@ -3,6 +3,7 @@ import * as fs from 'node:fs/promises';
 import { promises as nativeFs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import * as childProcess from 'node:child_process';
 import { PluginInjectStrategy } from '../../../src/deployment/plugin-inject-strategy.js';
 import type { AgentDefinition } from '../../../src/types/index.js';
@@ -32,6 +33,7 @@ describe('PluginInjectStrategy', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
@@ -223,6 +225,89 @@ describe('PluginInjectStrategy', () => {
     expect(injected.extensions).toEqual([
       'C:/Users/pilot/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs',
     ]);
+  });
+
+  it('keeps the first equivalent Pi extension verbatim and removes only owned paths on undeploy', async () => {
+    const homeDataDir = path.join(os.homedir(), '.loongsuite-pilot');
+    strategy = new PluginInjectStrategy(homeDataDir, tmpDir);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const tildeEntry = '~/.loongsuite-pilot/plugins/pi-coding-agent/index.mjs';
+    const unrelated = '~/different/plugins/pi-coding-agent/index.mjs';
+    const adapter = '~/vendor/loongsuite-pilot-pi-coding-agent-adapter/index.mjs';
+    const preserved = [unrelated, adapter];
+    const original = `// Managed by dotfiles\n${JSON.stringify({ extensions: [tildeEntry, ...preserved] })}\n`;
+    await fs.writeFile(settingsPath, original);
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    expect(await fs.readFile(settingsPath, 'utf8')).toBe(original);
+
+    const absoluteEntry = path.join(homeDataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    await fs.writeFile(settingsPath, JSON.stringify({
+      extensions: [tildeEntry, ...preserved, absoluteEntry, 'loongsuite-pilot-pi-coding-agent'],
+    }));
+    expect(await strategy.needsDeploy(piDefinition())).toBe(true);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+
+    const existing = JSON.parse(await fs.readFile(settingsPath, 'utf8'));
+    expect(existing.extensions).toEqual([tildeEntry, ...preserved]);
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+
+    expect(await strategy.undeploy(piDefinition())).toBe(true);
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual(preserved);
+  });
+
+  it('preserves a Windows Pi extension written with a backslash after the home marker', async () => {
+    vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    const windowsDataDir = path.win32.join(os.homedir(), '.loongsuite-pilot');
+    strategy = new PluginInjectStrategy(windowsDataDir, tmpDir);
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    const tildeEntry = '~\\.loongsuite-pilot/plugins/pi-coding-agent/index.mjs';
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [tildeEntry] }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([tildeEntry]);
+    expect(await strategy.undeploy(piDefinition())).toBe(true);
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([]);
+  });
+
+  it.each([
+    { alias: 'file URL', entry: (spec: string) => pathToFileURL(spec).href },
+    { alias: 'plugin package object', entry: (spec: string) => ({ package: spec }) },
+    { alias: 'plugin package tuple', entry: (spec: string) => [spec, {}] },
+  ])('repairs an owned Pi extension written as a $alias', async ({ entry }) => {
+    const absoluteEntry = path.join(dataDir, 'plugins', 'pi-coding-agent', 'index.mjs');
+    const canonicalEntry = process.platform === 'win32' ? absoluteEntry.replaceAll('\\', '/') : absoluteEntry;
+    const unrelated = '~/vendor/loongsuite-pilot-pi-coding-agent-adapter/index.mjs';
+    await fs.mkdir(path.dirname(settingsPath), { recursive: true });
+    await fs.writeFile(settingsPath, JSON.stringify({ extensions: [entry(absoluteEntry), unrelated] }));
+
+    expect(await strategy.needsDeploy(piDefinition())).toBe(true);
+    await expect(strategy.deploy(piDefinition())).resolves.toMatchObject({ success: true });
+    expect(JSON.parse(await fs.readFile(settingsPath, 'utf8')).extensions).toEqual([unrelated, canonicalEntry]);
+    expect(await strategy.needsDeploy(piDefinition())).toBe(false);
+  });
+
+  it('canonicalizes an owned OpenCode home-relative plugin entry and still removes its old file spec', async () => {
+    const homeDataDir = path.join(os.homedir(), '.loongsuite-pilot');
+    strategy = new PluginInjectStrategy(homeDataDir, tmpDir);
+    const configPath = path.join(tmpDir, 'opencode.json');
+    const definitionUrl = new URL('../../../agents.d/opencode.json', import.meta.url);
+    const def = JSON.parse(await fs.readFile(definitionUrl, 'utf8')) as AgentDefinition;
+    def.pluginInject!.configPaths = [configPath];
+    await fs.writeFile(configPath, JSON.stringify({
+      plugin: ['~/.loongsuite-pilot/plugins/opencode/plugin.mjs', 'singular-keep'],
+      plugins: ['~/.loongsuite-pilot/plugins/opencode', 'plural-keep'],
+    }));
+
+    expect(await strategy.needsDeploy(def)).toBe(true);
+    await expect(strategy.deploy(def)).resolves.toMatchObject({ success: true });
+    const canonical = `file://${path.join(homeDataDir, 'plugins', 'opencode')}`.replace(/\\/g, '/');
+    expect(JSON.parse(await fs.readFile(configPath, 'utf8'))).toEqual({
+      plugin: ['singular-keep'], plugins: ['plural-keep', canonical],
+    });
+    expect(await strategy.needsDeploy(def)).toBe(false);
   });
 
   it('keeps the existing OpenCode plugin/plugins auto-detection behavior', async () => {
