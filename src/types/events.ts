@@ -121,6 +121,7 @@ export interface AgentActivityEntry {
   /** `rules[].version` from the managed document. */
   'gen_ai.guardrail.rule_version'?: string;
   'agent.workbuddy.usage.credit'?: number;
+  'agent.codebuddy.usage.credit'?: number;
   'tool.result.status'?: string;
   /** Grok execution evidence used to associate a tool declaration with its result. */
   'loongsuite.grok.match.strategy'?: 'id' | 'name_order' | 'unmatched';

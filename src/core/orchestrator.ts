@@ -79,6 +79,9 @@ import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
 import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, type DoubaoClient } from '../utils/doubao-work-paths.js';
 import { AntigravityInput, type AntigravityClientType } from '../inputs/antigravity/antigravity-input.js';
+import { CodeBuddyInput } from '../inputs/codebuddy/codebuddy-input.js';
+import { CodeBuddyHistoryInput } from '../inputs/codebuddy/codebuddy-history-input.js';
+import { CodeBuddyRolloutInput } from '../inputs/codebuddy/codebuddy-rollout-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -167,6 +170,9 @@ export class Orchestrator extends EventEmitter {
     'workbuddy': 'workbuddy',
     'doubao-work': 'doubao-work',
     doubao: 'doubao',
+    'codebuddy': 'codebuddy',
+    'codebuddy-history': 'codebuddy',
+    'codebuddy-rollout': 'codebuddy',
     'dsh-log': 'dsh',
     'antigravity': 'antigravity',
     'antigravity-cli': 'antigravity-cli',
@@ -2061,6 +2067,79 @@ export class Orchestrator extends EventEmitter {
         }),
       );
     }
+
+    // --- CodeBuddy (legacy CodeBuddy clients, e.g. CodeBuddy CN / genie) ---
+    // Shares WorkBuddy's hook contract; hook writer redirects events to
+    // state/codebuddy/hook-events. Hook metadata only — no transcript files.
+    const codeBuddyInput = new CodeBuddyInput({
+      stateStore: this.stateStore,
+      hookEventDir: path.join(this.dataDir, 'state', 'codebuddy', 'hook-events'),
+      pollIntervalMs: listenerCfg.codebuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(codeBuddyInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(codeBuddyInput, {
+        watchPaths: CodeBuddyInput.getWatchPaths(),
+        isAvailable: CodeBuddyInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP.codebuddy) &&
+          this.agentControlManager.resolveEnabled(
+            'codebuddy',
+            listenerCfg.codebuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg.codebuddy?.pollInterval,
+      }),
+    );
+
+    // --- CodeBuddy History (message bodies + token usage) ---
+    // Reads the extension's persisted conversation store under
+    // <cacheBase>/CodeBuddyExtension/Data/**/history/<workspace>/<conversation>.
+    // Supplies what the hook contract cannot: message content and usage. Joins
+    // the hook input on gen_ai.session.id (conversationId).
+    const codeBuddyHistoryInput = new CodeBuddyHistoryInput({
+      stateStore: this.stateStore,
+      dataRoots: CodeBuddyHistoryInput.candidateDataRoots(),
+      pollIntervalMs: listenerCfg['codebuddy-history']?.pollInterval ?? listenerCfg.codebuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(codeBuddyHistoryInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(codeBuddyHistoryInput, {
+        watchPaths: CodeBuddyHistoryInput.getWatchPaths(),
+        isAvailable: CodeBuddyHistoryInput.checkAvailability,
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codebuddy-history']) &&
+          this.agentControlManager.resolveEnabled(
+            'codebuddy-history',
+            listenerCfg['codebuddy-history']?.enabled ?? listenerCfg.codebuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['codebuddy-history']?.pollInterval ?? listenerCfg.codebuddy?.pollInterval,
+        unavailableThreshold: 3,
+      }),
+    );
+
+    // --- CodeBuddy CLI Rollout (message bodies + token usage for the CLI) ---
+    // The CLI persists sessions as append-only JSONL rollouts under
+    // ~/.codebuddy/projects/<cwd-slug>/<sessionId>.jsonl (same layout on
+    // Windows / macOS / Linux), with per-turn W3C traceparents and normalized
+    // usage. Synthesizes the same conversation shape as the history store and
+    // reuses its builder, so turn sealing and cancelled-turn capture (hook
+    // boundary evidence joined on the session id) behave identically.
+    const codeBuddyRolloutInput = new CodeBuddyRolloutInput({
+      stateStore: this.stateStore,
+      pollIntervalMs: listenerCfg['codebuddy-rollout']?.pollInterval ?? listenerCfg.codebuddy?.pollInterval,
+    });
+    this.inputManager.registerInput(codeBuddyRolloutInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(codeBuddyRolloutInput, {
+        watchPaths: CodeBuddyRolloutInput.getWatchPaths(),
+        isAvailable: () => CodeBuddyRolloutInput.checkAvailability(),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['codebuddy-rollout']) &&
+          this.agentControlManager.resolveEnabled(
+            'codebuddy-rollout',
+            listenerCfg['codebuddy-rollout']?.enabled ?? listenerCfg.codebuddy?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['codebuddy-rollout']?.pollInterval ?? listenerCfg.codebuddy?.pollInterval,
+        unavailableThreshold: 3,
+      }),
+    );
 
     return entries;
   }

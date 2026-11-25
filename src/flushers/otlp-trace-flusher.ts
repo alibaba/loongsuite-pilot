@@ -1424,6 +1424,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
           CLAUDE_CODE_TURN_TERMINAL_FINISH_REASONS,
         );
     }
+    if (normalizeAgentType(String(entry['gen_ai.agent.type'] ?? '')) === 'codebuddy') {
+      // The history builder seals open turns (tool-call endings, cancelled
+      // runs) with a `gen_ai.turn.end===true` record; a user abort produces
+      // no native terminal finish reason, so without this branch the whole
+      // turn would sit in the buffer forever and never reach the backend.
+      return entry['gen_ai.turn.end'] === true
+        || hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
+    }
     return hasTerminalFinishReason(entry['gen_ai.response.finish_reasons']);
   }
 
