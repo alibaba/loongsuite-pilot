@@ -51,7 +51,11 @@ export function prepareCompression(records: EventLogRecord[], handler: ExtendedT
       && Number.isFinite(duration) && duration > 0) start = end - BigInt(Math.round(duration * 1e9));
     if (start !== undefined && end !== undefined && start >= 0n && end > start) operations.push({ record, start, end });
   }
-  const local = records.filter(record => !isCompression(record));
+  let local = records.filter(record => !isCompression(record));
+  if (operations.some(({ record }) => record['gen_ai.agent.type'] === 'openclaw'
+    && record['gen_ai.context.compress.status'] === 'success')) {
+    local = numberOpenClawReactSteps(local);
+  }
   // Completion-only evidence cannot establish a timed standalone execution.
   if (!local.length && !operations.length) return { records: [], handler };
   for (const operation of operations) {
@@ -118,6 +122,27 @@ export function prepareCompression(records: EventLogRecord[], handler: ExtendedT
     },
   });
   return { records: local, handler: wrapped };
+}
+
+/** OpenClaw model IDs include the internal summary request. The collector
+ * has already removed unpaired requests. Number the remaining ReAct steps
+ * per execution while preserving the original model and step identities. */
+function numberOpenClawReactSteps(records: EventLogRecord[]): EventLogRecord[] {
+  const rounds = new Map<unknown, number>();
+  const counts = new Map<unknown, number>();
+  for (const record of records) {
+    const step = record['gen_ai.step.id'];
+    if (record['gen_ai.agent.type'] !== 'openclaw' || record['event.name'] !== 'llm.request'
+      || typeof step !== 'string' || rounds.has(step)) continue;
+    const turn = record['gen_ai.turn.id'];
+    const round = (counts.get(turn) ?? 0) + 1;
+    counts.set(turn, round);
+    rounds.set(step, round);
+  }
+  return records.map(record => {
+    const round = rounds.get(record['gen_ai.step.id']);
+    return round === undefined ? record : { ...record, 'gen_ai.react.round': round };
+  });
 }
 
 function key(record: EventLogRecord): string {

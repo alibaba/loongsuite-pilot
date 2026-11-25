@@ -28,6 +28,8 @@ const sharedRootLogs = /^(1|true|yes|on)$/i.test(String(process.env.LOONGSUITE_P
 import { appendRawJsonl, RAW_SEGMENT_BYTES } from '../shared/raw-jsonl-writer.mjs';
 
 const AGENT = 'loongsuite-pilot-observability';
+const MAX_CONTEXT_MESSAGES = 2_048;
+const MAX_CONTEXT_BYTES = 1024 * 1024;
 const SENSITIVE_KEY_RE = /(^|[_.-])(TOKEN|SECRET|PASSWORD|CREDENTIAL|COOKIE|API_KEY)([_.-]|$)/i;
 const ENABLED_MARKER = path.join(path.dirname(fileURLToPath(import.meta.url)), '.collection-enabled');
 const INSTALLED_DATA_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -85,6 +87,40 @@ function observe(handler) {
     }
   };
 }
+function installedCompaction(event) {
+  const source = event?.data?.source;
+  return event?.type === 'user/message' && event.surfaceOp?.op === 'replace'
+    && source?.kind === 'compact-checkpoint' && typeof source.compactionId === 'string'
+    ? source.compactionId : undefined;
+}
+
+function retainedCompaction(session) {
+  // A resumed session seeds its surface without publishing session/event.
+  const nodes = session.surface?.nodes;
+  if (!Array.isArray(nodes) || nodes.length > MAX_CONTEXT_MESSAGES || typeof session.eventAt !== 'function') return;
+  let newest = -1;
+  let id;
+  for (const seq of nodes) {
+    if (seq <= newest) continue;
+    const candidate = installedCompaction(session.eventAt(seq));
+    if (!candidate) continue;
+    newest = seq;
+    id = candidate;
+  }
+  return id;
+}
+
+function boundedRequestMessages(session) {
+  const messages = session.deriveMessages?.();
+  if (!Array.isArray(messages) || messages.length > MAX_CONTEXT_MESSAGES) return;
+  let bytes = 2;
+  for (const message of messages) {
+    bytes += Buffer.byteLength(JSON.stringify(message), 'utf8') + 1;
+    if (bytes > MAX_CONTEXT_BYTES) return;
+  }
+  return messages;
+}
+
 const headers = new Map();
 function workerFields() {
   const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: 'dsh' });
@@ -109,15 +145,39 @@ export default function apply(ctx) {
       ...identity,
     });
   }));
+  const contextVersions = new WeakMap();
   ctx.on('session/event', observe((s, e) => {
+    const compactionId = installedCompaction(e);
+    if (compactionId) contextVersions.set(s, compactionId);
     appendLine(sessionFile(s.id), {
       sid: String(s.id),
       seq: e.seq,
       time: e.time,
       type: e.type,
       data: redact(e.data),
+      surfaceOp: e.surfaceOp,
       ...identity,
     });
   }));
+  const recordCompactedRequest = observe(({ agent, frame }) => {
+    const session = agent?.session;
+    if (!session || !Number.isSafeInteger(frame.turn) || !Number.isSafeInteger(frame.step)) return;
+    if (!contextVersions.has(session)) contextVersions.set(session, retainedCompaction(session));
+    const compactionId = contextVersions.get(session);
+    if (!compactionId) return;
+    // The agent has built the request from deriveMessages() by this point.
+    // Capture the start frame only, before chunks or the response mutate history.
+    appendLine(sessionFile(session.id), {
+      sid: String(session.id),
+      time: Date.now(),
+      type: 'loongsuite-pilot/request-context',
+      data: redact({ turn: frame.turn, step: frame.step, compactionId,
+        messages: boundedRequestMessages(session) }),
+      ...identity,
+    });
+  });
+  ctx.on('agent/assistant-stream', (event) => {
+    if (event?.frame?.type === 'start') recordCompactedRequest(event);
+  });
   ctx.logger(AGENT).info('loongsuite-pilot-observability plugin loaded; logDir=%s', logDir());
 }

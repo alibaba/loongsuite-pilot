@@ -2305,6 +2305,13 @@ export class OtlpTraceFlusher extends BaseFlusher {
       if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
       const record = byResponse.get(String(span.attributes['gen_ai.response.id']));
       if (!record) continue;
+      // The SDK's turn-wide delta fold cannot cross a native replacement.
+      // Preserve an unavailable snapshot without backfilling old history.
+      if (record['gen_ai.conversation.compacted'] === true
+        && record['gen_ai.context.content.availability'] === 'unavailable'
+        && (!Array.isArray(record['gen_ai.input.messages']) || record['gen_ai.input.messages'].length === 0)) {
+        delete span.attributes['gen_ai.input.messages'];
+      }
       for (const key of ['gen_ai.context.window_size', 'gen_ai.context.tokens_used',
         'gen_ai.context.window_usage_pct', 'gen_ai.conversation.compacted',
         'gen_ai.context.version', 'gen_ai.context.previous_version', 'gen_ai.context.replacement.boundary',

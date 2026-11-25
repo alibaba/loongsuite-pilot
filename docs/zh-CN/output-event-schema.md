@@ -62,8 +62,8 @@ OTel INTERNAL Span，名称为 `gen_ai.context.compress`，POC 分类为
 | Qoder / QoderCN | transcript `compact_boundary` | 完成时间及原生 pre/post token、duration，缺失时省略 |
 | Codex | rollout `compacted` / `ContextCompaction` completion | 原生开始/结束毫秒、同轮身份、安装后上下文估算、摘要请求 input/output 用量 |
 | Pi Coding Agent | `session_before_compact` / `session_compact` | Hook 区间、同范围文本 chars/4 估算、原生 before 单独保留；新版 failure Hook 及 AbortSignal 记录失败/取消 |
-| OpenClaw | before/after compaction Hook | Hook 区间、原生估算 token 与消息数、session 轮转、skipped |
-| DSH | `compaction/start` / `compaction/end` | 原生区间、压缩 ID、成功/错误、`turn:null` 独立事务 |
+| OpenClaw | before/after compaction Hook 与当前 session branch | Hook 区间、原生估算 token 与消息数、摘要及保留消息、skipped |
+| DSH | `compaction/start` / `compaction/end` 与模型流开始事件 | 原生区间、压缩 ID、成功/错误、已生效的消息快照、`turn:null` 独立事务 |
 
 Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation text，排除 system、工具定义和图片计价。
 Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于执行 AGENT 下，后续 LLM 从压缩结束后开始。
@@ -338,7 +338,11 @@ Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_
 压缩操作和切换后的第一条 LLM 请求记录 `gen_ai.context.previous_version`、
 `gen_ai.context.version` 和 `gen_ai.context.replacement.boundary=replace`。
 Codex 使用原生 window ID，新版本跨后续 LLM 和正常新 turn 保持，下一次安装再切换。
-Pi 使用安装的 compaction entry ID，并在 session 重开时从当前 branch 恢复。
+Pi 和 OpenClaw 使用原生 compaction entry ID，并可在 session 重开时从当前 branch 恢复。
+DSH 使用已生效的 compact checkpoint ID，模型流开始时读取原生 `deriveMessages()`。
+两条路径都将原生摘要映射为 `CompactionPart`。成功替换后，完整快照覆盖旧的消息增量。
+快照缺失时省略压缩后的输入消息，防止旧历史被拼回。
+OpenClaw 的普通 ReAct 步骤按可配对的模型调用编号，压缩摘要请求仍由独立压缩 Span 表示。
 
 Codex 的 `gen_ai.context.retained_message_ids` 来自 native retained-source metadata。
 `agent.codex.context.sampled_through_sequence` 保留原生采样边界。
@@ -353,8 +357,8 @@ Pi 暴露 `agent.pi.context.first_kept_entry_id` 作为保留历史的边界。
 | --- | --- | --- |
 | Codex | 安装后的 replacement history，明文摘要或加密块，window ID、retained-source metadata | 明文/opaque CompactionPart、替换快照、版本关联、来源引用；真实同轮自动压缩及 CMS 对照 |
 | Pi Coding Agent | context Hook 有有效消息，compaction entry 有 summary 和 firstKeptEntryId | CompactionPart、版本、保留边界；真实手动压缩与后续 LLM 的明文输入已有 CMS 回读 |
-| OpenClaw | after_compaction 有计数和 sessionFile，llm_input 有 historyMessages | 后续输入已有采集入口，after Hook 缺少 summary 和精确来源，需结合 session reader 补齐 |
-| DSH | summary 事件和 replacement user/message 有正文，shadowed seqs 有来源信息 | 本 PR 仍只采生命周期，surface replay 和正文版本关联继续适配 |
+| OpenClaw | after_compaction 有计数和 sessionFile，原生 compaction 有摘要和 firstKeptEntryId | 按原生 branch 恢复摘要、保留消息和新增消息；系统提示和模型路由变换依赖各自的原生观测入口 |
+| DSH | compact checkpoint 和模型请求前的有效 surface | 从模型流开始事件采集原生有效消息，保留角色和摘要；路由特定的序列化转换由模型适配器处理 |
 | Qwen Code | PostCompact.compact_summary 有明文，内部候选有 newHistory | 源码确认内容可取，Pilot 专用 Hook 适配待实现 |
 | Hermes | 压缩后的 messages 含 _compressed_summary | 源码确认明文可取，Pilot 适配待实现 |
 | Qoder / QoderCN | compact_boundary 有生命周期信息，摘要依赖对应 transcript writer/version | 生命周期已接入，完整替换消息和来源需逐版本确认 |

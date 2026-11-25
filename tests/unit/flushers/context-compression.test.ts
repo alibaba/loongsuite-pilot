@@ -161,6 +161,71 @@ describe('context compression through the real flusher and SDK', () => {
     expect((await flush([first, last])).filter(s => s.name === 'gen_ai.context.compress')).toHaveLength(1);
   });
 
+  it('uses each DSH admitted snapshot and links its installed context version', async () => {
+    const state = newState();
+    let offset = 0;
+    const records: AgentActivityEntry[] = [];
+    const transform = (type: string, data: Record<string, unknown>, extra = {}) => {
+      const result = transformDshRecord({ sid: 'dsh-session', type, time: start + offset++ * 100,
+        data: { turn: 1, ...data }, ...extra }, ClientType.Dsh, state);
+      if (result) records.push(result);
+    };
+    transform('turn/start', {});
+    transform('request/header', { header: { config: { provider: 'qwen', model: 'qwen-plus' } } });
+    transform('user/message', { content: [{ type: 'text', text: 'replaced history' }] });
+    transform('assistant/chunk', { step: 1, chunk: { type: 'text-delta' } });
+    transform('assistant/message', { step: 1, message: { id: 'before',
+      content: [{ type: 'text', text: 'continue' }] } });
+    for (const [step, id] of [[2, 'cp1'], [3, 'cp2']] as const) {
+      const summary = { role: 'user', source: { kind: 'compact-checkpoint', compactionId: id },
+        content: [{ type: 'text', text: id + ' summary' }] };
+      transform('compaction/start', { compactionId: id });
+      transform('user/message', summary, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } });
+      transform('compaction/end', { compactionId: id });
+      transform('loongsuite-pilot/request-context', { step, compactionId: id, messages: [
+        summary, { role: 'developer', content: [{ type: 'text', text: 'retained directives' }] },
+      ] });
+      transform('assistant/chunk', { step, chunk: { type: 'text-delta' } });
+      transform('assistant/message', { step, message: { id, content: [{ type: 'text', text: 'continue' }] } });
+    }
+    const spans = await flush(records);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(3);
+    for (const [index, id] of [[1, 'cp1'], [2, 'cp2']] as const) {
+      const operation = spans.find(span => span.attributes['gen_ai.context.compress.id'] === id
+        && span.attributes['gen_ai.span.kind'] === 'COMPRESSION')!;
+      const attrs = llms[index].attributes;
+      expect(attrs['gen_ai.context.version']).toBe(operation.attributes['gen_ai.context.version']);
+      expect(attrs['gen_ai.context.previous_version']).toBe(llms[index - 1].attributes['gen_ai.context.version']);
+      expect(JSON.parse(String(attrs['gen_ai.input.messages']))).toEqual([
+        { role: 'user', parts: [{ type: 'compaction', id, content: id + ' summary' }] },
+        { role: 'developer', parts: [{ type: 'text', content: 'retained directives' }] },
+      ]);
+    }
+  });
+
+  it('numbers OpenClaw ReAct steps across an internal summary request and suppresses stale input', async () => {
+    const agentType = { 'gen_ai.agent.type': 'openclaw' };
+    const step = (ordinal: number) => ({ ...agentType, 'gen_ai.step.id': `run:model:${ordinal}`,
+      'gen_ai.provider.name': 'qwen', 'gen_ai.request.model': 'qwen-plus' });
+    const spans = await flush([
+      event('llm.request', 0, { ...step(1), 'gen_ai.input.messages_delta': [{ role: 'user',
+        parts: [{ type: 'text', content: 'stale history' }] }] }),
+      event('llm.response', 50, { ...step(1), 'gen_ai.response.id': 'before' }),
+      event('gen_ai.context.compress.start', 100, agentType),
+      event('llm.request', 150, step(2)),
+      event('gen_ai.context.compress', 1000, { ...agentType, 'gen_ai.context.compress.status': 'success' }),
+      event('llm.request', 1100, { ...step(3), 'gen_ai.conversation.compacted': true,
+        'gen_ai.context.content.availability': 'unavailable' }),
+      event('llm.response', 1200, { ...step(3), 'gen_ai.response.id': 'after' }),
+    ]);
+    const rounds = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(rounds.map(span => span.attributes['gen_ai.react.round'])).toEqual([1, 2]);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms[1].attributes['gen_ai.input.messages']).toBeUndefined();
+  });
+
   it('drops stale DSH full context after a top-level surface rewrite', () => {
     const state = newState();
     const transform = (type: string, data = {}, extra = {}) => transformDshRecord({

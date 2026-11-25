@@ -84,12 +84,12 @@ async function loadPlugin() {
   return mod.default;
 }
 
-function registerPlugin(plugin, pluginConfig = {}) {
+function registerPlugin(plugin, pluginConfig = {}, session) {
   const handlers = {};
   const api = {
     pluginConfig,
     registrationMode: 'full',
-    runtime: { version: '2026.6.10' },
+    runtime: { version: '2026.6.10', agent: { session } },
     on: (name, handler) => { handlers[name] = handler; },
   };
   plugin.register(api);
@@ -101,6 +101,64 @@ function readOutputRecords() {
   const text = fs.readFileSync(logFile, 'utf-8');
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
+
+it.each([true, false])('installs the native compaction branch for the next request (content=%s)', async (captureMessageContent) => {
+  vi.useFakeTimers();
+  const handlers = registerPlugin(await loadPlugin(), { captureMessageContent });
+  const ctx = { runId: 'run', sessionId: 's1', sessionKey: 'agent:main:compact' };
+  const file = path.join(tmpDir, 'session.jsonl');
+  handlers.llm_input({ prompt: 'old prompt', historyMessages: [], model: 'qwen' }, ctx);
+  handlers.model_call_started({ callId: 'before', model: 'qwen' }, ctx);
+  handlers.before_compaction({ messageCount: 3 }, ctx);
+  vi.advanceTimersByTime(3000);
+  const entries = [
+    { type: 'session', id: 's1' },
+    { type: 'message', id: 'old', parentId: null, message: { role: 'user', content: 'old prompt' } },
+    { type: 'message', id: 'keep', parentId: 'old', message: { role: 'user', content: 'keep this' } },
+    { type: 'message', id: 'overflow', parentId: 'keep',
+      message: { role: 'assistant', stopReason: 'error', content: 'overflow detail' } },
+    { type: 'compaction', id: 'native-cp', parentId: 'overflow',
+      timestamp: new Date().toISOString(), firstKeptEntryId: 'keep', summary: 'selected facts' },
+  ];
+  const persist = () => fs.writeFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  persist();
+  handlers.after_compaction({ messageCount: 2, compactedCount: 0, sessionFile: file }, ctx);
+  entries.push({ type: 'message', id: 'next', parentId: 'native-cp',
+    message: { role: 'user', content: 'new input' } });
+  persist();
+  handlers.model_call_started({ callId: 'after', model: 'qwen' }, ctx);
+
+  const records = readOutputRecords();
+  const operation = records.find(record => record['event.name'] === 'gen_ai.context.compress');
+  const after = records.filter(record => record['event.name'] === 'llm.request').at(-1);
+  expect(operation).toMatchObject({
+    'gen_ai.context.compress.status': 'success',
+    'gen_ai.context.version': 's1:compaction:native-cp',
+  });
+  expect(after).toMatchObject({
+    'gen_ai.context.version': operation['gen_ai.context.version'],
+    'gen_ai.context.previous_version': 's1:initial',
+    'gen_ai.context.replacement.boundary': 'replace',
+    'gen_ai.context.compress.id': operation['gen_ai.context.compress.id'],
+  });
+  expect(after['gen_ai.input.messages_delta']).toBeUndefined();
+  if (captureMessageContent) {
+    expect(after['gen_ai.input.messages']).toEqual([
+      { role: 'user', parts: [{ type: 'compaction', id: 'native-cp', content: 'selected facts' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'keep this' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'new input' }] },
+    ]);
+    const resumed = registerPlugin(await loadPlugin(), {}, { resolveSessionFilePath: () => file });
+    resumed.model_call_started({ callId: 'resumed', model: 'qwen' }, { ...ctx, runId: 'next-run' });
+    const request = readOutputRecords().at(-1);
+    expect(request['gen_ai.context.version']).toBe(after['gen_ai.context.version']);
+    expect(request['gen_ai.context.replacement.boundary']).toBeUndefined();
+    expect(request['gen_ai.input.messages']).toEqual(after['gen_ai.input.messages']);
+  } else {
+    expect(after['gen_ai.input.messages']).toBeUndefined();
+    expect(JSON.stringify(records)).not.toContain('selected facts');
+  }
+});
 
 it('pairs compression hooks across session rotation and preserves a skipped outcome', async () => {
   vi.useFakeTimers();
