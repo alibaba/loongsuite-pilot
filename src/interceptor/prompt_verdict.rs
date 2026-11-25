@@ -42,6 +42,7 @@ pub(super) fn valid_digest(text: &str) -> bool {
 fn prompt_agent(agent: &str) -> Option<&'static str> {
     Some(match agent {
         "qodercli" | "qoder-cli" => "qoder-cli",
+        "qoder-cn" | "qoderclicn" => "qoder-cn",
         "qoder" | "qoder-idea" | "qoder-jetbrains" => "qoder",
         "qoder-app" => "qoder-app",
         "qwen-work-cn" => "qwen-work-cn",
@@ -51,7 +52,7 @@ fn prompt_agent(agent: &str) -> Option<&'static str> {
 }
 
 pub(super) fn is_qoder(agent: &str) -> bool {
-    matches!(agent, "qoder" | "qoder-cli" | "qoder-app")
+    matches!(agent, "qoder" | "qoder-cli" | "qoder-app" | "qoder-cn")
 }
 
 impl PromptKey {
@@ -82,7 +83,7 @@ impl PromptKey {
             agent_type: agent.into(),
             prompt_hash: digest(text),
             request_id,
-            missing_request_id: qoder && raw_id.is_none(),
+            missing_request_id: (qoder || request.agent.is_qoder_cn()) && raw_id.is_none(),
             missing_agent_type: source == "qoder" && product.is_none(),
         })
     }
@@ -91,7 +92,9 @@ impl PromptKey {
         self.session_id == lookup.session_id
             && self.prompt_hash == lookup.prompt_hash
             && (self.agent_type == lookup.agent_type
-                || (self.missing_agent_type && is_qoder(lookup.agent_type)))
+                || (self.missing_agent_type
+                    && is_qoder(lookup.agent_type)
+                    && lookup.agent_type != "qoder-cn"))
     }
 
     pub(super) fn valid(&self) -> bool {

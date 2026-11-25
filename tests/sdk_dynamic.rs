@@ -999,6 +999,97 @@ fn qoder_cli_pre_tool_block_exits_two_and_only_required_checks_refuse_on_failure
 }
 
 #[test]
+fn qoder_cn_native_hook_selects_the_host_surface_and_remains_local() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().canonicalize().unwrap();
+    let data = home.join("state/standalone-qoder-cn-sdk");
+    let policy = json!({
+        "agents": ["qoder-cn"],
+        "hcd": {"agent_configs": {"qoder-cn": {"collection": {"enabled": false}}}},
+        "sdk_options": {"hooks": {"local": {"mode": "all"}, "pilot_qoder_use_host_collector": {
+            "data_dir": home, "capture_message_content": false, "exclude_workspaces": [],
+        }}},
+    });
+    let mut host = Host::start_with_home(&data, Some(&home), policy, Box::default());
+    host.ready();
+    assert!(data.join("sdk-hooks-local.json").is_file());
+    assert!(!data.join("sdk-hooks-cloud.json").exists());
+    assert!(!data.join("sdk-hooks-observe.json").exists());
+
+    let run = |event: &str, product: &str| {
+        sdk_hook_command(
+            &data,
+            "local",
+            "qoder-cn-auto",
+            event,
+            &json!({
+                "parent_business_info":{"product":product}, "prompt":"block fixture",
+                "session_id":"cn-fixture", "tool_name":"Bash", "tool_use_id":"tool-fixture",
+            }),
+        )
+        .wait_with_output()
+        .unwrap()
+    };
+    for (product, decision) in [("app", "block"), ("cli", "deny")] {
+        let output = run("UserPromptSubmit", product);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["decision"],
+            decision
+        );
+    }
+    let pre = run("PreToolUse", "cli");
+    assert_eq!(pre.status.code(), Some(2));
+    assert!(pre.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&pre.stderr).contains("SDK foreign host test"));
+    let post = run("PostToolUse", "app");
+    assert!(post.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&post.stdout).unwrap()["hookSpecificOutput"]
+            ["updatedToolOutput"],
+        "SDK foreign host test"
+    );
+    let managed_agents: Vec<_> = host
+        .ctx
+        .hook_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request["kind"] == "managed_local")
+        .filter_map(|request| request["request"]["agent"].as_str().map(str::to_owned))
+        .collect();
+    assert_eq!(
+        managed_agents,
+        ["qoder-cn", "qoderclicn", "qoderclicn", "qoder-cn"]
+    );
+
+    until(|| {
+        let prompts: Vec<_> = host
+            .ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|row| serde_json::from_slice::<Value>(row).unwrap())
+            .filter(|row| row["event.name"] == "llm.request")
+            .collect();
+        if prompts.len() < 2 {
+            return false;
+        }
+        assert_eq!(prompts.len(), 2);
+        assert!(prompts
+            .iter()
+            .all(|row| row["gen_ai.agent.type"] == "qoder-cn"
+                && row.get("gen_ai.input.messages").is_none()
+                && row.get("gen_ai.input.messages_delta").is_none()));
+        true
+    });
+    host.stop();
+    let stopped = run("PreToolUse", "cli");
+    assert!(stopped.status.success() && stopped.stdout.is_empty());
+}
+
+#[test]
 fn explicit_offline_deny_survives_stop_and_is_revoked_by_the_next_policy() {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");

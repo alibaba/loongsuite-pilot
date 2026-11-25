@@ -17,3 +17,4 @@ mod source_tests;
 
 /// State directory for the shared SDK instance hosted by full Pilot.
 pub const STANDALONE_QODER_DATA: &str = "state/standalone-qoder-sdk";
+pub(crate) const STANDALONE_QODER_CN_DATA: &str = "state/standalone-qoder-cn-sdk";

@@ -378,7 +378,7 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex"),
+                matches!(agent, "qoder" | "codex" | "qoder-cn"),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -390,6 +390,14 @@ impl Policy {
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| anyhow::anyhow!("collection.enabled must be boolean"))?;
+            anyhow::ensure!(
+                agent != "qoder-cn"
+                    || (!enabled
+                        && raw
+                            .pointer("/sdk_options/hooks/pilot_qoder_use_host_collector")
+                            .is_some()),
+                "Qoder CN is a standalone local Hook profile"
+            );
             if !enabled || raw.get("dynamic_observe_enabled") == Some(&Value::Bool(false)) {
                 continue;
             }
@@ -636,15 +644,22 @@ impl Policy {
             .expect("validated hooks")
             .remove("pilot_qoder_use_host_collector");
         if let Some(value) = use_host_collector {
+            let (agent, standalone_path) = match hooks["agents"].as_array().map(Vec::as_slice) {
+                Some([agent]) if agent == "qoder" => ("qoder", super::STANDALONE_QODER_DATA),
+                Some([agent]) if agent == "qoder-cn" => {
+                    ("qoder-cn", super::STANDALONE_QODER_CN_DATA)
+                }
+                _ => anyhow::bail!("invalid standalone Qoder Hook policy"),
+            };
             anyhow::ensure!(
-                agents.is_empty() && hooks["agents"] == serde_json::json!(["qoder"]),
-                "invalid standalone Qoder Hook policy"
+                agents.is_empty(),
+                "invalid standalone Qoder Hook collection"
             );
             let data = init
                 .data_dir
                 .parent()
                 .and_then(Path::parent)
-                .filter(|data| data.join(super::STANDALONE_QODER_DATA) == init.data_dir)
+                .filter(|data| data.join(standalone_path) == init.data_dir)
                 .ok_or_else(|| anyhow::anyhow!("invalid standalone Qoder Hook directory"))?;
             let home = init
                 .home_dir
@@ -656,7 +671,7 @@ impl Policy {
                 "invalid standalone Qoder Hook state"
             );
             state.data_dir = canonical_candidate(data)?;
-            hooks["collector_plans"]["qoder"] = serde_json::json!({
+            hooks["collector_plans"][agent] = serde_json::json!({
                 "pilot_host": state,
                 "sources": [{"kind": "transcript", "path": canonical_candidate(home)?}],
             });
@@ -665,7 +680,7 @@ impl Policy {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
         hooks["managed_host_rules"] = Value::Bool(
-            ["qoder", "codex"]
+            ["qoder", "codex", "qoder-cn"]
                 .into_iter()
                 .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),

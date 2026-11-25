@@ -55,6 +55,7 @@ impl SdkAgent {
     }
 
     pub fn hook_only(
+        input: &'static str,
         init: Value,
         policy: Value,
         manager: &Arc<InputManager>,
@@ -62,7 +63,7 @@ impl SdkAgent {
         verdicts: Arc<ToolVerdictStore>,
     ) -> Self {
         Self {
-            input: "qoder-trace",
+            input,
             init: init.to_string().into_bytes(),
             managed: configure_managed_hook(&policy, &sdk_data, manager),
             policy: policy.to_string().into_bytes(),

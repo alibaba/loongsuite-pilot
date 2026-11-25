@@ -12,7 +12,13 @@
     "hookCommand": "$PILOT_DATA/hooks/qodercn-loongsuite-pilot-hook.sh",
     "format": "nested",
     "matcher": "*",
-    "winShell": "powershell"
+    "winShell": "powershell",
+    "interceptor": {
+      "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+      "hookCommand": "$PILOT_DATA/hooks/interceptor-hook.sh --agent qoder-cn-auto",
+      "matcher": "*",
+      "insert": "head"
+    }
   },
   "input": {
     "type": "hook-jsonl",

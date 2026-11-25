@@ -83,6 +83,7 @@ fn is_interceptor_agent(agent_type: &str) -> bool {
         "qodercli",
         "qoder-idea",
         "qoder-jetbrains",
+        "qoder-cn",
     ];
     let lower = agent_type.to_ascii_lowercase();
     QODER.contains(&lower.as_str())

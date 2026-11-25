@@ -98,7 +98,7 @@ fn private_new_file(path: &Path) -> std::io::Result<std::fs::File> {
 
 fn block_output(agent: &str, event: &str, reason: &str) -> Option<HookOutput> {
     // Qoder CLI uses the native exit status and stderr for PreToolUse.
-    if agent == "qodercli" && event == "PreToolUse" {
+    if matches!(agent, "qodercli" | "qoderclicn") && event == "PreToolUse" {
         Some(HookOutput::Block(block_reason(reason).to_owned()))
     } else {
         render_block(agent, event, reason).map(HookOutput::Json)
@@ -147,7 +147,7 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     let managed =
         configured_agent == "codex" && args.iter().any(|arg| arg == "--pilot-sdk-managed");
     let configured_event = flag(&args, "--event");
-    if configured_event.is_none() && configured_agent != "qoder-auto" {
+    if configured_event.is_none() && !matches!(configured_agent, "qoder-auto" | "qoder-cn-auto") {
         return None;
     }
     let id = format!("{:08x}{:032x}", std::process::id(), unix_time()?.as_nanos());
@@ -191,17 +191,13 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
                 .and_then(serde_json::Value::as_str)
         })?
         .to_owned();
-    let agent = if configured_agent == "qoder-auto" {
-        match payload
-            .get("parent_business_info")
-            .and_then(|parent| parent["product"].as_str())
-        {
-            Some("app") => "qoder",
-            Some("cli") => "qodercli",
-            _ => qoder::agent(),
-        }
-    } else {
-        configured_agent
+    let product = payload
+        .get("parent_business_info")
+        .and_then(|parent| parent["product"].as_str());
+    let agent = match configured_agent {
+        "qoder-auto" => qoder::agent(false, product),
+        "qoder-cn-auto" => qoder::agent(true, product),
+        agent => agent,
     }
     .to_owned();
     let offline = |trace: &mut RequestTrace| {

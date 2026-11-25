@@ -120,13 +120,16 @@ pub fn block_reason(reason: &str) -> &str {
 }
 
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
-    if !matches!(agent, "qoder" | "qodercli" | "codex") {
+    if !matches!(
+        agent,
+        "qoder" | "qodercli" | "qoder-cn" | "qoderclicn" | "codex"
+    ) {
         return None;
     }
     let reason = block_reason(reason);
     let output = match event {
         "UserPromptSubmit" => {
-            json!({"decision":if agent!="qodercli"{"block"}else{"deny"},"reason":reason})
+            json!({"decision":if matches!(agent, "qodercli" | "qoderclicn") {"deny"} else {"block"},"reason":reason})
         }
         "PreToolUse" => {
             json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}})

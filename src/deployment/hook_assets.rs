@@ -40,9 +40,12 @@ pub(crate) fn managed_assets(def: &AgentDefinition, data: &Path) -> Result<Vec<S
             .trim_end_matches('/')
     );
     let mut assets = Vec::new();
-    for command in std::iter::once(&hook.hook_command)
-        .chain(hook.interceptor.iter().map(|item| &item.hook_command))
-    {
+    for command in std::iter::once(&hook.hook_command).chain(
+        hook.interceptor
+            .iter()
+            .filter(|_| def.id != "qoder-cn")
+            .map(|item| &item.hook_command),
+    ) {
         let normalized = command.trim_start_matches('"').replace('\\', "/");
         let Some(relative) = normalized.strip_prefix(&prefix) else {
             continue;

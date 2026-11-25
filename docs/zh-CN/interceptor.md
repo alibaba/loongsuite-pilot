@@ -102,6 +102,12 @@ CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CL
 
 Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10 秒。CLI 请求 daemon 的超时是 4 秒。
 
+### Qoder CN
+
+完整 Pilot 为 Qoder CN Desktop 和 CLI 在共享的 `~/.qoder-cn/settings.json` 部署原生 `sdk-hook --channel local --agent qoder-cn-auto`。三个裁决点为 `UserPromptSubmit`、`PreToolUse`、`PostToolUse`。关闭拦截会移除 Pilot 的裁决项，保留采集和第三方 Hook。
+
+显式载荷的 `parent_business_info.product` 优先，其后是 CN CLI 环境标识和进程祖先。托管规则可分别匹配 `qoder-cn`（桌面）和 `qoderclicn`（CLI）。被拦截提示词和采集事件使用相同的 `gen_ai.agent.type=qoder-cn`。CN CLI 的 `PreToolUse` 通过退出码 2 和 stderr 拒绝工具调用。
+
 ## 千问办公（QwenWork）协议
 
 [千问办公企业 Hooks](https://help.aliyun.com/zh/qwenwork/hooks)

@@ -22,11 +22,17 @@ pub(super) async fn restore_legacy_hooks(
     cache: &Path,
     data: &Path,
 ) -> Result<()> {
-    if !manifest
-        .resources
-        .iter()
-        .any(|resource| resource.path == "agents.d/qoder.json")
-    {
+    let agents: Vec<_> = ["qoder", "qoder-cn"]
+        .into_iter()
+        .filter(|agent| {
+            let path = format!("agents.d/{agent}.json");
+            manifest
+                .resources
+                .iter()
+                .any(|resource| resource.path == path)
+        })
+        .collect();
+    if agents.is_empty() {
         return Ok(());
     }
     let Some(current) = read_pointer(&cache.join("current"))? else {
@@ -50,35 +56,37 @@ pub(super) async fn restore_legacy_hooks(
         builtin_agents_dir: None,
         installed_by: None,
     });
-    let definition = package_qoder_definition(previous, data)?;
-    let hook = definition
-        .hook
-        .as_ref()
-        .context("Previous Qoder hook is missing")?;
-    let mut paths: BTreeSet<_> = manager
-        .read_recorded_settings_paths("qoder")
-        .await
-        .map_err(anyhow::Error::msg)?
-        .into_iter()
-        .collect();
-    paths.insert(crate::utils::resolve_home(&hook.settings_path));
     let mut configurations = BTreeMap::new();
     let mut definitions = BTreeMap::new();
-    for path in paths {
-        let target = PathBuf::from(&path);
-        ensure!(
-            target.is_absolute() && !path.chars().any(char::is_control),
-            "Invalid recorded Qoder settings path"
-        );
-        if matches!(std::fs::symlink_metadata(&target), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
-        {
-            continue;
+    for agent in agents {
+        let definition = package_qoder_definition(previous, data, agent)?;
+        let hook = definition
+            .hook
+            .as_ref()
+            .context("Previous Qoder hook is missing")?;
+        let mut paths: BTreeSet<_> = manager
+            .read_recorded_settings_paths(agent)
+            .await
+            .map_err(anyhow::Error::msg)?
+            .into_iter()
+            .collect();
+        paths.insert(crate::utils::resolve_home(&hook.settings_path));
+        for path in paths {
+            let target = PathBuf::from(&path);
+            ensure!(
+                target.is_absolute() && !path.chars().any(char::is_control),
+                "Invalid recorded Qoder settings path"
+            );
+            if matches!(std::fs::symlink_metadata(&target), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            {
+                continue;
+            }
+            let resolved =
+                definition_at_hook_settings(&definition, &path).map_err(anyhow::Error::msg)?;
+            let key = format!("qoder-settings:{}", configurations.len());
+            configurations.insert(key.clone(), target);
+            definitions.insert(key, resolved);
         }
-        let resolved =
-            definition_at_hook_settings(&definition, &path).map_err(anyhow::Error::msg)?;
-        let key = format!("qoder-settings:{}", configurations.len());
-        configurations.insert(key.clone(), target);
-        definitions.insert(key, resolved);
     }
     if configurations.is_empty() {
         return Ok(());
@@ -118,7 +126,11 @@ pub(super) async fn restore_legacy_hooks(
         .await
 }
 
-fn package_qoder_definition(package: &Path, data: &Path) -> Result<crate::types::AgentDefinition> {
+fn package_qoder_definition(
+    package: &Path,
+    data: &Path,
+    agent: &str,
+) -> Result<crate::types::AgentDefinition> {
     let loader = AgentDefLoader::new(AgentDefLoaderOptions {
         data_dir: data
             .to_str()
@@ -131,12 +143,12 @@ fn package_qoder_definition(package: &Path, data: &Path) -> Result<crate::types:
         builtin_dir: String::new(),
         local_dir: String::new(),
     });
-    let file = resource_file(package, "agents.d/qoder.json")?;
+    let file = resource_file(package, &format!("agents.d/{agent}.json"))?;
     let raw = serde_json::from_slice(&std::fs::read(file)?)?;
     let definition: crate::types::AgentDefinition =
         serde_json::from_value(loader.resolve_value(&raw))?;
     ensure!(
-        definition.id == "qoder",
+        definition.id == agent,
         "Invalid Qoder definition in runtime package"
     );
     Ok(definition)
@@ -156,7 +168,7 @@ pub(super) async fn activate_direct_hooks(
         target.is_absolute() && !settings.chars().any(char::is_control),
         "Invalid Qoder settings path"
     );
-    let definition = package_qoder_definition(package, data)?;
+    let definition = package_qoder_definition(package, data, "qoder")?;
     let definition =
         definition_at_hook_settings(&definition, settings).map_err(anyhow::Error::msg)?;
     let configs = BTreeMap::from([("config".into(), target)]);
