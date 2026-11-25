@@ -11,7 +11,6 @@ import {
 } from '../types.js';
 import {
   PATTERN_BLOCKED_REASON,
-  patternRuleMatches,
   type ManagedInterceptorConfig,
   type ManagedPatternRule,
   type ManagedScriptRule,
@@ -93,7 +92,21 @@ export class ManagedRuleEngine implements HookEvaluator {
         evaluatedRules.push(rule.id);
         const text = requestText();
         if (rule.match === 'substring') {
-          if (!patternRuleMatches(rule, text)) continue;
+          let matched = false;
+          for (const keyword of rule.keywords) {
+            if (Date.now() >= deadline) {
+              failed = true;
+              return result();
+            }
+            matched = text.includes(keyword);
+            // A scan may consume the remaining budget, including the final scan.
+            if (Date.now() >= deadline) {
+              failed = true;
+              return result();
+            }
+            if (matched) break;
+          }
+          if (!matched) continue;
           if (hit(rule, PATTERN_BLOCKED_REASON)) return result(true);
           continue;
         }

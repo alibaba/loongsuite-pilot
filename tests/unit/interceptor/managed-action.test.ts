@@ -82,11 +82,38 @@ describe('managed action', () => {
 
   it('retains audit matches when the shared budget expires before another substring rule', async () => {
     const evaluator = engine([pattern('first', 'log'), pattern('second', 'log')], { budgetMs: 10 });
-    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(11);
+    // Deadline, first rule, first keyword before/after scan; next rule is expired.
+    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0)
+      .mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(11);
     const result = await evaluator.evaluate(request);
     expect(result).toMatchObject({ action: 'allow', matched: true, failOpen: true,
       ruleId: 'first', evaluatedRules: ['first'] });
     expect(result.matches).toHaveLength(1);
+  });
+
+  it.each([false, true])('stops within a keyword list when the budget expires (prior audit=%s)', async priorAudit => {
+    const evaluator = engine([
+      ...(priorAudit ? [pattern('audit', 'log')] : []),
+      { ...pattern('list'), keywords: ['absent', 'MATCH'] },
+      pattern('unreached'),
+    ], { budgetMs: 10 });
+    // Allow the audit, rule entry and first scan, then expire before the matching keyword.
+    const clock = vi.spyOn(Date, 'now');
+    for (let i = 0; i < (priorAudit ? 7 : 4); i++) clock.mockReturnValueOnce(0);
+    clock.mockReturnValue(10);
+    const result = await evaluator.evaluate(request);
+    expect(result).toMatchObject({ action: 'allow', failOpen: true,
+      evaluatedRules: priorAudit ? ['audit', 'list'] : ['list'] });
+    expect(result.matches!.map(match => match.ruleId)).toEqual(priorAudit ? ['audit'] : []);
+    if (priorAudit) expect(result).toMatchObject({ matched: true, ruleId: 'audit' });
+    else expect(result).not.toHaveProperty('matched');
+  });
+
+  it.each(['MATCH', 'absent'])('fails open when the final keyword scan exhausts the budget (%s)', async keyword => {
+    const evaluator = engine([{ ...pattern('list'), keywords: [keyword] }, pattern('unreached')], { budgetMs: 10 });
+    vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValueOnce(0).mockReturnValue(10);
+    const result = await evaluator.evaluate(request);
+    expect(result).toEqual({ action: 'allow', failOpen: true, matches: [], evaluatedRules: ['list'] });
   });
 
   it('retains audit matches after a later script timeout or rejected runner', async () => {
