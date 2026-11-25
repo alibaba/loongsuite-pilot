@@ -1,6 +1,7 @@
 //! Shared collector dynamic-library boundary. See include/pilot_sdk.h.
 pub mod abi;
 mod api;
+pub(crate) mod hook_history;
 pub(crate) mod host_loader;
 mod monitoring;
 mod policy;

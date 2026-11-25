@@ -134,6 +134,13 @@ pub(crate) fn read_hook_manifest(pilot: &Path) -> Result<RuntimeManifest> {
 }
 
 fn load_assets(def: &AgentDefinition, pilot: &Path, data: &Path) -> Result<Vec<(String, String)>> {
+    if def
+        .hook
+        .as_ref()
+        .is_some_and(|hook| hook.native_sdk_data.is_some())
+    {
+        return Ok(Vec::new());
+    }
     let assets = managed_assets(def, data)?;
     if assets.is_empty() {
         return Ok(Vec::new());
@@ -196,6 +203,20 @@ pub(super) struct HookAssets {
     config_mode: u32,
 }
 
+fn owns_cursor_config_marker(def: &AgentDefinition, has_scripts: bool) -> bool {
+    match def.id.as_str() {
+        "cursor" => {
+            has_scripts
+                || def
+                    .hook
+                    .as_ref()
+                    .is_some_and(|hook| hook.native_sdk_data.is_some())
+        }
+        "cursor-cli" => has_scripts,
+        _ => false,
+    }
+}
+
 impl HookAssets {
     pub(super) fn configuration_cleanup(root: &Path) -> Self {
         Self {
@@ -215,6 +236,7 @@ impl HookAssets {
             let path = safe_destination(root, &relative)?;
             files.push((relative, path, content));
         }
+        let cursor_config = pilot.is_some() && owns_cursor_config_marker(def, !files.is_empty());
         if !files.is_empty() {
             let binary = super::runtime_launcher::hook_binary(root)?
                 .to_string_lossy()
@@ -225,13 +247,13 @@ impl HookAssets {
                 safe_destination(root, "pilot-bin")?,
                 format!("{binary}\n"),
             ));
-            if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
-                files.push((
-                    crate::hook_process::CURSOR_CONFIG_MARKER.into(),
-                    safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
-                    crate::hook_process::cursor_config_record(root)?,
-                ));
-            }
+        }
+        if cursor_config {
+            files.push((
+                crate::hook_process::CURSOR_CONFIG_MARKER.into(),
+                safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
+                crate::hook_process::cursor_config_record(root)?,
+            ));
         }
         Ok(Self {
             root: root.into(),
@@ -247,7 +269,12 @@ impl HookAssets {
     pub(super) fn cleanup(def: &AgentDefinition, root: &Path, managed: bool) -> Result<Self> {
         // 清理只需要当前声明的目标集合，不要求待删除引用的源包仍然完整。
         let mut files = Vec::new();
-        if managed {
+        if managed
+            && def
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.native_sdk_data.is_none())
+        {
             for relative in managed_assets(def, root)? {
                 let path = safe_destination(root, &relative)?;
                 files.push((relative, path, String::new()));
@@ -258,14 +285,14 @@ impl HookAssets {
                     safe_destination(root, "pilot-bin")?,
                     String::new(),
                 ));
-                if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
-                    files.push((
-                        crate::hook_process::CURSOR_CONFIG_MARKER.into(),
-                        safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
-                        String::new(),
-                    ));
-                }
             }
+        }
+        if managed && owns_cursor_config_marker(def, !files.is_empty()) {
+            files.push((
+                crate::hook_process::CURSOR_CONFIG_MARKER.into(),
+                safe_destination(root, crate::hook_process::CURSOR_CONFIG_MARKER)?,
+                String::new(),
+            ));
         }
         Ok(Self {
             root: root.into(),
@@ -502,7 +529,7 @@ fn pin_configuration_parent(path: &Path) -> Result<PathBuf> {
     }
 }
 
-async fn with_config_locks<T, Fut>(
+pub(super) async fn with_config_locks<T, Fut>(
     paths: &[PathBuf],
     body: impl FnOnce() -> Fut + Send,
 ) -> Result<T>
@@ -555,6 +582,17 @@ pub fn healthy(def: &AgentDefinition, pilot: &Path, data: &Path) -> bool {
     let Ok(assets) = load_assets(def, pilot, data) else {
         return false;
     };
+    if owns_cursor_config_marker(def, !assets.is_empty()) {
+        let Ok(marker) = safe_destination(data, crate::hook_process::CURSOR_CONFIG_MARKER) else {
+            return false;
+        };
+        let Ok(expected) = crate::hook_process::cursor_config_record(data) else {
+            return false;
+        };
+        if std::fs::read_to_string(marker).ok().as_deref() != Some(&expected) {
+            return false;
+        }
+    }
     if assets.is_empty() {
         return true;
     }
@@ -571,17 +609,6 @@ pub fn healthy(def: &AgentDefinition, pilot: &Path, data: &Path) -> bool {
         != Some(format!("{}\n", binary.display()).as_str())
     {
         return false;
-    }
-    if matches!(def.id.as_str(), "cursor" | "cursor-cli") {
-        let Ok(marker) = safe_destination(data, crate::hook_process::CURSOR_CONFIG_MARKER) else {
-            return false;
-        };
-        let Ok(expected) = crate::hook_process::cursor_config_record(data) else {
-            return false;
-        };
-        if std::fs::read_to_string(marker).ok().as_deref() != Some(&expected) {
-            return false;
-        }
     }
     assets.into_iter().all(|(relative, content)| {
         let Ok(path) = safe_destination(data, &relative) else {
@@ -742,8 +769,10 @@ mod tests {
             let data = root.path().join(link_kind);
             let external = root.path().join(format!("external-{link_kind}"));
             std::fs::create_dir_all(&external).unwrap();
-            let mut def: AgentDefinition =
-                serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+            let mut def: AgentDefinition = serde_json::from_str(include_str!(
+                "../../tests/fixtures/legacy-cursor-agent.json"
+            ))
+            .unwrap();
             def.hook.as_mut().unwrap().hook_command =
                 format!("{}/hooks/cursor-loongsuite-pilot-hook.sh", data.display());
             if link_kind == "root" {
@@ -778,8 +807,10 @@ mod tests {
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();
         std::fs::write(pilot.join("assets/hooks/fixture.sh"), "entry").unwrap();
         std::fs::write(pilot.join("assets/hooks/shared/native.sh"), "shared").unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::write(pilot.join("Cargo.toml"), "[package]\n").unwrap();
@@ -807,8 +838,10 @@ mod tests {
         let external = root.path().join("external");
         std::fs::write(&external, "shared").unwrap();
         std::os::unix::fs::symlink(&external, pilot.join("assets/hooks/shared/native.sh")).unwrap();
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command = format!("{}/hooks/fixture.sh", data.display());
         assert!(HookAssets::load(&def, Some(&pilot), &data).is_err());
         std::fs::remove_file(pilot.join("assets/hooks/shared/native.sh")).unwrap();
@@ -829,8 +862,10 @@ mod tests {
         let pilot = root.path().join("candidate");
         seed_development_root(&pilot);
         let data = root.path().join("数据 🚀");
-        let mut def: AgentDefinition =
-            serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        let mut def: AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
+        .unwrap();
         def.hook.as_mut().unwrap().hook_command =
             format!("{}/hooks/cursor-loongsuite-pilot-hook.ps1", data.display());
         std::fs::create_dir_all(pilot.join("assets/hooks/shared")).unwrap();

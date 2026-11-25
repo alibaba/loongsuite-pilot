@@ -1,4 +1,6 @@
 //! Hard deadline belongs to the main thread. This module has no collector link.
+#[path = "cursor_inbox.rs"]
+mod cursor_inbox;
 #[path = "hook_protocol.rs"]
 mod protocol;
 #[path = "hook_qoder.rs"]
@@ -149,6 +151,40 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
     let configured_event = flag(&args, "--event");
     if configured_event.is_none() && !matches!(configured_agent, "qoder-auto" | "qoder-cn-auto") {
         return None;
+    }
+    if channel == "observe" && configured_agent == "cursor" {
+        let event = configured_event?;
+        if !matches!(
+            event,
+            "stop"
+                | "preToolUse"
+                | "postToolUse"
+                | "postToolUseFailure"
+                | "beforeSubmitPrompt"
+                | "preCompact"
+                | "sessionStart"
+                | "sessionEnd"
+                | "subagentStart"
+                | "subagentStop"
+                | "afterAgentResponse"
+                | "afterAgentThought"
+        ) {
+            return None;
+        }
+        let mut body = Vec::new();
+        std::io::stdin()
+            .take((MAX_REQUEST + 1) as u64)
+            .read_to_end(&mut body)
+            .ok()?;
+        if body.len() <= MAX_REQUEST {
+            if let Err(error) = cursor_inbox::publish(&data, &body, event) {
+                eprintln!(
+                    "loongsuite-pilot: Cursor Hook inbox write failed: {}",
+                    error.kind()
+                );
+            }
+        }
+        return Some(HookOutput::Json("{}\n".into()));
     }
     let id = format!("{:08x}{:032x}", std::process::id(), unix_time()?.as_nanos());
     let mut trace = RequestTrace {

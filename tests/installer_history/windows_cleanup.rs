@@ -333,7 +333,7 @@ async fn cleanup_other_agents_keep_initial_bom_during_real_native_hook_cleanup()
     let f = Fixture::new();
     let settings = f.root.path().join(".cursor/hooks.json");
     let mut source: Value =
-        serde_json::from_str(include_str!("../../agents.d/cursor.json")).unwrap();
+        serde_json::from_str(include_str!("../fixtures/legacy-cursor-agent.json")).unwrap();
     source["hook"]["settingsPath"] = json!(settings);
     let resource = source.to_string();
     f.package_with(&[("agents.d/cursor.json", &resource)]);

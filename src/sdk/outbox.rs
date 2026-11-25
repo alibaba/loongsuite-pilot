@@ -16,11 +16,13 @@ use std::time::{Duration, Instant};
 const CODEX_SHELL_MIGRATED: &str = "__pilot_codex_shell_migrated_v1";
 const CODEX_LEGACY_EXPORTED: &str = "__pilot_codex_legacy_exported_v1";
 const QODER_LEGACY_EXPORTED: &str = "__pilot_qoder_legacy_exported_v1";
+const HOOK_HISTORY_LEGACY_EXPORTED: &str = "__pilot_hook_history_legacy_exported_v1";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyCheckpointHandoff {
     Codex,
     Qoder,
+    HookHistory(&'static str),
 }
 
 impl LegacyCheckpointHandoff {
@@ -28,6 +30,7 @@ impl LegacyCheckpointHandoff {
         match self {
             Self::Codex => CODEX_LEGACY_EXPORTED,
             Self::Qoder => QODER_LEGACY_EXPORTED,
+            Self::HookHistory(_) => HOOK_HISTORY_LEGACY_EXPORTED,
         }
     }
 
@@ -35,12 +38,28 @@ impl LegacyCheckpointHandoff {
         match input {
             "codex-transcript" | "codex-aborted-turn" => Some(Self::Codex),
             "qoder-trace" => Some(Self::Qoder),
+            "openclaw-plugin-log" => Some(Self::HookHistory("openclaw")),
+            "opencode-log" => Some(Self::HookHistory("opencode")),
+            "cursor-hook" => Some(Self::HookHistory("cursor")),
+            "qwen-work-cn-trace" => Some(Self::HookHistory("qwen-work-cn")),
+            "qwen-work-cn-collaboration" => Some(Self::HookHistory("qwen-work-cn-collaboration")),
             _ => None,
         }
     }
+
+    pub(super) fn data_dir(self, pilot_dir: &Path, input: &str) -> PathBuf {
+        let suffix = match self {
+            Self::Qoder => return pilot_dir.join(super::STANDALONE_QODER_DATA),
+            Self::Codex => input,
+            Self::HookHistory(agent) => agent,
+        };
+        pilot_dir
+            .join("state")
+            .join(format!("standalone-{suffix}-sdk"))
+    }
 }
 
-enum ShellCheckpoint {
+enum CheckpointImport {
     Existing(Option<String>),
     Handoff(Option<String>),
     Consolidated(String),
@@ -508,16 +527,16 @@ impl Outbox {
         let tx = db.transaction()?;
         let checkpoint =
             match Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)? {
-                ShellCheckpoint::Existing(checkpoint) => return Ok(checkpoint),
-                ShellCheckpoint::Handoff(checkpoint) => {
-                    if handoff == LegacyCheckpointHandoff::Qoder {
+                CheckpointImport::Existing(checkpoint) => return Ok(checkpoint),
+                CheckpointImport::Handoff(checkpoint) => {
+                    if handoff != LegacyCheckpointHandoff::Codex {
                         tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
                     } else {
                         tx.execute("DELETE FROM checkpoint", [])?;
                     }
                     checkpoint
                 }
-                ShellCheckpoint::Consolidated(checkpoint) => {
+                CheckpointImport::Consolidated(checkpoint) => {
                     tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
                     Some(checkpoint)
                 }
@@ -540,8 +559,8 @@ impl Outbox {
         let checkpoint =
             Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)?;
         Ok(match checkpoint {
-            ShellCheckpoint::Existing(value) | ShellCheckpoint::Handoff(value) => value,
-            ShellCheckpoint::Consolidated(value) => Some(value),
+            CheckpointImport::Existing(value) | CheckpointImport::Handoff(value) => value,
+            CheckpointImport::Consolidated(value) => Some(value),
         })
     }
 
@@ -550,7 +569,7 @@ impl Outbox {
         source: &str,
         handoff: LegacyCheckpointHandoff,
         read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
-    ) -> anyhow::Result<ShellCheckpoint> {
+    ) -> anyhow::Result<CheckpointImport> {
         let handed_off = Self::find_checkpoint(db, handoff.marker())?.is_some()
             || (handoff == LegacyCheckpointHandoff::Codex
                 && Self::find_checkpoint(db, CODEX_SHELL_MIGRATED)?.is_some());
@@ -562,16 +581,16 @@ impl Outbox {
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
-            // A missing legacy namespace cannot advance Qoder's saved cursor.
-            let checkpoint = if checkpoint.is_none() && handoff == LegacyCheckpointHandoff::Qoder {
+            // A missing legacy namespace cannot advance the saved cursor.
+            let checkpoint = if checkpoint.is_none() && handoff != LegacyCheckpointHandoff::Codex {
                 Self::find_checkpoint(db, source)?
             } else {
                 checkpoint
             };
-            return Ok(ShellCheckpoint::Handoff(checkpoint));
+            return Ok(CheckpointImport::Handoff(checkpoint));
         }
-        if handoff == LegacyCheckpointHandoff::Qoder {
-            return Ok(ShellCheckpoint::Existing(Self::find_checkpoint(
+        if handoff != LegacyCheckpointHandoff::Codex {
+            return Ok(CheckpointImport::Existing(Self::find_checkpoint(
                 db, source,
             )?));
         }
@@ -584,7 +603,7 @@ impl Outbox {
             checkpoints.push(current);
         }
         if checkpoints.is_empty() {
-            return Ok(ShellCheckpoint::Existing(None));
+            return Ok(CheckpointImport::Existing(None));
         }
         let mut merged = serde_json::Map::new();
         for checkpoint in checkpoints {
@@ -598,7 +617,7 @@ impl Outbox {
                 }
             }
         }
-        Ok(ShellCheckpoint::Consolidated(
+        Ok(CheckpointImport::Consolidated(
             Value::Object(merged).to_string(),
         ))
     }

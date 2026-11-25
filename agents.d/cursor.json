@@ -23,6 +23,7 @@
       "afterAgentThought"
     ],
     "hookCommand": "$PILOT_DATA/hooks/cursor-loongsuite-pilot-hook.sh",
+    "nativeSdkData": ".",
     "format": "flat"
   },
   "input": {

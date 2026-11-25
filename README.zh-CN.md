@@ -62,8 +62,8 @@ Pilot 主要帮助回答这些问题：
 | Claude Code | Hook | No | No | No | No |
 | Codex | Hook | No | No | No | No |
 | GitHub Copilot CLI | 原生插件 + transcript / 原生 OTel | No | No | No | No |
-| Cursor | Hook | No | No | No | No |
-| Cursor CLI | 复用 Cursor Hook | No | No | No | No |
+| Cursor | Hook（macOS arm64） | Yes | Yes | Yes | Yes |
+| Cursor CLI | 复用 Cursor Hook（交互模式，macOS arm64） | Yes | Yes | Yes | Yes |
 | DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | No | No | No | No |
 | Grok Build | Hook + 本地 session 日志 | No | No | No | No |
 | Hermes Agent | 原生目录插件 | No | No | No | No |

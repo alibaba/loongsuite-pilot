@@ -31,6 +31,12 @@ fn main() {
     {
         std::process::exit(loongsuite_pilot::hook_process::run_hook_process("qoder"));
     }
+    if args.first().is_some_and(|arg| arg == "hook-process")
+        && args.get(1).is_some_and(|arg| arg == "cursor")
+        && args.iter().any(|arg| arg == "--defer-assembly")
+    {
+        std::process::exit(loongsuite_pilot::hook_process::run_hook_process("cursor"));
+    }
     if hook_bin::is_hook(&args) {
         hook_bin::run(legacy_hook::sdk_args(args), started, Some(legacy_hook::run));
     }

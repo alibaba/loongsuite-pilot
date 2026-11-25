@@ -360,7 +360,8 @@ fn run_agent(
                 "state/codex/transcript-span-contexts",
             ],
             "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
-            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            "qoder-trace" => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            _ => &[],
         };
         if checkpoint_key == "codex-transcript" {
             if let Some(home) = roots[0].parent() {
@@ -423,13 +424,7 @@ fn run_agent(
         .build()?;
     let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
         let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
-        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
-            host.data_dir.join(super::STANDALONE_QODER_DATA)
-        } else {
-            host.data_dir
-                .join("state")
-                .join(format!("standalone-{checkpoint_key}-sdk"))
-        };
+        let expected = handoff.data_dir(&host.data_dir, checkpoint_key);
         (init.data_dir == expected).then_some((host, handoff))
     });
     let mut preview = if let Some((host, handoff)) = shell_handoff {
@@ -446,11 +441,13 @@ fn run_agent(
             preview = runtime.block_on(read_pilot_checkpoint(&host.data_dir, checkpoint_key))?;
         }
     }
-    let store = Arc::new(if isolated_codex {
-        StateStore::new_sdk_source(&checkpoint)
-    } else {
-        StateStore::new(&checkpoint)
-    });
+    let store = Arc::new(
+        if isolated_codex || super::hook_history::find(&plan.agent).is_some() {
+            StateStore::new_sdk_source(&checkpoint)
+        } else {
+            StateStore::new(&checkpoint)
+        },
+    );
     if let Some(text) = preview.as_deref() {
         store.load_checkpoint_text(text)?;
     }
@@ -666,6 +663,60 @@ fn run_agent(
             "codex",
             input,
             |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else if let Some(profile) = super::hook_history::find(&plan.agent) {
+        let input = (profile.build)(crate::inputs::rest_support::HookInputOptions {
+            state_store: store.clone(),
+            log_dir: source_path("hook_jsonl"),
+            log_prefix: None,
+            poll_interval_ms: Some(plan.poll_interval_ms),
+        });
+        if let Some(state) = &plan.pilot_host {
+            if profile.agent == "cursor"
+                && source_path("hook_jsonl").as_deref().map(Path::new)
+                    == Some(state.data_dir.join("logs/cursor/history").as_path())
+            {
+                let transcript_root = init
+                    .home_dir
+                    .as_deref()
+                    .and_then(|home| super::policy::canonical_candidate(&home.join(".cursor")).ok())
+                    .filter(|candidate| {
+                        plan.allowed_roots
+                            .iter()
+                            .any(|allowed| candidate.starts_with(allowed))
+                    });
+                input
+                    .body
+                    .set_cursor_root(state.data_dir.clone(), transcript_root);
+            }
+            let policy = crate::inputs::base::WorkspacePolicy::new(
+                state.exclude_workspaces.clone(),
+                Some(state.data_dir.join("state/workspace-exclusions")),
+            );
+            input.runtime.set_workspace_policy(policy);
+        }
+        input.set_owned_entries_handler(capture_codex);
+        input.on_runtime_delta(record_delta);
+        bind(
+            &input,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            profile.agent,
+            input,
+            |i| i.running(),
             |i| Box::pin(async move { i.start().await }),
             |i| {
                 Box::pin(async move {

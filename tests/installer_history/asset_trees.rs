@@ -49,7 +49,7 @@ fn minimal_asset_package(f: &Fixture, reference: &str) {
         ),
         (
             "agents.d/cursor.json",
-            include_str!("../../agents.d/cursor.json"),
+            include_str!("../fixtures/legacy-cursor-agent.json"),
         ),
         (
             "assets/hooks/cursor-loongsuite-pilot-hook.sh",

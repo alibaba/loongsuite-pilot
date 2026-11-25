@@ -225,7 +225,7 @@ fn package(root: &Path) -> PathBuf {
     fs::write(package.join("LICENSE"), include_str!("../LICENSE")).unwrap();
     fs::write(
         package.join("agents.d/cursor.json"),
-        include_str!("../agents.d/cursor.json"),
+        include_str!("fixtures/legacy-cursor-agent.json"),
     )
     .unwrap();
     fs::write(
@@ -725,7 +725,7 @@ fn packaged_cursor_alias_injects_real_resources_idempotently_and_status_is_read_
         assert_eq!(config["userSetting"], "保留🚀");
         assert_eq!(config["version"], 1);
         let definition: Value =
-            serde_json::from_str(include_str!("../agents.d/cursor.json")).unwrap();
+            serde_json::from_str(include_str!("fixtures/legacy-cursor-agent.json")).unwrap();
         for event in definition["hook"]["events"].as_array().unwrap() {
             let hooks = config["hooks"][event.as_str().unwrap()].as_array().unwrap();
             assert_eq!(

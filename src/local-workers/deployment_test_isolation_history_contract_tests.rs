@@ -219,7 +219,7 @@ async fn actual_default_home_deployment_fixture() {
     fs::create_dir_all(&definitions).unwrap();
     fs::write(
         definitions.join("cursor.json"),
-        include_str!("../../agents.d/cursor.json"),
+        include_str!("../../tests/fixtures/legacy-cursor-agent.json"),
     )
     .unwrap();
     fs::create_dir_all(home.join(".cursor")).unwrap();

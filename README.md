@@ -64,8 +64,8 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Claude Code | Hook | No | No | No | No |
 | Codex | Hook | No | No | No | No |
 | GitHub Copilot CLI | Native plugin + transcript / native OTel | No | No | No | No |
-| Cursor | Hook | No | No | No | No |
-| Cursor CLI | Shared Cursor hook | No | No | No | No |
+| Cursor | Hook (macOS arm64) | Yes | Yes | Yes | Yes |
+| Cursor CLI | Shared Cursor hook (interactive, macOS arm64) | Yes | Yes | Yes | Yes |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | No | No | No | No |
 | Grok Build | Hook + local session logs | No | No | No | No |
 | Hermes Agent | Native directory plugin | No | No | No | No |
