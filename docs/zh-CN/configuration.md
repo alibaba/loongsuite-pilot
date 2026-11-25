@@ -46,6 +46,7 @@ Pilot 按以下顺序解析配置：
 | `collectLog` | 控制 SLS 日志上报。JSONL 和 HTTP 由各自的 `enabled` 控制。 |
 | `jsonl.enabled` | 控制 `logs/output/` 的本地规范化事件输出，默认 `false`；设为 `true` 后开启。 |
 | `collectTrace` | 当配置了 Trace 目标时，控制 OTLP Trace 上报。 |
+| `requestAttributes.enabled` | 默认关闭。将公共逐轮关联记录中的业务属性添加到本轮事件；写入 Span 还需透传前缀。见[按请求添加自定义属性](request-attributes.md)。 |
 | `dashboard.enabled` | 本地 Dashboard 开关，仅布尔值 `true` 启用；未填写或其他值均关闭。 |
 | `dashboard.port` | 启用后的本机端口。仅接受 1 到 65535 的整数，非法值回退到 `8765`。 |
 | `serviceName` | 所有 Agent 和上报后端共用的唯一服务名，优先级高于所有服务名前缀配置。 |
@@ -65,6 +66,7 @@ Pilot 按以下顺序解析配置：
 | `LOONGSUITE_PILOT_COLLECT_LOG` | 设置为 `false` 或 `0` 可关闭 SLS 日志上报。 |
 | `JSONL_ENABLED` | 覆盖 `jsonl.enabled`；设置为 `true` 可开启本地 JSONL 输出。 |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | 设置为 `false` 或 `0` 可关闭 Trace 上报。 |
+| `LOONGSUITE_PILOT_REQUEST_ATTRIBUTES` | 设置为 `true` 或 `1` 开启请求属性关联，覆盖 `requestAttributes.enabled`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | 用一个唯一服务名覆盖所有 Agent 和上报后端的 `serviceName`。 |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | 覆盖 `serviceNamePrefix`。 |
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | 所有 Agent 采集器的轮询间隔，单位毫秒。默认 `10000`。覆盖 `listeners.*.pollInterval` 和 `QODER_ANALYTICS_POLL_INTERVAL`。只接受 `1000` 到 `2147483647` 的十进制整数，其余值会被忽略。未设置该变量时，Wukong 和 Kiro CLI session 仍使用各自 60 秒的内置间隔。 |

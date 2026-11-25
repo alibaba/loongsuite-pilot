@@ -161,6 +161,7 @@ export interface ConfigFile {
   serviceName?: string;
   serviceNamePrefix?: string;
 
+  requestAttributes?: { enabled?: boolean };
   upstreamLink?: {
     enabled?: boolean;
     propagateToTools?: boolean;
@@ -351,6 +352,9 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
     upstreamLink: buildUpstreamLinkConfig(file),
+    requestAttributes: {
+      enabled: envBool('LOONGSUITE_PILOT_REQUEST_ATTRIBUTES', file?.requestAttributes?.enabled ?? false),
+    },
     multimodal: buildMultimodalConfig(file, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),
     interceptor,

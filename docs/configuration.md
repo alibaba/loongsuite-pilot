@@ -39,6 +39,7 @@ Set `AGENT_DATA_COLLECTION_CONFIG` to use a different config file path.
 | `collectLog` | Enables SLS log reporting. JSONL and HTTP remain controlled by their own `enabled` flags. |
 | `jsonl.enabled` | Controls normalized local event output in `logs/output/`. Defaults to `false`; set to `true` to enable it. |
 | `collectTrace` | Enables OTLP trace export when a trace destination is configured. |
+| `requestAttributes.enabled` | Disabled by default. Adds matched per-turn business attributes to events; spans also require allowed prefixes. See [Per-request Attributes](request-attributes.md). |
 | `dashboard.enabled` | Local dashboard switch. Only boolean `true` enables it; missing or other values disable it. |
 | `dashboard.port` | Loopback dashboard port when enabled. Must be an integer from 1 through 65535; invalid values fall back to `8765`. |
 | `serviceName` | Exact service name shared by every agent and reporting backend. It takes precedence over all service-name prefixes. |
@@ -58,6 +59,7 @@ Equivalent environment variables:
 | `LOONGSUITE_PILOT_COLLECT_LOG` | Set `false` or `0` to disable SLS log reporting. |
 | `JSONL_ENABLED` | Overrides `jsonl.enabled`; set to `true` to enable local JSONL output. |
 | `LOONGSUITE_PILOT_COLLECT_TRACE` | Set `false` or `0` to disable trace reporting. |
+| `LOONGSUITE_PILOT_REQUEST_ATTRIBUTES` | Set `true` or `1` to enable request attribute correlation, overriding `requestAttributes.enabled`. |
 | `LOONGSUITE_PILOT_SERVICE_NAME` | Override `serviceName` with one exact name for all agents and backends. |
 | `LOONGSUITE_PILOT_SERVICE_NAME_PREFIX` | Override `serviceNamePrefix`. |
 | `LOONGSUITE_PILOT_POLL_INTERVAL_MS` | Poll interval in milliseconds for every agent collector. Default is `10000`. Overrides `listeners.*.pollInterval` and `QODER_ANALYTICS_POLL_INTERVAL`. Only decimal integers from `1000` through `2147483647` are accepted; anything else is ignored. When this variable is unset, Wukong and Kiro CLI session keep their 60 second built-in interval. |

@@ -242,6 +242,8 @@ export interface CodexExtractedTranscriptTurn {
   startedAtMs: number;
   terminalAtMs: number;
   prompt?: string;
+  /** Hash of native user-authored text, excluding provenance-marked harness context. */
+  correlationContentHash?: string;
   /**
    * True once the transcript proves that the submitted prompt is complete.
    * A user response_item alone may only be Codex control context while the

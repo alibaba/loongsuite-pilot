@@ -59,6 +59,7 @@ describe('AcpCorrelateRetentionService', () => {
   it('retains old consumption claims while their append-only source remains active', async () => {
     const source = writeFile('active.jsonl', 60_000);
     const turn = writeFile(`active.turn-context-0-${'a'.repeat(64)}.done`, 48 * 3600_000);
+    const turnOwner = writeFile(`active.turn-owner-${'a'.repeat(64)}.done`, 48 * 3600_000);
     const session = writeFile('active.session-context.done', 48 * 3600_000);
     const orphan = writeFile(`orphan.turn-context-0-${'b'.repeat(64)}.done`, 48 * 3600_000);
     const svc = new AcpCorrelateRetentionService(dataDir, {
@@ -68,9 +69,10 @@ describe('AcpCorrelateRetentionService', () => {
     expect(await svc.runCleanup()).toEqual({ deleted: 1, errors: 0 });
     expect(fs.existsSync(orphan)).toBe(false);
     expect(fs.existsSync(turn)).toBe(true);
+    expect(fs.existsSync(turnOwner)).toBe(true);
     expect(fs.existsSync(session)).toBe(true);
     const stale = (Date.now() - 48 * 3600_000) / 1000;
     fs.utimesSync(source, stale, stale);
-    expect(await svc.runCleanup()).toEqual({ deleted: 3, errors: 0 });
+    expect(await svc.runCleanup()).toEqual({ deleted: 4, errors: 0 });
   });
 });

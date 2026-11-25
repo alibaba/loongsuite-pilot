@@ -72,6 +72,7 @@ export function buildCodexTranscriptSegment(
       // treat this id as an external root and do not look it up.
       parent_span_id: '0000000000000001',
       'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }],
+      ...(turn.correlationContentHash ? { 'agent.pilot.correlation.content_hash': turn.correlationContentHash } : {}),
     }));
   }
 
