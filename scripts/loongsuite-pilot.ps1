@@ -236,8 +236,10 @@ function Sync-BootstrapScripts {
 function Sync-InstalledScriptsFromVersion {
     param([string]$versionDir)
     $srcDir = Join-Path $versionDir "scripts"
-    $required = @("collector-daemon.js", "updater-daemon.js")
-    $optional = @()
+    # Open-source packages strip updater-daemon.js. Require collector only;
+    # treat updater as optional and remove a stale bootstrap copy when absent.
+    $required = @("collector-daemon.js")
+    $optional = @("updater-daemon.js")
     foreach ($f in $required) {
         if (-not (Test-Path (Join-Path $srcDir $f))) { return $false }
     }
@@ -250,10 +252,14 @@ function Sync-InstalledScriptsFromVersion {
     }
     foreach ($f in $optional) {
         $src = Join-Path $srcDir $f
-        if (-not (Test-Path $src)) { continue }
+        $dst = Join-Path $BOOTSTRAP_DIR $f
+        if (-not (Test-Path $src)) {
+            if (Test-Path $dst) { Remove-Item $dst -Force }
+            continue
+        }
         $tmp = Join-Path $BOOTSTRAP_DIR "$f.tmp"
         Copy-Item $src $tmp -Force
-        Move-Item $tmp (Join-Path $BOOTSTRAP_DIR $f) -Force
+        Move-Item $tmp $dst -Force
     }
     return $true
 }
