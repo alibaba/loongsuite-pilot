@@ -85,6 +85,10 @@ DeepSeek Harness（`dsh`）通过用户级 `cordis.patch.yml` 加载 Pilot
 延迟数据。启用、原始日志、禁用和卸载行为见
 [《Agent 配置》](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)。
 
+如果只需要将 DeepSeek Harness 的链路和指标直接发送到 OTLP/HTTP 后端，可以使用
+在 Harness 进程内运行的独立插件 [@loongsuite/dsh-plugin](https://github.com/loongsuite/dsh-plugin)。
+Pilot 支持发现多个 Agent，将它们的事件归一化，并分发到 JSONL、SLS、HTTP 或 OTLP 目标。
+
 ### Windows Agent 明确支持情况
 
 上表描述 Pilot 的总体接入能力，不代表每个 Agent 在所有操作系统上均受支持。目前文档明确说明支持 Windows 的 Agent 如下：
