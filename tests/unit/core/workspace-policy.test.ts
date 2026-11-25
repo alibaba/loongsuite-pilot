@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +25,36 @@ describe('workspace exclusions', () => {
     expect(new WorkspacePolicy([root]).excludes(path.join(alias, 'not-created'))).toBe(true);
     expect(new WorkspacePolicy([alias]).excludes(root)).toBe(true);
   });
+  it.skipIf(process.platform === 'win32')('matches the lexical and physical roots of a symlink followed by a parent segment', () => {
+    const dir = temp();
+    const lexicalRoot = path.join(dir, 'lexical');
+    const physicalRoot = path.join(dir, 'physical');
+    const target = path.join(physicalRoot, 'target');
+    const alias = path.join(lexicalRoot, 'link');
+    fs.mkdirSync(lexicalRoot);
+    fs.mkdirSync(target, { recursive: true });
+    fs.symlinkSync(target, alias);
+    const aliasParent = `${alias}${path.sep}..`;
+    expect(fs.realpathSync.native(aliasParent)).toBe(fs.realpathSync.native(physicalRoot));
+    for (const excluded of [lexicalRoot, physicalRoot]) {
+      const policy = new WorkspacePolicy([excluded]);
+      expect(policy.excludes(aliasParent)).toBe(true);
+      expect(policy.excludes(`${aliasParent}${path.sep}missing`)).toBe(true);
+    }
+    const policy = new WorkspacePolicy([aliasParent]);
+    expect(policy.excludes(lexicalRoot)).toBe(true);
+    expect(policy.excludes(physicalRoot)).toBe(true);
+    expect(policy.excludes(path.join(dir, 'public'))).toBe(false);
+    const alternate = path.join(dir, 'alternate');
+    fs.symlinkSync(lexicalRoot, alternate);
+    expect(policy.excludes(path.join(alternate, 'missing'))).toBe(true);
+    const alternateParent = `${path.join(alternate, 'link')}${path.sep}..`;
+    const lexicalPolicy = new WorkspacePolicy([lexicalRoot]);
+    expect(lexicalPolicy.excludes(alternateParent)).toBe(true);
+    expect(lexicalPolicy.excludes(`${alternateParent}${path.sep}missing`)).toBe(true);
+    vi.spyOn(os, 'homedir').mockReturnValue(lexicalRoot);
+    expect(new WorkspacePolicy([physicalRoot]).excludes('~/link/..')).toBe(true);
+  });
   it('allows unknown workspace and never scans prompt, tool paths, or inferred git root', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);
     expect(policy.allows({ ...event('unknown'), 'gen_ai.input.messages': root, 'workspace.current_root': root, 'gen_ai.tool.call.arguments': { path: root } })).toBe(true);
@@ -46,6 +77,91 @@ describe('workspace exclusions', () => {
     expect(new WorkspacePolicy([], state).allows(event('one'))).toBe(true);
     expect(collector.allows({ ...event('one'), 'gen_ai.agent.type': 'cursor' })).toBe(true);
     expect(fs.readdirSync(state).join()).not.toContain(root);
+  });
+  it('retains ordinary directory markers when separators or duplicate rules change', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const state = path.join(dir, 'state');
+    const trailing = `${root}${path.sep}`;
+    const repeated = `${root}${path.sep}.${path.sep}`;
+    const policy = new WorkspacePolicy([root], state);
+    expect(policy.allows(event('excluded', root))).toBe(false);
+    expect(new WorkspacePolicy([trailing], state).allows(event('excluded'))).toBe(false);
+    const duplicated = new WorkspacePolicy([root, repeated], state);
+    expect(duplicated.allows(event('excluded'))).toBe(false);
+    expect(duplicated.allows(event('another', root))).toBe(false);
+    expect(new WorkspacePolicy([root], state).allows(event('another'))).toBe(false);
+  });
+  it('retains markers written with an older trailing-separator fingerprint', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const configured = `${root}${path.sep}`;
+    const state = path.join(dir, 'state');
+    const legacyRoot = process.platform === 'win32' ? configured.toLowerCase() : configured;
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const legacyDirectory = path.join(state, hash(JSON.stringify([legacyRoot])));
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(path.join(legacyDirectory, hash('codex\0legacy-session')), '');
+    expect(new WorkspacePolicy([configured], state).allows(event('legacy-session'))).toBe(false);
+    expect(new WorkspacePolicy([root], state).allows(event('legacy-session'))).toBe(false);
+  });
+  it('honors blocked session markers written with a lexical policy fingerprint', () => {
+    const dir = temp();
+    const root = path.join(dir, 'private');
+    const configured = `${root}${path.sep}unused${path.sep}..`;
+    const state = path.join(dir, 'state');
+    const legacyRoot = process.platform === 'win32' ? root.toLowerCase() : root;
+    const hash = (value: string) => createHash('sha256').update(value).digest('hex');
+    const legacyDirectory = path.join(state, hash(JSON.stringify([legacyRoot])));
+    fs.mkdirSync(legacyDirectory, { recursive: true });
+    fs.writeFileSync(path.join(legacyDirectory, hash('codex\0legacy-session')), '');
+    const policy = new WorkspacePolicy([configured], state);
+    expect(policy.allows(event('legacy-session'))).toBe(false);
+    expect(policy.allows(event('new-session'))).toBe(true);
+    expect(new WorkspacePolicy([root], state).allows(event('legacy-session'))).toBe(false);
+  });
+  it.skipIf(process.platform === 'win32')('writes alias rules to their own durable marker namespace', () => {
+    const dir = temp();
+    const lexical = path.join(dir, 'lexical');
+    const physical = path.join(dir, 'physical');
+    const target = path.join(physical, 'child');
+    const link = path.join(lexical, 'link');
+    const aliasParent = `${link}${path.sep}..`;
+    const state = path.join(dir, 'state');
+    const otherRule = path.join(dir, 'other');
+    fs.mkdirSync(lexical);
+    fs.mkdirSync(target, { recursive: true });
+    fs.symlinkSync(target, link);
+    const policy = new WorkspacePolicy([aliasParent, otherRule], state);
+    expect(policy.allows(event('alias-only', physical))).toBe(false);
+    for (const equivalent of [
+      `${link}${path.sep}${path.sep}..`,
+      `${link}${path.sep}.${path.sep}..`,
+      `${aliasParent}${path.sep}`,
+    ]) {
+      const restarted = new WorkspacePolicy([otherRule, equivalent], state);
+      expect(restarted.excludes(physical)).toBe(true);
+      expect(restarted.allows(event('alias-only'))).toBe(false);
+    }
+    const narrower = new WorkspacePolicy([lexical, otherRule], state);
+    expect(narrower.excludes(physical)).toBe(false);
+    expect(narrower.allows(event('alias-only', physical))).toBe(true);
+    fs.unlinkSync(link);
+    const restarted = new WorkspacePolicy([otherRule, aliasParent], state);
+    expect(restarted.excludes(physical)).toBe(false);
+    expect(restarted.allows(event('alias-only'))).toBe(false);
+  });
+  it.runIf(process.platform === 'win32')('keeps Windows marker keys stable across spelling edits and separate across roots', () => {
+    const state = temp();
+    const drive = new WorkspacePolicy(['C:\\fixture\\link\\..'], state);
+    expect(drive.allows(event('drive', 'C:\\fixture'))).toBe(false);
+    expect(new WorkspacePolicy(['c:/FIXTURE//link/./../'], state).allows(event('drive'))).toBe(false);
+    expect(new WorkspacePolicy(['D:\\fixture\\link\\..'], state).allows(event('drive'))).toBe(true);
+
+    const unc = new WorkspacePolicy(['\\\\server\\share\\fixture\\link\\..'], state);
+    expect(unc.allows(event('unc', '\\\\server\\share\\fixture'))).toBe(false);
+    expect(new WorkspacePolicy(['//SERVER/share//FIXTURE/link/./../'], state).allows(event('unc'))).toBe(false);
+    expect(new WorkspacePolicy(['\\\\server\\other\\fixture\\link\\..'], state).allows(event('unc'))).toBe(true);
   });
   it('preflights batches before letting earlier content from a blocked session escape', () => {
     const root = temp(); const policy = new WorkspacePolicy([root]);

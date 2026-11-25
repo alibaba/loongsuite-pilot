@@ -29,22 +29,46 @@ export function validateExcludedWorkspaces(value) {
   }
   return [...new Set(value)];
 }
+function absolutePath(value) {
+  const expanded = value.startsWith('~/') ? `${os.homedir()}${path.sep}${value.slice(2)}` : value;
+  return path.isAbsolute(expanded) ? expanded : undefined;
+}
 function normalize(value) {
-  const expanded = value.startsWith('~/') ? path.join(os.homedir(), value.slice(2)) : value;
-  if (!path.isAbsolute(expanded))
-    return undefined;
-  const normalized = path.normalize(expanded);
+  const normalized = path.normalize(value);
   return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+function hasParentSegment(value) {
+  const native = path.sep === '\\' ? value.replaceAll('/', path.sep) : value;
+  return native.split(path.sep).includes('..');
+}
+function markerRule(value) {
+  const windows = path.sep === '\\';
+  const native = windows ? value.replaceAll('/', path.sep) : value;
+  // Device and verbatim namespaces can interpret separators and dots differently.
+  if (windows && (native.startsWith('\\\\?\\') || native.startsWith('\\\\.\\')))
+    return value.toLowerCase();
+  const { root } = path.parse(native);
+  const parts = native.slice(root.length).split(path.sep).filter(part => part && part !== '.');
+  const stable = path.normalize(root) + parts.join(path.sep);
+  return windows ? stable.toLowerCase() : stable;
 }
 // Resolve existing ancestors too: a workspace may have been removed since the event.
 function real(value) {
-  try {
-    return normalize(fs.realpathSync.native(value)) ?? value;
+  const suffix = [];
+  let ancestor = value;
+  for (;;) {
+    try {
+      ancestor = fs.realpathSync.native(ancestor);
+      break;
+    } catch {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor)
+        break;
+      suffix.push(path.basename(ancestor));
+      ancestor = parent;
+    }
   }
-  catch {
-    const parent = path.dirname(value);
-    return parent === value ? value : path.join(real(parent), path.basename(value));
-  }
+  return normalize(suffix.length ? path.join(ancestor, suffix.reverse().join(path.sep)) : ancestor);
 }
 function within(candidate, root) {
   const relative = path.relative(root, candidate);
@@ -56,21 +80,46 @@ export class WorkspacePolicy {
   roots;
   blocked = new Set();
   fingerprint;
+  legacyFingerprint;
   pendingMarkers = new Set();
   nextRetryAt = 0;
   nextWarningAt = 0;
   constructor(excluded = [], stateDirectory) {
     this.stateDirectory = stateDirectory;
-    this.roots = validateExcludedWorkspaces(excluded).map(v => normalize(v));
-    this.fingerprint = this.hash(JSON.stringify([...this.roots].sort()));
+    this.roots = validateExcludedWorkspaces(excluded).map(original => ({ original, lexical: normalize(original) }));
+    const lexicalFingerprint = this.hash(JSON.stringify(this.roots.map(root => root.lexical).sort()));
+    const rules = [...new Set(this.roots.map(root => markerRule(root.original)))].sort();
+    const hasParentRules = this.roots.some(root => hasParentSegment(root.original));
+    // Rules with parent segments retain their own namespace because the
+    // filesystem can resolve them differently from their lexical counterparts.
+    this.fingerprint = this.hash(JSON.stringify(hasParentRules ? { rules } : rules));
+    if (this.fingerprint !== lexicalFingerprint) this.legacyFingerprint = lexicalFingerprint;
   }
   get enabled() { return this.roots.length > 0; }
   hash(value) { return createHash('sha256').update(value).digest('hex'); }
   excludes(directory) {
-    const candidate = normalize(directory);
-    if (!candidate)
+    if (!this.roots.length)
       return false;
-    return this.roots.some(root => within(candidate, root) || within(real(candidate), real(root)));
+    const original = absolutePath(directory);
+    if (!original)
+      return false;
+    const lexical = normalize(original);
+    if (this.roots.some(root => within(lexical, root.lexical)))
+      return true;
+    // The filesystem follows symlinks before processing later parent segments.
+    const physical = real(original);
+    let lexicalPhysical;
+    return this.roots.some(root => {
+      const physicalRoot = real(root.original);
+      if (within(physical, physicalRoot))
+        return true;
+      if (original === lexical && root.original === root.lexical)
+        return false;
+      // Keep the filesystem aliases previously checked after lexical normalization.
+      lexicalPhysical ??= original === lexical ? physical : real(lexical);
+      const lexicalPhysicalRoot = root.original === root.lexical ? physicalRoot : real(root.lexical);
+      return within(lexicalPhysical, lexicalPhysicalRoot);
+    });
   }
   persistMarker(marker) {
     try {
@@ -113,8 +162,16 @@ export class WorkspacePolicy {
     const session = record['gen_ai.session.id'] ?? record.session_id ?? record.sessionId ?? record.conversation_id;
     const key = typeof session === 'string' && session ? this.hash(`${agent}\0${session}`) : undefined;
     const marker = key && this.stateDirectory ? path.join(this.stateDirectory, this.fingerprint, key) : undefined;
-    if (key && (this.blocked.has(key) || (marker && fs.existsSync(marker))))
-      return false;
+    if (key && this.blocked.has(key)) return false;
+    if (marker && fs.existsSync(marker)) return false;
+    if (marker && this.legacyFingerprint) {
+      const legacyMarker = path.join(this.stateDirectory, this.legacyFingerprint, key);
+      if (fs.existsSync(legacyMarker)) {
+        this.blocked.add(key);
+        this.persistMarker(marker);
+        return false;
+      }
+    }
     const directories = [
       ...strings(record['workspace.path']), ...strings(record.cwd), ...strings(record.workspace_roots),
     ];
