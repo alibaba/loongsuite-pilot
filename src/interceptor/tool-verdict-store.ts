@@ -27,19 +27,24 @@ export interface PromptVerdictKey {
   agentType: string;
   promptHash: string;
   requestId: string;
+  /** Provenance from a new Hook observation, never inferred from an old UUID. */
+  missingRequestId?: true;
+  missingAgentType?: true;
 }
 
 /** An observed prompt whose evaluation is pending, failed or blocked. Never exported as telemetry. */
 export type PromptVerdictSnapshot = ToolVerdictSnapshot | { action: 'unknown' };
 export type InterceptorVerdictKey = ToolVerdictKey | PromptVerdictKey;
 export type InterceptorVerdictRecord = ToolVerdictRecord
-  | (PromptVerdictKey & PromptVerdictSnapshot & { recordedAt: string });
+  | (PromptVerdictKey & PromptVerdictSnapshot & { recordedAt: string; binding?: PromptBinding });
+
+interface PromptBinding { requestId: string; agentType: string; at: number }
 
 export const TOOL_VERDICT_TTL_MS = 30 * 60 * 1000;
 export const TOOL_VERDICT_CHECKPOINT_INTERVAL_MS = 15_000;
 export const TOOL_VERDICT_MAX_RECORDS = 10_000;
 
-type StoredVerdict = PromptVerdictSnapshot & { recordedAtMs: number };
+type StoredVerdict = PromptVerdictSnapshot & { recordedAtMs: number; binding?: PromptBinding };
 
 /**
  * Prompt and tool verdicts share bounded retention and the same IPC/checkpoint lifecycle.
@@ -51,6 +56,7 @@ export class ToolVerdictStore {
   private persistedRevision = 0;
   private checkpointPromise: Promise<void> | null = null;
   private lastPruneMs = -Infinity;
+  onPromptBinding?: (record: InterceptorVerdictRecord) => void;
 
   constructor(private readonly checkpointPath: string) {}
 
@@ -88,20 +94,53 @@ export class ToolVerdictStore {
   getPromptSnapshot(lookup: PromptLookup, now = new Date()): ToolVerdictSnapshot | null {
     if (lookup.requestId) {
       const stored = this.toolVerdicts.get(verdictKey({ ...lookup, phase: 'UserPromptSubmit', requestId: lookup.requestId }));
-      return stored && now.getTime() - stored.recordedAtMs <= TOOL_VERDICT_TTL_MS ? observablePromptSnapshot(stored) : null;
+      if (stored) return now.getTime() - stored.recordedAtMs <= TOOL_VERDICT_TTL_MS ? observablePromptSnapshot(stored) : null;
     }
-    const matches: StoredVerdict[] = [];
+    const matches: Array<{ key: PromptVerdictKey; value: StoredVerdict }> = [];
+    const exact: StoredVerdict[] = [];
     for (const [encoded, value] of this.toolVerdicts) {
       if (now.getTime() - value.recordedAtMs > TOOL_VERDICT_TTL_MS) continue;
       const key = parseKey(encoded);
       if (key?.phase !== 'UserPromptSubmit' || key.sessionId !== lookup.sessionId
-        || key.agentType !== lookup.agentType || key.promptHash !== lookup.promptHash) continue;
+        || !promptAgentsCompatible(key, lookup) || key.promptHash !== lookup.promptHash) continue;
+      if (lookup.requestId && ((key.requestId === lookup.requestId)
+        || (value.binding?.requestId === lookup.requestId && value.binding.agentType === lookup.agentType))) {
+        exact.push(value);
+      }
       if (Math.abs(value.recordedAtMs - lookup.at) > PROMPT_MATCH_WINDOW_MS) continue;
-      matches.push(value);
+      // A prior successful binding proves this attempt belongs to a different
+      // native request. Unbound pending/failed/blocked attempts remain ambiguous.
+      if (lookup.requestId && value.binding && (value.binding.requestId !== lookup.requestId
+        || value.binding.agentType !== lookup.agentType)) continue;
+      matches.push({ key, value });
     }
     // Pending and failed attempts also count: absence of a known verdict cannot identify an older turn.
     // Reads never consume records, so exact-id lookups remain stable for output retries.
-    return matches.length === 1 ? observablePromptSnapshot(matches[0]) : null;
+    if (lookup.requestId) {
+      if (exact.length) return exact.length === 1 ? observablePromptSnapshot(exact[0]!) : null;
+    }
+    if (matches.length !== 1) return null;
+    const match = matches[0]!;
+    // An explicit mismatching identity must never be downgraded. Only an
+    // observation explicitly missing its request identity permits a time join.
+    if (lookup.requestId && !match.key.missingRequestId) return null;
+    const snapshot = observablePromptSnapshot(match.value);
+    if (!snapshot) return null;
+    if (match.key.missingRequestId && lookup.requestId) {
+      const binding = { requestId: lookup.requestId, agentType: lookup.agentType, at: lookup.at };
+      if (match.value.binding && JSON.stringify(match.value.binding) !== JSON.stringify(binding)) return null;
+      if (!match.value.binding) {
+        match.value.binding = binding;
+        this.revision++;
+        // The worker remains the only checkpoint writer; the mirror forwards
+        // this private ownership claim over the same FIFO transport.
+        try {
+          this.onPromptBinding?.({ ...match.key, ...snapshot, binding,
+            recordedAt: new Date(match.value.recordedAtMs).toISOString() });
+        } catch { /* Keep local ownership if the worker is restarting; spawn carries the mirror. */ }
+      }
+    } else if (match.value.binding) return null;
+    return snapshot;
   }
 
   restore(now = new Date()): void {
@@ -119,10 +158,40 @@ export class ToolVerdictStore {
     this.persistedRevision = this.revision;
   }
 
+  /** Caller must confirm every previous checkpoint writer has exited. */
+  async checkpointAfterWriterExit(): Promise<void> {
+    const records = this.records();
+    if (!records.some(record => 'binding' in record && record.binding)) return;
+    const finalWriter = new ToolVerdictStore(this.checkpointPath);
+    await finalWriter.mergeCheckpoint();
+    finalWriter.merge(records);
+    await finalWriter.checkpoint();
+  }
+
+  /** Import the last writer's checkpoint during an exclusive shutdown handoff.
+   * Unlike best-effort startup restore, unreadable/corrupt data must not be overwritten.
+   */
+  private async mergeCheckpoint(now = new Date()): Promise<void> {
+    let text: string;
+    try {
+      text = await fsp.readFile(this.checkpointPath, 'utf8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      throw error;
+    }
+    const body = JSON.parse(text) as { schema?: unknown; records?: unknown } | null;
+    if (!body || typeof body !== 'object' || Array.isArray(body)
+      || body.schema !== 1 || !Array.isArray(body.records) || body.records.some(record => !parseRecord(record))) {
+      throw new Error('invalid interceptor verdict checkpoint during shutdown');
+    }
+    this.mergeRecords(body.records, now.getTime());
+  }
+
   records(now = new Date()): InterceptorVerdictRecord[] {
     this.prune(now.getTime());
     return Array.from(this.toolVerdicts, ([key, value]) => ({
       ...parseKey(key)!, ...stripTime(value), recordedAt: new Date(value.recordedAtMs).toISOString(),
+      ...(value.binding ? { binding: value.binding } : {}),
     } as InterceptorVerdictRecord));
   }
 
@@ -141,12 +210,18 @@ export class ToolVerdictStore {
       if (nowMs - recordedAtMs > TOOL_VERDICT_TTL_MS) continue;
       const id = verdictKey(record);
       const previous = this.toolVerdicts.get(id);
+      const binding = 'binding' in record ? record.binding : undefined;
+      if (previous && previous.recordedAtMs === recordedAtMs && binding && !previous.binding) {
+        previous.binding = binding;
+        changed = true;
+      }
       // A final verdict may arrive in the same millisecond as its pending marker.
       // Otherwise a restored checkpoint wins ties with an older main-thread mirror.
       if (previous && (previous.recordedAtMs > recordedAtMs
         || (previous.recordedAtMs === recordedAtMs
           && !(previous.action === 'unknown' && record.action !== 'unknown')))) continue;
-      this.toolVerdicts.set(id, { ...stripTime(record), recordedAtMs });
+      this.toolVerdicts.set(id, { ...stripTime(record), recordedAtMs,
+        ...(binding ? { binding } : previous?.binding ? { binding: previous.binding } : {}) });
       changed = true;
     }
     if (!changed) return;
@@ -162,12 +237,14 @@ export class ToolVerdictStore {
   }
 
   replace(records: readonly InterceptorVerdictRecord[]): void {
+    const bindings = this.records().filter(record => 'binding' in record && record.binding);
     this.toolVerdicts.clear();
     this.revision++;
     this.merge(records);
+    this.merge(bindings);
   }
 
-  /** Serialized, dirty-only asynchronous checkpoint; the worker owns the file. */
+  /** Serialized, dirty-only checkpoint; callers must hold exclusive writer ownership. */
   checkpoint(): Promise<void> {
     if (this.checkpointPromise) return this.checkpointPromise;
     this.checkpointPromise = (async () => {
@@ -198,6 +275,7 @@ export class ToolVerdictStore {
         ...parsed,
         ...stripTime(value),
         recordedAt: new Date(value.recordedAtMs).toISOString(),
+        ...(value.binding ? { binding: value.binding } : {}),
       } as InterceptorVerdictRecord);
     }
     const text = `${JSON.stringify({ schema: 1, records }, null, 2)}\n`;
@@ -281,7 +359,9 @@ export function isToolInterceptPhase(event: HookEventName): event is ToolInterce
 
 export function verdictKey(key: InterceptorVerdictKey): string {
   if (key.phase === 'UserPromptSubmit') {
-    return JSON.stringify([key.sessionId, key.requestId, key.phase, key.agentType, key.promptHash]);
+    const fields: unknown[] = [key.sessionId, key.requestId, key.phase, key.agentType, key.promptHash];
+    if (key.missingRequestId || key.missingAgentType) fields.push(key.missingRequestId === true, key.missingAgentType === true);
+    return JSON.stringify(fields);
   }
   return JSON.stringify([key.sessionId ?? '', key.toolUseId, key.phase]);
 }
@@ -290,12 +370,16 @@ function parseKey(key: string): InterceptorVerdictKey | null {
   try {
     const parsed = JSON.parse(key) as unknown;
     if (!Array.isArray(parsed)) return null;
-    if (parsed.length === 5 && parsed[2] === 'UserPromptSubmit') {
-      const [sessionId, requestId, phase, agentType, promptHash] = parsed;
+    if ((parsed.length === 5 || parsed.length === 7) && parsed[2] === 'UserPromptSubmit') {
+      const [sessionId, requestId, phase, agentType, promptHash, missingRequestId, missingAgentType] = parsed;
+      if (parsed.length === 7 && (typeof missingRequestId !== 'boolean' || typeof missingAgentType !== 'boolean')) return null;
       if (typeof sessionId !== 'string' || !sessionId || typeof requestId !== 'string' || !requestId
         || requestId.length > 512 || typeof agentType !== 'string' || !agentType
         || typeof promptHash !== 'string' || !/^[a-f0-9]{64}$/.test(promptHash)) return null;
-      return { sessionId, requestId, phase, agentType, promptHash };
+      if ((missingRequestId || missingAgentType) && !['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn'].includes(agentType)) return null;
+      if (missingAgentType && agentType !== 'qoder') return null;
+      return { sessionId, requestId, phase, agentType, promptHash,
+        ...(missingRequestId ? { missingRequestId: true } : {}), ...(missingAgentType ? { missingAgentType: true } : {}) };
     }
     if (parsed.length !== 3) return null;
     const [sessionId, toolUseId, phase] = parsed;
@@ -315,19 +399,33 @@ function parseKey(key: string): InterceptorVerdictKey | null {
 function parseRecord(value: unknown): InterceptorVerdictRecord | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
+  if ((record.missingRequestId !== undefined && record.missingRequestId !== true)
+    || (record.missingAgentType !== undefined && record.missingAgentType !== true)) return null;
   const key = parseKey(JSON.stringify(record.phase === 'UserPromptSubmit'
-    ? [record.sessionId, record.requestId, record.phase, record.agentType, record.promptHash]
+    ? [record.sessionId, record.requestId, record.phase, record.agentType, record.promptHash,
+      record.missingRequestId === true, record.missingAgentType === true]
     : [record.sessionId ?? '', record.toolUseId, record.phase]));
   if (!key) return null;
   if (record.action !== 'allow' && record.action !== 'block' && record.action !== 'log'
     && !(key.phase === 'UserPromptSubmit' && record.action === 'unknown')) return null;
   if (typeof record.recordedAt !== 'string' || Number.isNaN(Date.parse(record.recordedAt))) return null;
   if (record.sessionId !== undefined && typeof record.sessionId !== 'string') return null;
+  let binding: PromptBinding | undefined;
+  if (record.binding !== undefined) {
+    if (key.phase !== 'UserPromptSubmit' || !key.missingRequestId
+      || !record.binding || typeof record.binding !== 'object' || Array.isArray(record.binding)) return null;
+    const b = record.binding as Record<string, unknown>;
+    if (typeof b.requestId !== 'string' || !/^[a-f0-9]{64}$/.test(b.requestId)
+      || typeof b.agentType !== 'string' || !promptAgentsCompatible(key, { agentType: b.agentType } as PromptLookup)
+      || typeof b.at !== 'number' || !Number.isFinite(b.at)) return null;
+    binding = { requestId: b.requestId, agentType: b.agentType, at: b.at };
+  }
   return {
     ...key,
     action: record.action,
     recordedAt: record.recordedAt,
     ...optionalMeta(record),
+    ...(binding ? { binding } : {}),
   } as InterceptorVerdictRecord;
 }
 
@@ -357,4 +455,9 @@ function optionalMeta(value: Partial<Omit<ToolVerdictSnapshot, 'action'>>): Omit
 
 function nonEmpty(value: string | undefined): value is string {
   return typeof value === 'string' && value.length > 0;
+}
+
+function promptAgentsCompatible(key: PromptVerdictKey, lookup: PromptLookup): boolean {
+  return key.agentType === lookup.agentType || (key.missingAgentType === true
+    && ['qoder', 'qoder-cli', 'qoder-app'].includes(lookup.agentType));
 }

@@ -17,6 +17,7 @@ import {
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
+import { configJsonPath } from '../utils/data-dir.js';
 import { detectAgent } from './detect-utils.js';
 import { reconcileQoderTokenUsageDefaults } from './qoder-token-usage.js';
 import { createLogger } from '../utils/logger.js';
@@ -58,7 +59,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) {
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -94,7 +95,7 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
   return appendEventSubcommand(wrapPs1Command(hookCommand, agentId), event, style);
@@ -106,10 +107,10 @@ function legacyHookCommands(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string[] {
-  if (process.platform !== 'win32' && agentId === 'claude-code') {
+  if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build')) return [];
+  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([
@@ -126,6 +127,13 @@ export interface HookStrategyOptions {
    * removes interceptor hooks, whether or not this flag is set.
    */
   deployInterceptorHooks?: boolean;
+}
+
+function cursorConfigLocation(): string {
+  return JSON.stringify({
+    path: path.resolve(configJsonPath()),
+    implicitDefault: !(process.env.AGENT_DATA_COLLECTION_CONFIG ?? '').trim(),
+  });
 }
 
 export class HookStrategy implements DeployStrategy {
@@ -147,6 +155,15 @@ export class HookStrategy implements DeployStrategy {
     if (def.hook?.scope === 'system') {
       const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
       return !(await systemTomlHooksInstalled(def));
+    }
+    if ((def.id === 'cursor' || def.id === 'cursor-cli') && def.hook?.hookCommand) {
+      const hookDir = path.dirname(resolveHome(def.hook.hookCommand));
+      try {
+        const deployedPath = await fs.readFile(path.join(hookDir, 'cursor-config-path'), 'utf8');
+        if (deployedPath.trim() !== cursorConfigLocation()) return true;
+      } catch {
+        return true;
+      }
     }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
@@ -224,6 +241,10 @@ export class HookStrategy implements DeployStrategy {
         const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
         await updateSystemTomlHooks(def, true);
         return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
+      if ((def.id === 'cursor' || def.id === 'cursor-cli') && hookConfig.hookCommand) {
+        const hookDir = path.dirname(resolveHome(hookConfig.hookCommand));
+        await writeTextFileAtomic(path.join(hookDir, 'cursor-config-path'), cursorConfigLocation());
       }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);

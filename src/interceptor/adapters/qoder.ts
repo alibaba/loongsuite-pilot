@@ -56,18 +56,20 @@ export function parseHookRequest(
 }
 
 export function resolveQoderEventAgentType(request: HookRequest, fallbackAgentType: string): string {
+  if (request.agent === 'qoder-cn' || request.agent === 'qoderclicn') return 'qoder-cn';
   if (request.agent !== 'qoder' && request.agent !== 'qodercli') return fallbackAgentType;
   const business = request.raw?.parent_business_info;
   const product = business && typeof business === 'object' && !Array.isArray(business)
     ? (business as Record<string, unknown>).product
     : undefined;
+  if (product === 'cli') return 'qoder-cli';
   return resolveQoderProductAgentType(product, fallbackAgentType);
 }
 
 export function renderQoderBlock(request: HookRequest, reason: string): string {
   const text = reason || 'Blocked by security policy';
   if (request.event === 'UserPromptSubmit') {
-    const decision = request.agent === 'qoder' ? 'block' : 'deny';
+    const decision = request.agent === 'qoder' || request.agent === 'qoder-cn' ? 'block' : 'deny';
     return `${JSON.stringify({ decision, reason: text })}\n`;
   }
   if (request.event === 'PostToolUse') {

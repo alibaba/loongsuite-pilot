@@ -51,6 +51,10 @@ Hermes 0.16.0 的 50,000 字符 Hook 载荷上限可能丢掉整个 `request.bod
 
 升级后需重启 OpenClaw / Hermes 宿主，使其重新加载插件。历史上已经丢失的内容不会自动补回。
 
+## 千问办公模型用量
+
+千问办公使用 Flash CLI 时，Pilot 通过桌面会话绑定，只读关联 Stop Hook 和 Flash 的逐次模型调用记录，补充请求模型及输入、输出、缓存读写用量。输入 Token 已包含缓存读写，输出 Token 已包含推理用量。源端提供 `mode-*` 时，请求模型显示该路由 ID。响应模型需要实际响应提供。
+
 ## 千问办公协作空间（实验性）
 
 除普通对话的 Stop Hook 外，Pilot 会只读轮询千问办公本地协作空间的 IM 快照。
@@ -107,6 +111,7 @@ Provider 和 Token；事件标记为 `agent_turn` 观察范围，并省略缺失
 | Qwen Work CN | `qwen-work-cn` | Hook 和本地数据源。 |
 | Antigravity App / 新 IDE | `antigravity` | 共用 `~/.gemini/antigravity` 下的本地只读 SQLite 和 transcript。文件变动唤醒增量采集，默认每 30 秒兜底扫描，需 `node:sqlite`（Node.js >= 22.13 / >= 23.4）。 |
 | Antigravity CLI (`agy`) | `antigravity-cli` | 独立读取 `~/.gemini/antigravity-cli` 下的本地 SQLite 和 transcript，使用相同的文件唤醒和兜底扫描机制。 |
+| TRAE CN | `trae-cn` | Pilot 在 `~/.trae-cn/hooks.json` 注册用户级 IDE Hook，并在能将本地 Hub 记录关联到模型响应时上报 Token 用量。设置 `agents.trae-cn.captureMessageContent=false` 可关闭正文采集。 |
 | Wukong | `wukong` | 运行时自动发现并通过本地 `wukong-cli` 进行 CLI API 轮询；它不是 `agents.d` 安装选择项。 |
 | WorkBuddy | `workbuddy` | 结构化 Hook 和文件变化触发即时采集，本地 transcript 每 30 秒轮询兜底；已在 macOS WorkBuddy Desktop 5.2.6 和 Windows 11 WorkBuddy Desktop 5.3.5.0 验证。 |
 | 豆包工作 | `doubao-work` | 实验性 macOS/Windows 客户端轮次元数据和任务 Trace；支持本地 TOOL Span 和所选技能上下文。原生执行与首输出覆盖取决于客户端证据；模型名、Token 和完整云端推理仍不可得。见[支持范围与配置](doubao-work.md)。 |

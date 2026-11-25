@@ -27,6 +27,10 @@ describe('buildBlockedQoderPromptEntry', () => {
     ['qodercli', undefined, 'qoder-cli'],
     ['qoder', { product: 'APP' }, 'qoder-cli'],
     ['qodercli', [{ product: 'app' }], 'qoder-cli'],
+    ['qoder-cn', undefined, 'qoder-cn'],
+    ['qoderclicn', undefined, 'qoder-cn'],
+    ['qoder-cn', { product: 'app' }, 'qoder-cn'],
+    ['qoderclicn', { product: 'cli' }, 'qoder-cn'],
   ] as const)('preserves product identity for %s with metadata %j', (surface, metadata, agentType) => {
     const hook = parseHookRequest({ hook_event_name: 'UserPromptSubmit', session_id: 'session',
       parent_business_info: metadata }, surface)!;

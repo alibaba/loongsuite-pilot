@@ -9,6 +9,7 @@ export const PROMPT_CORRELATION_FIELD = 'agent.pilot.interceptor.correlation';
 export const PROMPT_MATCH_WINDOW_MS = 5000;
 
 export function promptAgentType(value: unknown): string | null {
+  if (value === 'qoder-cn' || value === 'qoderclicn') return 'qoder-cn';
   if (value === 'qodercli' || value === 'qoder-cli') return 'qoder-cli';
   if (value === 'qoder-app') return value;
   if (['qoder', 'qoder-idea', 'qoder-jetbrains'].includes(String(value))) return 'qoder';
@@ -26,13 +27,20 @@ export function promptRequestId(value: string): string {
 
 export function promptKeyFromRequest(request: HookRequest): PromptVerdictKey | null {
   if (!request.sessionId || typeof request.prompt !== 'string' || !request.prompt.length) return null;
+  const business = request.raw?.parent_business_info;
+  const product = business && typeof business === 'object' && !Array.isArray(business)
+    ? (business as Record<string, unknown>).product : undefined;
   const agentType = promptAgentType(resolveQoderEventAgentType(request,
     request.agent === 'qodercli' ? 'qoder-cli' : request.agent));
   if (!agentType) return null;
   const id = request.raw?.request_set_id;
+  const hasId = typeof id === 'string' && id.length > 0 && id.length <= 512;
   return { phase: 'UserPromptSubmit', sessionId: request.sessionId, agentType,
     promptHash: promptHash(request.prompt),
-    requestId: typeof id === 'string' && id.length > 0 && id.length <= 512 ? promptRequestId(id) : randomUUID() };
+    requestId: hasId ? promptRequestId(id) : randomUUID(),
+    ...(['qoder', 'qodercli', 'qoder-cn', 'qoderclicn'].includes(request.agent) && id === undefined
+      ? { missingRequestId: true as const } : {}),
+    ...(request.agent === 'qoder' && product === undefined ? { missingAgentType: true as const } : {}) };
 }
 
 export interface PromptLookup {
