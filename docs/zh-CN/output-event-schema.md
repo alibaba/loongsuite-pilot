@@ -69,6 +69,9 @@ Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation te
 Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于执行 AGENT 下，后续 LLM 从压缩结束后开始。
 原生 `compacted.replacement_history` 成为新的输入基线。后续请求带
 `gen_ai.conversation.compacted=true` 和 `gen_ai.context.version`，新增消息和工具结果从该基线追加。
+原生输入中的 `additional_tools` 保留其位置和 `role=developer`，映射为
+`gen_ai.input.messages` 中的 `openai.additional_tools` Part，包含当前快照的原生 ID 和嵌套 `tools`。
+声明随上下文传递，实际执行工具时才产生 TOOL Span。
 明文 checkpoint 以 `CompactionPart` 表示，保留原生 role、摘要正文和压缩响应 ID。
 加密 checkpoint 保留 `type=compaction` 和可用的块 ID。内容可用性由
 `gen_ai.context.content.availability` 标为 `plaintext`、`opaque`、`partial` 或 `unavailable`。

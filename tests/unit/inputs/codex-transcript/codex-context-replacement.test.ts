@@ -43,6 +43,19 @@ describe('installed Codex context snapshots', () => {
     expect(oversized.contentAvailability).toBe('unavailable');
   });
 
+  it('marks malformed additional tools as partial without changing the replacement order', () => {
+    const result = codexContextReplacement({ replacement_history: [
+      { type: 'additional_tools', role: 'developer', tools: ['not a tool definition'] },
+      { type: 'additional_tools', role: 'developer', tools: [] },
+      { type: 'compaction', id: 'block' },
+    ] }, 'fallback', transcriptInputMessage);
+    expect(result.contentAvailability).toBe('partial');
+    expect(result.messages).toEqual([
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', tools: [] }] },
+      { role: 'user', parts: [{ type: 'compaction', id: 'block' }] },
+    ]);
+  });
+
   it('carries installed context across turns and appends new input once', () => {
     const turn = { sessionId: 'session', transcriptTurnId: 'next', provider: 'openai', model: 'model',
       status: 'completed' as const, startedAtMs: 1000, terminalAtMs: 2000, promptReady: true,
@@ -60,13 +73,17 @@ describe('installed Codex context snapshots', () => {
     expect(context.sourceSpanIds).toEqual([]);
   });
 
-  it('applies existing message masking to plaintext compaction parts', () => {
+  it('applies existing message masking to compaction parts and nested tool schemas', () => {
     const entry = buildAgentActivityEntry({ 'event.name': 'llm.request', 'gen_ai.input.messages': [
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', tools: [
+        { type: 'function', name: 'example', parameters: { properties: { value: { default: 'AKIAIOSFODNN7EXAMPLE' } } } },
+      ] }] },
       { role: 'user', parts: [{ type: 'compaction', id: 'block', content: 'AKIAIOSFODNN7EXAMPLE' }] },
     ] });
     const masked = maskAgentActivityEntry(entry, { mode: 'all', types: [] });
     expect(JSON.stringify(masked['gen_ai.input.messages'])).not.toContain('AKIAIOSFODNN7EXAMPLE');
     expect(JSON.stringify(masked['gen_ai.input.messages'])).toContain('block');
+    expect(JSON.stringify(masked['gen_ai.input.messages'])).toContain('openai.additional_tools');
   });
 
   it('preserves native tool arguments when appending to installed context', () => {

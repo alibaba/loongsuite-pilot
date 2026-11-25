@@ -3,6 +3,16 @@ import type { CodexContextReplacement } from './codex-transcript-types.js';
 
 const MAX_SNAPSHOT_BYTES = 1024 * 1024;
 
+/** A positional Responses input item, represented as a provider-specific GenAI part. */
+export function codexAdditionalToolsMessage(item: Record<string, unknown>): JsonValue | null {
+  const { id, role, tools } = item;
+  if (typeof role !== 'string' || !role || !Array.isArray(tools) || !tools.every(tool => object(tool))) return null;
+  return {
+    role,
+    parts: [{ type: 'openai.additional_tools', ...(typeof id === 'string' ? { id } : {}), tools }],
+  };
+}
+
 /** Decode the installed native snapshot. Encrypted provider bytes never enter telemetry. */
 export function codexContextReplacement(
   payload: Record<string, unknown>,
@@ -26,6 +36,12 @@ export function codexContextReplacement(
       sampledThroughSequence = Math.max(sampledThroughSequence ?? 0, sampled);
     }
     if (!item) { partial = true; continue; }
+    if (item.type === 'additional_tools') {
+      const message = codexAdditionalToolsMessage(item);
+      if (message) messages.push(message);
+      else partial = true;
+      continue;
+    }
     if (item.type === 'compaction') {
       const part: Record<string, JsonValue> = { type: 'compaction' };
       if (typeof item.id === 'string') part.id = item.id;

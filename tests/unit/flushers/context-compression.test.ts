@@ -32,13 +32,24 @@ describe('context compression through the real flusher and SDK', () => {
     const source = (offset: number, type: string, payload: Record<string, unknown>) => ({
       timestamp: new Date(start + offset).toISOString(), type, payload,
     });
+    const tools = [{ type: 'namespace', name: 'example', tools: [
+      { type: 'function', name: 'inspect', parameters: { type: 'object', properties: { verbose: { type: 'boolean' } } }, strict: true },
+      { type: 'custom', name: 'read', format: { type: 'grammar', syntax: 'lark', definition: 'start: "read"' } },
+    ] }];
+    const declaration = { type: 'additional_tools', id: 'at_original', role: 'developer', tools };
     const records = [
       source(0, 'event_msg', { type: 'task_started', turn_id: 'turn' }),
+      source(1, 'response_item', declaration),
+      source(1, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'read and continue' }] }),
       source(1, 'event_msg', { type: 'user_message', message: 'read and continue' }),
       source(100, 'response_item', { type: 'function_call', call_id: 'call', name: 'exec_command', arguments: '{}' }),
       source(200, 'response_item', { type: 'function_call_output', call_id: 'call', output: 'large result' }),
       source(201, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }),
-      source(3000, 'compacted', { window_id: 'window', replacement_history: [{ type: 'compaction', encrypted_content: 'private' }] }),
+      source(3000, 'compacted', { window_id: 'window', replacement_history: [
+        { ...declaration, id: 'at_replacement' },
+        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Retained instruction' }] },
+        { type: 'compaction', id: 'compacted_block', encrypted_content: 'private' },
+      ] }),
       source(3001, 'event_msg', { type: 'item_completed', turn_id: 'turn', item: { type: 'ContextCompaction', id: 'compact' },
         started_at_ms: start + 300, completed_at_ms: start + 3001 }),
       source(4000, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }),
@@ -58,10 +69,18 @@ describe('context compression through the real flusher and SDK', () => {
     expect(new Set(spans.map(s => s.spanContext().traceId)).size).toBe(1);
     expect(compression.duration).toEqual([2, 701000000]);
     const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL')).toHaveLength(1);
+    expect(JSON.parse(String(llms[0].attributes['gen_ai.input.messages']))).toEqual([
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', id: 'at_original', tools }] },
+      { role: 'user', parts: [{ type: 'text', content: 'read and continue' }] },
+    ]);
     expect(llms[1].startTime).toEqual([Math.floor((start + 3001) / 1000), ((start + 3001) % 1000) * 1000000]);
     expect(llms[1].attributes['gen_ai.conversation.compacted']).toBe(true);
     expect(JSON.parse(String(llms[1].attributes['gen_ai.input.messages']))).toEqual([
-      { role: 'user', parts: [{ type: 'compaction' }] },
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', id: 'at_replacement', tools }] },
+      { role: 'developer', parts: [{ type: 'text', content: 'Retained instruction' }] },
+      { role: 'user', parts: [{ type: 'compaction', id: 'compacted_block' }] },
     ]);
     expect(llms[1].attributes['gen_ai.context.version']).toBe('window');
     expect(llms[1].attributes['gen_ai.context.content.availability']).toBe('opaque');

@@ -19,7 +19,7 @@ import type {
   CodexContextReplacement,
 } from './codex-transcript-types.js';
 import { timestampMs } from './codex-transcript-utils.js';
-import { codexContextReplacement } from './codex-context-replacement.js';
+import { codexAdditionalToolsMessage, codexContextReplacement } from './codex-context-replacement.js';
 
 export function extractCodexTranscriptMeta(record: Record<string, unknown>): CodexTranscriptMeta | null {
   if (record.type !== 'session_meta') return null;
@@ -304,6 +304,7 @@ function extractCodexTurn(
       compactedPayload = payload;
       contextResetId = stringValue(payload.window_id) ?? `compacted:${source.startOffset}`;
       contextReplacement = codexContextReplacement(payload, contextResetId, transcriptInputMessage);
+      additionalInputMessages = [];
       contextTokensAfter = undefined;
       markActivity(timestamp);
       continue;
@@ -459,6 +460,17 @@ function extractCodexTurn(
 
     if (record.type !== 'response_item') continue;
     const itemType = stringValue(payload.type);
+    if (itemType === 'additional_tools') {
+      const message = codexAdditionalToolsMessage(payload);
+      if (!message) continue;
+      if (contextResetId || activeStep() || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined) {
+        additionalInputMessages.push(message);
+      } else {
+        inputMessages.push(message);
+      }
+      markActivity(timestamp);
+      continue;
+    }
     if (itemType === 'agent_message' && meta?.threadSource === 'subagent') {
       const recipient = stringValue(payload.recipient);
       const communicationMeta = asRecord(payload.internal_chat_message_metadata_passthrough);
