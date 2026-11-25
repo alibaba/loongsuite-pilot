@@ -22,6 +22,7 @@ import {
 import { readSegmentTokensForSession, QODER_CN_SEGMENTS_ROOT } from '../qoder-trace/segment-token-reader.js';
 import { readInterceptData, type InterceptData } from '../qoder-trace/intercept-token-reader.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { LruMap } from '../../utils/lru-map.js';
 import { QoderTranscriptSource } from '../qoder-trace/transcript-source.js';
 import { QoderLegacyHookReader } from '../qoder-trace/legacy-hook-reader.js';
 
@@ -29,6 +30,9 @@ import { QoderLegacyHookReader } from '../qoder-trace/legacy-hook-reader.js';
 // the international build's file so a machine running both keeps the two
 // streams apart.
 const CN_INTERCEPT_FILE = 'qoderclicn-intercept.jsonl';
+
+const SESSION_ANCHOR_LIMIT = 500;
+const ANCHOR_EVICTION_LOG_INTERVAL_MS = 5 * 60 * 1000;
 
 export interface QoderCnTraceInputOptions extends InputOptions {
   logDir?: string;
@@ -58,8 +62,11 @@ export class QoderCnTraceInput extends BaseInput {
 
   // Persists across collect() cycles: tracks the last anchor turn.id and its
   // max step counter per session so orphan turns from later cycles can be
-  // merged into the correct turn.
-  private readonly sessionAnchor = new Map<string, { turnId: string; maxStep: number }>();
+  // merged into the correct turn. Evict only under capacity pressure so idle
+  // sessions can resume with the original turn and step sequence.
+  private readonly sessionAnchor = new LruMap<{ turnId: string; maxStep: number }>(SESSION_ANCHOR_LIMIT);
+  private pendingAnchorEvictions = 0;
+  private lastAnchorEvictionLogAt = 0;
 
   constructor(opts: QoderCnTraceInputOptions) {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
@@ -153,9 +160,9 @@ export class QoderCnTraceInput extends BaseInput {
           const m = ((e['gen_ai.step.id'] as string) || '').match(/:s(\d+)$/);
           if (m) { const n = parseInt(m[1]); if (n > maxStep) maxStep = n; }
         }
-        this.sessionAnchor.set(sessionId, { turnId, maxStep });
+        this.recordSessionAnchor(sessionId, { turnId, maxStep });
       } else {
-        // Orphan turn: reassign to the last anchor if one exists.
+        // An orphan with no cached anchor keeps its original turn and step IDs.
         const anchor = this.sessionAnchor.get(sessionId);
         if (!anchor) continue;
 
@@ -301,6 +308,23 @@ export class QoderCnTraceInput extends BaseInput {
     }
     if (native.changed) this.setState({ extra: { ...this.getState().extra, qoderTranscripts: native.state } });
     return ordered;
+  }
+
+  private recordSessionAnchor(sessionId: string, anchor: { turnId: string; maxStep: number }): void {
+    const evicted = this.sessionAnchor.set(sessionId, anchor);
+    if (evicted === 0) return;
+
+    // Sustained session churn can evict an anchor on every insertion.
+    this.pendingAnchorEvictions += evicted;
+    const now = Date.now();
+    if (now - this.lastAnchorEvictionLogAt < ANCHOR_EVICTION_LOG_INTERVAL_MS) return;
+    this.lastAnchorEvictionLogAt = now;
+    this.logger.info('session anchor capacity reached, evicted least-recently-used anchors', {
+      evicted: this.pendingAnchorEvictions,
+      size: this.sessionAnchor.size,
+      limit: SESSION_ANCHOR_LIMIT,
+    });
+    this.pendingAnchorEvictions = 0;
   }
 
   // ─── Hook JSONL reading ─────────────────────────────────────────────────────
