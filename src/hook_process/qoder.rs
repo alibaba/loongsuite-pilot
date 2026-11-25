@@ -13,6 +13,7 @@ use super::common::{
     sanitize_record, sha256_hex, with_file_lock, write_empty, Env, HookRequest, Obj,
 };
 use serde_json::{json, Value};
+use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -748,7 +749,10 @@ pub fn build_collected_transcript_turn(
             .map(str::to_owned)
             .or_else(|| agent_name_patch(context.resource_attributes)),
     };
-    let (_, content) = split_progress_content(rows);
+    let content: Vec<_> = rows
+        .iter()
+        .filter(|row| matches!(typ(row), "user" | "assistant"))
+        .collect();
     let boundaries = build_llm_boundaries(&content);
     build_events_from_boundaries_with_tool_values(
         &boundaries,
@@ -813,14 +817,12 @@ pub fn qoder_is_control_user_row(row: &Value) -> bool {
 }
 
 pub fn qoder_has_cn_terminal(rows: &[Value]) -> bool {
-    let progress: Vec<_> = rows
-        .iter()
-        .filter(|row| typ(row) == "progress")
-        .map(|row| Progress {
-            hook_event: hook_event(Some(row)).to_owned(),
-        })
-        .collect();
-    has_qoder_cn_terminal(&progress, rows)
+    rows.iter().any(|row| match typ(row) {
+        "progress" => hook_event(Some(row)) == "Stop",
+        "last-prompt" => true,
+        "assistant" => stop_reason(row).is_some_and(is_terminal_stop_reason),
+        _ => false,
+    })
 }
 
 pub fn qoder_legacy_retry_lock_path(data: &Path, transcript: &Path) -> PathBuf {
@@ -1990,7 +1992,7 @@ fn split_turns(events: &[Value]) -> Vec<Vec<Value>> {
     turns
 }
 
-fn build_llm_boundaries(content: &[Value]) -> Vec<Boundary> {
+fn build_llm_boundaries(content: &[impl Borrow<Value>]) -> Vec<Boundary> {
     struct Group {
         start: usize,
         end: usize,
@@ -2000,14 +2002,14 @@ fn build_llm_boundaries(content: &[Value]) -> Vec<Boundary> {
     let mut groups = Vec::new();
     let mut current: Vec<usize> = Vec::new();
     let mut current_start = 0usize;
-    let mut current_tools = HashSet::<String>::new();
-    let mut resolved = HashSet::<String>::new();
+    let mut current_tools = HashSet::new();
+    let mut resolved = HashSet::new();
     let mut response_complete = false;
     let flush_at = |groups: &mut Vec<Group>,
                     current: &mut Vec<usize>,
                     current_start: &mut usize,
-                    current_tools: &mut HashSet<String>,
-                    resolved: &mut HashSet<String>,
+                    current_tools: &mut HashSet<&str>,
+                    resolved: &mut HashSet<&str>,
                     response_complete: &mut bool,
                     end: usize| {
         if let (Some(first), Some(last)) = (current.first().copied(), current.last().copied()) {
@@ -2024,13 +2026,13 @@ fn build_llm_boundaries(content: &[Value]) -> Vec<Boundary> {
         resolved.clear();
         *response_complete = false;
     };
-    for (index, row) in content.iter().enumerate() {
+    for (index, row) in content.iter().map(Borrow::borrow).enumerate() {
         if typ(row) != "assistant" {
             if is_tool_result(row) {
                 for block in message_blocks(row) {
                     if block.get("type").and_then(Value::as_str) == Some("tool_result") {
                         if let Some(id) = nonempty_str(block.get("tool_use_id")) {
-                            resolved.insert(id.to_string());
+                            resolved.insert(id);
                         }
                     }
                 }
@@ -2061,7 +2063,7 @@ fn build_llm_boundaries(content: &[Value]) -> Vec<Boundary> {
         for block in message_blocks(row) {
             if block.get("type").and_then(Value::as_str) == Some("tool_use") {
                 if let Some(id) = nonempty_str(block.get("id")) {
-                    current_tools.insert(id.to_string());
+                    current_tools.insert(id);
                 }
             }
         }
@@ -2081,8 +2083,8 @@ fn build_llm_boundaries(content: &[Value]) -> Vec<Boundary> {
     groups
         .into_iter()
         .filter_map(|group| {
-            let start_ts = timestamp_str(&content[group.first])?.to_string();
-            let end_ts = timestamp_str(&content[group.last])?.to_string();
+            let start_ts = timestamp_str(content[group.first].borrow())?.to_string();
+            let end_ts = timestamp_str(content[group.last].borrow())?.to_string();
             if timestamp_order_nanos(&start_ts).is_none()
                 || timestamp_order_nanos(&end_ts).is_none()
             {
@@ -2126,7 +2128,7 @@ fn build_events_from_boundaries(
 
 fn build_events_from_boundaries_with_tool_values(
     boundaries: &[Boundary],
-    content_events: &[Value],
+    content_events: &[impl Borrow<Value>],
     all_parsed: &[Value],
     turn_id: &str,
     context: BoundaryContext<'_>,
@@ -2144,19 +2146,23 @@ fn build_events_from_boundaries_with_tool_values(
     let observed = now_unix_nanos();
     let user_row = content_events
         .iter()
+        .map(Borrow::borrow)
         .find(|row| is_real_user_prompt(row))
         .or_else(|| {
             content_events
                 .iter()
+                .map(Borrow::borrow)
                 .find(|row| typ(row) == "user" && !is_tool_result(row))
         });
     let user_text = user_row.map(extract_first_text).unwrap_or_default();
-    let user_id = resolve_user_id(user_row.or_else(|| content_events.first()), runtime_user);
-    let agent_type = infer_variant(user_row.or_else(|| content_events.first()), agent_id);
+    let identity_row = user_row.or_else(|| content_events.first().map(Borrow::borrow));
+    let user_id = resolve_user_id(identity_row, runtime_user);
+    let agent_type = infer_variant(identity_row, agent_id);
     let provider = infer_provider_name(None, None, &agent_type);
     if user_row.is_some() && !user_text.is_empty() {
         let user_model = content_events
             .iter()
+            .map(Borrow::borrow)
             .find_map(row_model)
             .unwrap_or("unknown");
         let mut record = Obj::new();
@@ -2209,6 +2215,7 @@ fn build_events_from_boundaries_with_tool_values(
     if boundaries.is_empty() {
         let residual: Vec<&Value> = content_events
             .iter()
+            .map(Borrow::borrow)
             .filter(|row| typ(row) == "assistant" || is_tool_result(row))
             .collect();
         build_legacy_events(&residual, turn_id, agent_id, runtime_user, &mut records);
@@ -2272,7 +2279,11 @@ fn build_events_from_boundaries_with_tool_values(
                 input_results.push(clone_tool_result(result));
             }
         }
-        let step_model = content.iter().find_map(row_model).unwrap_or("auto");
+        let step_model = content
+            .iter()
+            .map(Borrow::borrow)
+            .find_map(row_model)
+            .unwrap_or("auto");
         let event_context = EventContext {
             step_id: &step_id,
             turn_id,
@@ -2324,7 +2335,7 @@ fn build_events_from_boundaries_with_tool_values(
         let mut client_request_id = None;
         let mut native_usage = None;
         let mut first_assistant_ts = None;
-        for row in content {
+        for row in content.iter().map(Borrow::borrow) {
             if typ(row) != "assistant" {
                 continue;
             }
@@ -2424,7 +2435,7 @@ fn build_events_from_boundaries_with_tool_values(
                 call_ts: None,
             })
             .collect();
-        let last_stop = content.iter().rev().find_map(|row| {
+        let last_stop = content.iter().rev().map(Borrow::borrow).find_map(|row| {
             if typ(row) == "assistant" {
                 stop_reason(row).map(str::to_owned)
             } else {
@@ -3187,9 +3198,9 @@ fn normalizer_number_nanos(value: f64) -> String {
     format!("{}000000", (value * 1000.0).trunc() as i128)
 }
 
-fn extract_tool_results(rows: &[Value]) -> Vec<ToolResult> {
+fn extract_tool_results(rows: &[impl Borrow<Value>]) -> Vec<ToolResult> {
     let mut results = Vec::new();
-    for row in rows {
+    for row in rows.iter().map(Borrow::borrow) {
         if typ(row) != "user" || !is_tool_result(row) {
             continue;
         }
@@ -3224,14 +3235,18 @@ fn arguments_string(input: &Option<Value>) -> Option<String> {
     }
 }
 
-fn build_user_message_parts(user_text: &str, events: &[Value], agent_type: &str) -> Vec<Value> {
+fn build_user_message_parts(
+    user_text: &str,
+    events: &[impl Borrow<Value>],
+    agent_type: &str,
+) -> Vec<Value> {
     let mut parts = vec![json!({"type": "text", "content": user_text})];
     if agent_type != "qoder-cli" {
         return parts;
     }
     let mut seen = HashSet::new();
     seen.insert(user_text.to_string());
-    for row in events {
+    for row in events.iter().map(Borrow::borrow) {
         if typ(row) != "user" || is_tool_result(row) {
             continue;
         }

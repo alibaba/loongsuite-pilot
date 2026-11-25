@@ -250,8 +250,9 @@ pub fn scan_lines(
     cancel: &AtomicBool,
     mut emit: impl FnMut(Line) -> bool,
 ) -> std::io::Result<ScanBatch> {
+    let (mut file, initial) = open_versioned(path)?;
     scan_lines_with_file(
-        path,
+        (&mut file, path, initial),
         range,
         options,
         previous,
@@ -262,7 +263,7 @@ pub fn scan_lines(
 }
 
 pub(super) fn scan_lines_with_file(
-    path: &Path,
+    file: (&mut File, &Path, FileVersion),
     range: std::ops::Range<u64>,
     options: &ScanOptions,
     previous: Option<PendingLine>,
@@ -271,7 +272,7 @@ pub(super) fn scan_lines_with_file(
     mut emit: impl FnMut(Line, &mut File, &mut ScanBudget, u64) -> bool,
 ) -> std::io::Result<ScanBatch> {
     let (start, end) = (range.start, range.end);
-    let (mut f, initial) = open_versioned(path)?;
+    let (f, path, initial) = file;
     budget.metrics.source_files_opened += 1;
     let mut position = start;
     let mut line_start = start;
@@ -292,7 +293,7 @@ pub(super) fn scan_lines_with_file(
         if !valid && initial.size > tail.version.size {
             let mut witness = vec![0; tail.witness.len()];
             let n = read(
-                &mut f,
+                f,
                 tail.position - tail.witness.len() as u64,
                 &mut witness,
                 budget,
@@ -312,7 +313,7 @@ pub(super) fn scan_lines_with_file(
                 && (!options.allow_final || final_tried || oversized)
             {
                 return checked_batch(
-                    &f,
+                    f,
                     path,
                     initial.clone(),
                     start,
@@ -347,11 +348,11 @@ pub(super) fn scan_lines_with_file(
                         row: None,
                         quarantine: Some(why),
                     },
-                    &mut f,
+                    f,
                     budget,
                     initial.size,
                 ) {
-                    return checked_batch(&f, path, initial, complete_offset, None);
+                    return checked_batch(f, path, initial, complete_offset, None);
                 }
                 continue;
             }
@@ -360,7 +361,7 @@ pub(super) fn scan_lines_with_file(
             .min((end - position) as usize)
             .min(budget.remaining as usize);
         let mut chunk = vec![0; size];
-        let n = read(&mut f, position, &mut chunk, budget, cancel)?;
+        let n = read(f, position, &mut chunk, budget, cancel)?;
         if n == 0 {
             break;
         }
@@ -370,10 +371,7 @@ pub(super) fn scan_lines_with_file(
         last = chunk[n.saturating_sub(64)..].to_vec();
         let mut cursor = 0;
         while cursor < n {
-            let newline = chunk[cursor..]
-                .iter()
-                .position(|x| *x == b'\n')
-                .map(|i| i + cursor);
+            let newline = memchr::memchr(b'\n', &chunk[cursor..]).map(|i| i + cursor);
             let stop = newline.unwrap_or(n);
             let fragment = &chunk[cursor..stop];
             let complete_in_chunk = pending_bytes == 0 && newline.is_some();
@@ -396,7 +394,7 @@ pub(super) fn scan_lines_with_file(
             } else if oversized {
                 (None, Some("record-byte-limit"))
             } else if replay {
-                let full = full_line(&mut f, line_start, z - 1, budget, cancel)?;
+                let full = full_line(f, line_start, z - 1, budget, cancel)?;
                 parse(&full, false, budget)
             } else {
                 let record = if complete_in_chunk { fragment } else { &bytes };
@@ -411,11 +409,11 @@ pub(super) fn scan_lines_with_file(
                     row,
                     quarantine,
                 },
-                &mut f,
+                f,
                 budget,
                 initial.size,
             ) {
-                return checked_batch(&f, path, initial, complete_offset, None);
+                return checked_batch(f, path, initial, complete_offset, None);
             }
             line_start = z;
             pending_bytes = 0;
@@ -435,11 +433,11 @@ pub(super) fn scan_lines_with_file(
                 row: None,
                 quarantine: None,
             },
-            &mut f,
+            f,
             budget,
             initial.size,
         );
-        return checked_batch(&f, path, initial, end, None);
+        return checked_batch(f, path, initial, end, None);
     }
     let mut pending = (pending_bytes > 0).then(|| PendingLine {
         start: line_start,
@@ -460,7 +458,7 @@ pub(super) fn scan_lines_with_file(
             t.final_tried = true;
         }
         let (row, quarantine) = if replay {
-            let full = full_line(&mut f, line_start, end, budget, cancel)?;
+            let full = full_line(f, line_start, end, budget, cancel)?;
             parse(&full, false, budget)
         } else {
             parse(&bytes, false, budget)
@@ -474,7 +472,7 @@ pub(super) fn scan_lines_with_file(
                     row,
                     quarantine,
                 },
-                &mut f,
+                f,
                 budget,
                 initial.size,
             );
@@ -482,7 +480,7 @@ pub(super) fn scan_lines_with_file(
             complete_offset = end;
         }
     }
-    checked_batch(&f, path, initial, complete_offset, pending)
+    checked_batch(f, path, initial, complete_offset, pending)
 }
 fn checked_batch(
     f: &File,

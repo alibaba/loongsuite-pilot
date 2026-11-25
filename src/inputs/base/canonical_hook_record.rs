@@ -1,7 +1,8 @@
 //! Port of `src/inputs/base/canonical-hook-record.ts`.
 
 use crate::normalization::{
-    build_standard_with_canonical_payloads, is_canonical_payload_key, is_reserved_key,
+    build_standard_from_owned, build_standard_with_canonical_payloads, is_canonical_payload_key,
+    is_reserved_key,
 };
 use crate::types::AgentActivityEntry;
 use regex::Regex;
@@ -132,7 +133,10 @@ fn build_from_canonical_options(
         "attributes".to_owned(),
         Value::Object(attributes.cloned().unwrap_or_default()),
     );
-    build_standard_with_canonical_payloads(&opts, canonical_payloads)
+    match canonical_payloads {
+        Some(payloads) => build_standard_with_canonical_payloads(&opts, Some(payloads)),
+        None => build_standard_from_owned(opts),
+    }
 }
 
 #[cfg(test)]
