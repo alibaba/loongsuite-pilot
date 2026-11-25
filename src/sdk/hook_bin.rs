@@ -5,6 +5,8 @@ mod cursor_inbox;
 mod protocol;
 #[path = "hook_qoder.rs"]
 mod qoder;
+#[path = "qwen_wakeup.rs"]
+mod qwen_wakeup;
 use protocol::*;
 use std::io::{Read, Write};
 use std::net::UdpSocket;
@@ -185,6 +187,20 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
             }
         }
         return Some(HookOutput::Json("{}\n".into()));
+    }
+    if channel == "observe"
+        && configured_agent == "qwen-work-cn"
+        && configured_event == Some("Stop")
+    {
+        let mut body = Vec::new();
+        std::io::stdin()
+            .take((MAX_REQUEST + 1) as u64)
+            .read_to_end(&mut body)
+            .ok()?;
+        if body.len() <= MAX_REQUEST {
+            let _ = qwen_wakeup::publish(&data, &body);
+        }
+        return None;
     }
     let id = format!("{:08x}{:032x}", std::process::id(), unix_time()?.as_nanos());
     let mut trace = RequestTrace {
@@ -487,6 +503,15 @@ fn worker(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> Op
 /// Never return while a worker can still write to the Agent. Only this main
 /// thread owns output; process::exit terminates blocked stdin/socket workers.
 pub fn run(args: Vec<String>, started: Instant, legacy: Option<LegacyHook>) -> ! {
+    // QwenWorkCN needs this registration to write the user prompt. Stop
+    // handles the transcript. The passive prompt needs no stdin or SDK I/O.
+    if args.first().is_some_and(|command| command == "sdk-hook")
+        && flag(&args, "--channel") == Some("observe")
+        && flag(&args, "--agent") == Some("qwen-work-cn")
+        && flag(&args, "--event") == Some("UserPromptSubmit")
+    {
+        std::process::exit(0);
+    }
     let watchdog = std::thread::Builder::new()
         .name("pilot-hook-deadline".into())
         .spawn(move || {

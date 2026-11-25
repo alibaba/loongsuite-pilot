@@ -228,6 +228,7 @@ pub struct Orchestrator {
     dashboard: Mutex<Option<dashboard::DashboardServer>>,
     qoder_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
     openclaw_interceptor: Mutex<Option<super::sdk_agent::SdkAgent>>,
+    qwen_hooks: Mutex<Option<super::sdk_agent::SdkAgent>>,
     multimodal_ready: Mutex<bool>,
     verdicts: Mutex<Option<Arc<ToolVerdictStore>>>,
     status_bar: Mutex<Option<StatusBarAppManager>>,
@@ -280,6 +281,7 @@ impl Orchestrator {
             dashboard: Mutex::new(None),
             qoder_hooks: Mutex::new(None),
             openclaw_interceptor: Mutex::new(None),
+            qwen_hooks: Mutex::new(None),
             multimodal_ready: Mutex::new(false),
             verdicts: Mutex::new(None),
             status_bar: Mutex::new(None),
@@ -552,6 +554,22 @@ impl Orchestrator {
             self.start_openclaw_interceptor(&pilot_dir, config, &state_store)
                 .await;
         }
+        if self.uses_sdk_qwen_work_cn() {
+            self.register_sdk_qwen_work_cn(&mut detection, &pilot_dir, &state_store)
+                .await;
+            self.register_sdk_qwen_work_cn_collaboration(&mut detection, &pilot_dir, &state_store);
+        }
+        if let Some(config) = interceptor_config.as_ref().filter(|_| {
+            interception_enabled
+                && self
+                    .config
+                    .agents
+                    .get("qwen-work-cn")
+                    .is_none_or(|agent| agent.enabled != Some(false))
+        }) {
+            self.start_qwen_hooks(&pilot_dir, config, &state_store)
+                .await;
+        }
         let deploy_entries = deployment
             .as_ref()
             .map(|deployment| self.deploy_detection_entries(deployment))
@@ -817,6 +835,10 @@ impl Orchestrator {
             .take();
         if let Some(sdk) = openclaw_interceptor {
             sdk.stop().await;
+        }
+        let qwen_hooks = self.qwen_hooks.lock().expect("Qwen Work Hook SDK").take();
+        if let Some(hooks) = qwen_hooks {
+            hooks.stop().await;
         }
         if let Some(verdicts) = self.verdicts.lock().expect("verdicts").clone() {
             if let Err(err) = verdicts.stop_checkpoint_loop(chrono::Utc::now().timestamp_millis()) {
@@ -2549,10 +2571,25 @@ impl Orchestrator {
                 )
             })
         };
-        self.add_hosted(
-            entries,
-            HostedInputSpec::new("qwen-work-cn-trace", "qwen-work-cn", "hook-jsonl", 1),
-            QwenWorkCnTraceInput::new(QwenWorkCnTraceOptions {
+        let qwen_wakeups =
+            (self.standalone && self.runtime_options.manage_host_services).then(|| {
+                let sdk_data = std::path::PathBuf::from(
+                    self.data_dir_join("state/standalone-qwen-work-cn-sdk"),
+                );
+                let data = std::path::PathBuf::from(&self.data_dir);
+                crate::inputs::qwen_work_cn::QwenWorkCnNativeWakeups {
+                    directory: sdk_data.join("wakeups/qwen-work-cn"),
+                    pilot_policy_dir: Some(sdk_data),
+                    transcript_root: std::path::PathBuf::from(resolve_home(
+                        "~/.qwenworkcn/projects",
+                    )),
+                    producer_data_dir: data.clone(),
+                    legacy_cursor_root: Some(data),
+                    user_id: self.config.user_id.clone(),
+                }
+            });
+        if !self.uses_sdk_qwen_work_cn() {
+            let input = QwenWorkCnTraceInput::new(QwenWorkCnTraceOptions {
                 state_store: Arc::clone(state_store),
                 log_dir: Some(qwen_log.clone()),
                 segments_root: Some(qwen_segments.clone()),
@@ -2579,20 +2616,33 @@ impl Orchestrator {
                             .unwrap_or_default(),
                     })
                 },
-            }),
-            QwenWorkCnTraceInput::get_watch_paths(Some(&qwen_log), Some(&qwen_segments)),
-            QwenWorkCnTraceInput::check_availability,
-        )
-        .await;
+            });
+            if let Some(native) = &qwen_wakeups {
+                input.set_native_wakeups(native.clone());
+            }
+            self.add_hosted(
+                entries,
+                HostedInputSpec::new("qwen-work-cn-trace", "qwen-work-cn", "hook-jsonl", 1),
+                input,
+                QwenWorkCnTraceInput::get_watch_paths(Some(&qwen_log), Some(&qwen_segments)),
+                QwenWorkCnTraceInput::check_availability,
+            )
+            .await;
+        }
+        let qwen_history = QwenWorkCnInput::new(QwenWorkCnOptions {
+            state_store: Arc::clone(state_store),
+            log_dir: Some(qwen_log.clone()),
+            log_prefix: None,
+            poll_interval_ms: self.poll("qwen-work-cn-hook"),
+        });
+        if let Some(native) = qwen_wakeups {
+            // The history-only listener is gated off while either trace listener owns Stop.
+            qwen_history.set_native_wakeups(native);
+        }
         self.add_hosted_when(
             entries,
             HostedInputSpec::new("qwen-work-cn-hook", "qwen-work-cn", "hook-jsonl", 1),
-            QwenWorkCnInput::new(QwenWorkCnOptions {
-                state_store: Arc::clone(state_store),
-                log_dir: Some(qwen_log.clone()),
-                log_prefix: None,
-                poll_interval_ms: self.poll("qwen-work-cn-hook"),
-            }),
+            qwen_history,
             vec![qwen_log.clone()],
             QwenWorkCnInput::check_availability,
             {
@@ -2644,38 +2694,40 @@ impl Orchestrator {
         .await;
         let collaboration_root = resolve_collaboration_root();
         let collaboration_listener = "qwen-work-cn-collaboration";
-        self.add_hosted(
-            entries,
-            HostedInputSpec::new(
-                collaboration_listener,
-                "qwen-work-cn",
-                "session-file-polling",
-                1,
-            ),
-            QwenWorkCnCollaborationInput::new(
-                collaboration_root.clone(),
-                self.config
-                    .listeners
-                    .get(collaboration_listener)
-                    .and_then(|listener| listener.include_conversation_ids.as_deref()),
-                Arc::clone(state_store),
-                self.poll(collaboration_listener),
-            ),
-            collaboration_root
-                .parent()
-                .map(|path| path.to_string_lossy().into_owned())
-                .into_iter()
-                .collect(),
-            move || {
-                let root = collaboration_root.clone();
-                async move {
-                    tokio::fs::symlink_metadata(root)
-                        .await
-                        .is_ok_and(|metadata| metadata.is_dir())
-                }
-            },
-        )
-        .await;
+        if !self.uses_sdk_qwen_work_cn() {
+            self.add_hosted(
+                entries,
+                HostedInputSpec::new(
+                    collaboration_listener,
+                    "qwen-work-cn",
+                    "session-file-polling",
+                    1,
+                ),
+                QwenWorkCnCollaborationInput::new(
+                    collaboration_root.clone(),
+                    self.config
+                        .listeners
+                        .get(collaboration_listener)
+                        .and_then(|listener| listener.include_conversation_ids.as_deref()),
+                    Arc::clone(state_store),
+                    self.poll(collaboration_listener),
+                ),
+                collaboration_root
+                    .parent()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .into_iter()
+                    .collect(),
+                move || {
+                    let root = collaboration_root.clone();
+                    async move {
+                        tokio::fs::symlink_metadata(root)
+                            .await
+                            .is_ok_and(|metadata| metadata.is_dir())
+                    }
+                },
+            )
+            .await;
+        }
         if !self.uses_sdk_qoder() {
             let qoder_agent = self.config.agents.get("qoder").cloned().unwrap_or_default();
             let qoder_multimodal = self.inputs_have_multimodal()
@@ -3254,6 +3306,212 @@ impl Orchestrator {
             None,
         );
         sdk
+    }
+
+    fn uses_sdk_qwen_work_cn(&self) -> bool {
+        self.standalone
+            && !self.config.upstream_link.enabled
+            && !(self.inputs_have_multimodal()
+                && self
+                    .config
+                    .agents
+                    .get("qwen-work-cn")
+                    .is_some_and(|agent| is_agent_multimodal_enabled(Some("qwen-work-cn"), agent)))
+    }
+
+    async fn start_qwen_hooks(
+        &self,
+        pilot_dir: &str,
+        config: &crate::types::InterceptorConfig,
+        state_store: &Arc<StateStore>,
+    ) {
+        let sdk_data = self.data_dir_join("state/standalone-qwen-work-cn-interceptor-sdk");
+        let init = serde_json::json!({
+            "data_dir": sdk_data, "resource_dir": pilot_dir, "user_id": self.config.user_id,
+            "home_dir": resolve_home("~"),
+        });
+        let policy = serde_json::json!({
+            "agents": ["qwen-work-cn"],
+            "hcd": {"agent_configs":{"qwen-work-cn":{"collection":{"enabled":false}}}},
+            "sdk_options": {"mask": self.config.mask, "hooks": {"local": config}},
+        });
+        let sdk = super::sdk_agent::SdkAgent::new(
+            "qwen-work-cn-trace",
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        );
+        if let Err(error) = sdk.start().await {
+            logger("Orchestrator").warn(
+                "Qwen Work SDK Hook start failed",
+                Some(&fields(serde_json::json!({"error": error}))),
+            );
+            self.emit(OrchestratorEvent::ComponentFailure {
+                component: "qwen-work-cn-interceptor".into(),
+                error,
+            });
+        } else {
+            *self.qwen_hooks.lock().expect("Qwen Work Hook SDK") = Some(sdk);
+        }
+    }
+
+    async fn register_sdk_qwen_work_cn(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+    ) {
+        let home = resolve_home("~");
+        let history = self.data_dir_join("logs/qwen-work-cn/history");
+        let segments = resolve_home("~/.qwenworkcn/logs/sessions");
+        let transcripts = resolve_home("~/.qwenworkcn/projects");
+        let (desktop_db, flash_db) = QwenWorkCnTraceInput::flash_database_paths();
+        // This is Pilot-owned state. Create it before starting the SDK so the
+        // first Stop is not mistaken for pre-existing history.
+        ensure_dir(&history).await;
+        let sdk_data = self.data_dir_join("state/standalone-qwen-work-cn-sdk");
+        let config = self.config.agents.get("qwen-work-cn");
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": home,
+            "user_id": self.config.user_id,
+        });
+        let policy = serde_json::json!({
+            "agents": ["qwen-work-cn"],
+            "hcd": {"agent_configs": {"qwen-work-cn": {"collection": {
+                "enabled": true,
+                "profile": "qwen_work_cn_trace_v1",
+                "allowed_roots": [&self.data_dir, &segments, &transcripts, &desktop_db, &flash_db],
+                "sources": [
+                    {"id": "history", "type": "hook_jsonl", "path": history},
+                    {"id": "segments", "type": "segments", "path": segments},
+                    {"id": "transcript", "type": "transcript", "path": transcripts},
+                    {"id": "desktop-binding", "type": "desktop_database", "path": desktop_db},
+                    {"id": "flash-usage", "type": "flash_database", "path": flash_db},
+                ],
+                "limits": {"poll_interval_ms": self.poll("qwen-work-cn-trace")
+                    .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+                "pilot_host": {
+                    "data_dir": self.data_dir,
+                    "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                    "exclude_workspaces": self.config.privacy.as_ref()
+                        .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+                },
+            }}}},
+            "sdk_options": {"mask": self.config.mask},
+        });
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            "qwen-work-cn-trace",
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        ));
+        let live = live_from_parts(
+            "qwen-work-cn-trace",
+            "qwen-work-cn",
+            "sdk-hosted",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        self.push_detection(
+            entries,
+            live,
+            QwenWorkCnTraceInput::get_watch_paths(Some(&history), Some(&segments)),
+            QwenWorkCnTraceInput::check_availability,
+            1,
+            None,
+        );
+    }
+
+    fn register_sdk_qwen_work_cn_collaboration(
+        &self,
+        entries: &mut Vec<Arc<dyn AgentDetection>>,
+        pilot_dir: &str,
+        state_store: &Arc<StateStore>,
+    ) {
+        let listener = "qwen-work-cn-collaboration";
+        let root = resolve_collaboration_root();
+        let sdk_data = self.data_dir_join("state/standalone-qwen-work-cn-collaboration-sdk");
+        let config = self.config.agents.get("qwen-work-cn");
+        let init = serde_json::json!({
+            "data_dir": sdk_data,
+            "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
+            "user_id": self.config.user_id,
+        });
+        let mut collection = serde_json::json!({
+            "enabled": true,
+            "profile": "qwen_work_cn_collaboration_v1",
+            "allowed_roots": [&self.data_dir, &root],
+            "sources": [{"id":"collaboration", "type":"collaboration", "path":root}],
+            "limits": {"poll_interval_ms": self.poll(listener)
+                .unwrap_or(crate::utils::DEFAULT_POLL_INTERVAL_MS)},
+            "pilot_host": {
+                "data_dir": self.data_dir,
+                "capture_message_content": config.and_then(|agent| agent.capture_message_content),
+                "exclude_workspaces": self.config.privacy.as_ref()
+                    .map(|privacy| privacy.exclude_workspaces.as_slice()).unwrap_or_default(),
+            },
+        });
+        if let Some(ids) = self
+            .config
+            .listeners
+            .get(listener)
+            .and_then(|settings| settings.include_conversation_ids.as_ref())
+        {
+            collection["include_conversation_ids"] = serde_json::json!(ids);
+        }
+        let policy = serde_json::json!({
+            "agents": ["qwen-work-cn"],
+            "hcd": {"agent_configs": {"qwen-work-cn": {"collection": collection}}},
+            "sdk_options": {"mask": self.config.mask},
+        });
+        let sdk = Arc::new(super::sdk_agent::SdkAgent::new(
+            listener,
+            init,
+            policy,
+            &self.inputs,
+            std::path::PathBuf::from(sdk_data),
+            state_store,
+        ));
+        let live = live_from_parts(
+            listener,
+            "qwen-work-cn",
+            "sdk-hosted",
+            sdk,
+            |input| input.running(),
+            |input| Box::pin(async move { input.start().await }),
+            |input| Box::pin(async move { input.stop().await }),
+        );
+        self.inputs.register_input(Arc::clone(&live));
+        let watch = root
+            .parent()
+            .map(|path| path.to_string_lossy().into_owned())
+            .into_iter()
+            .collect();
+        self.push_detection(
+            entries,
+            live,
+            watch,
+            move || {
+                let root = root.clone();
+                async move {
+                    tokio::fs::symlink_metadata(root)
+                        .await
+                        .is_ok_and(|meta| meta.is_dir())
+                }
+            },
+            1,
+            None,
+        );
     }
 
     fn register_qoder_cn_hooks(

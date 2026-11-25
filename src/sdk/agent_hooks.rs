@@ -18,6 +18,7 @@ impl AgentHook {
             "qoderclicn" => InterceptorAgent::QoderCliCn,
             "codex" => InterceptorAgent::Codex,
             "openclaw" => InterceptorAgent::OpenClaw,
+            "qwen-work-cn" => InterceptorAgent::QwenWorkCn,
             _ => return None,
         }))
     }
@@ -37,10 +38,10 @@ impl AgentHook {
             | InterceptorAgent::QoderCn
             | InterceptorAgent::QoderCliCn
             | InterceptorAgent::Codex
-            | InterceptorAgent::OpenClaw => {
+            | InterceptorAgent::OpenClaw
+            | InterceptorAgent::QwenWorkCn => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
-            _ => false,
         }
     }
 

@@ -874,23 +874,23 @@ impl InputManager {
         }
     }
 
+    fn enforce_content_policy(&self, entries: &mut [AgentActivityEntry]) {
+        let policy = self.content_policy.lock().expect("content policy");
+        if !policy.is_empty() {
+            for entry in entries {
+                let resolved = crate::normalization::resolve_agent_config(entry, &policy);
+                if resolved.agent_config.capture_message_content == Some(false) {
+                    crate::normalization::agent_content_policy::strip_agent_message_content(entry);
+                }
+            }
+        }
+    }
+
     fn apply_policy_and_mask(
         &self,
         mut entries: Vec<AgentActivityEntry>,
     ) -> Vec<AgentActivityEntry> {
-        {
-            let policy = self.content_policy.lock().expect("content policy");
-            if !policy.is_empty() {
-                for entry in &mut entries {
-                    let resolved = crate::normalization::resolve_agent_config(entry, &policy);
-                    if resolved.agent_config.capture_message_content == Some(false) {
-                        crate::normalization::agent_content_policy::strip_agent_message_content(
-                            entry,
-                        );
-                    }
-                }
-            }
-        }
+        self.enforce_content_policy(&mut entries);
         let (plan, config) = {
             let mask = self.mask.lock().expect("mask");
             (mask.plan.clone(), mask.config.clone())
@@ -935,13 +935,13 @@ impl InputManager {
             .clone()
             .ok_or("Pilot output is not configured")?;
         let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
-        let hook_history = PROFILES.iter().find(|profile| profile.listener == input_id);
-        if let Some(profile) = hook_history {
+        if let Some(profile) = PROFILES.iter().find(|profile| profile.listener == input_id) {
             return self
                 .accept_hook_history_activity(input_id, profile.agent, rows)
                 .await;
         }
-        if !codex {
+        let qwen_work = input_id == "qwen-work-cn-trace";
+        if !codex && !qwen_work {
             if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
                 return result;
             }
@@ -960,8 +960,8 @@ impl InputManager {
             .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
-        let encoded = if codex {
-            // The full shell owns workspace inspection and upstream correlation for Codex.
+        let encoded = if codex || qwen_work {
+            // Only the full shell inspects workspaces and links Codex ACP context.
             let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
             if codex {
                 if let Some(linker) = self.trace_linker() {
@@ -971,7 +971,7 @@ impl InputManager {
             }
             // Canonical Codex rows can use the raw dispatch fast path once
             // workspace and audit defaults have been accounted for.
-            if !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
+            if codex && !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
                 if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
                     return result;
                 }
@@ -1085,6 +1085,11 @@ impl InputManager {
                     self.apply_identity(std::slice::from_mut(&mut entry));
                 }
                 if stamp.as_ref().and_then(serde_json::Value::as_str) == Some(policy_id.as_str()) {
+                    // The shared history reader stamps the Cursor IDE policy.
+                    // CLI rows also need the current independent CLI preference.
+                    if agent == "cursor" && entry.agent_type == "cursor-cli" {
+                        self.enforce_content_policy(std::slice::from_mut(&mut entry));
+                    }
                     entry
                 } else {
                     self.apply_policy_and_mask(vec![entry])
@@ -2332,6 +2337,44 @@ mod migration_remaining_contracts {
         assert_eq!(rows[0].parent_span_id.as_deref(), Some(span));
         assert!(!rows[0].extra.contains_key(NATIVE_SESSION_FIELD));
         assert!(!rows[0].extra.contains_key(TRACE_CHECKED_FIELD));
+    }
+
+    #[tokio::test]
+    async fn sdk_cursor_history_applies_cli_capture_preference_with_an_ide_privacy_stamp() {
+        let manager = InputManager::new();
+        register(&manager, "cursor-hook", "cursor");
+        manager.set_agents_config(
+            &serde_json::from_value(json!({
+                "cursor": {"captureMessageContent": true},
+                "cursor-cli": {"captureMessageContent": false},
+            }))
+            .unwrap(),
+        );
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut ide = entry("cursor-ide", AgentEventName::LlmResponse);
+        ide.agent_type = "cursor".into();
+        ide.output_messages = Some(json!([{"role":"assistant","content":"fixture output"}]));
+        ide.extra.insert(
+            PRIVACY_POLICY_FIELD.into(),
+            json!(manager.hook_history_privacy_id(Some(true))),
+        );
+        let mut cli = ide.clone();
+        cli.event_id = "cursor-cli".into();
+        cli.agent_type = "cursor-cli".into();
+        let ide_bytes = serde_json::to_vec(&ide).unwrap();
+        let cli_bytes = serde_json::to_vec(&cli).unwrap();
+        manager
+            .accept_sdk_activity("cursor-hook", &[&ide_bytes, &cli_bytes])
+            .await
+            .unwrap();
+        let rows = flattened(&sink);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].output_messages, ide.output_messages);
+        assert!(rows[1].output_messages.is_none());
+        assert!(rows
+            .iter()
+            .all(|row| !row.extra.contains_key(PRIVACY_POLICY_FIELD)));
     }
 
     #[tokio::test]

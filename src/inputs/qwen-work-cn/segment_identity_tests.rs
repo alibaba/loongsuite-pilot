@@ -2,6 +2,33 @@ use super::*;
 use std::io::Write;
 use std::sync::Arc;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn sdk_qwen_reader_rejects_symlinks_and_enforces_source_capabilities() {
+    use crate::utils::source_access::{self, SourceScope};
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let allowed = root.join("allowed");
+    let outside = root.join("outside");
+    std::fs::create_dir(&allowed).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(allowed.join("own.jsonl"), "{}\n").unwrap();
+    std::fs::write(outside.join("other.jsonl"), "{}\n").unwrap();
+    std::os::unix::fs::symlink(outside.join("other.jsonl"), allowed.join("linked.jsonl")).unwrap();
+    let previous = source_access::current();
+    struct Restore(Option<Arc<SourceScope>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            source_access::install(self.0.take());
+        }
+    }
+    let _restore = Restore(previous);
+    source_access::install(Some(SourceScope::new(vec![allowed.clone()], 8, 1024)));
+    assert!(open_qwen_file(&allowed.join("own.jsonl")).await.is_ok());
+    assert!(open_qwen_file(&outside.join("other.jsonl")).await.is_err());
+    assert!(open_qwen_file(&allowed.join("linked.jsonl")).await.is_err());
+}
+
 fn wave(tag: &str, tokens: i64) -> String {
     [
         json!({"type":"model.request.started","ts":"2026-01-01T00:00:01Z","request_id":tag,"turn_id":tag,"data":{"model":"synthetic"}}),

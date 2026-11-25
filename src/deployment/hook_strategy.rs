@@ -1033,7 +1033,7 @@ impl EmbeddedCodexHookPlan {
     pub(crate) fn write(&self, tx: &mut ActivationTransaction) -> anyhow::Result<()> {
         if let Some((strategy, definition, uninstall)) = &self.config {
             let edits = strategy
-                .plan_config_edits(definition, tx, *uninstall, None)
+                .plan_config_edits(definition, tx, *uninstall, None, true)
                 .map_err(anyhow::Error::msg)?;
             for (key, value) in edits {
                 tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
@@ -1342,7 +1342,7 @@ impl HookStrategy {
         let configs = self.config_targets(def).map_err(anyhow::Error::msg)?;
         super::hook_assets::HookAssets::configuration_cleanup(data)
             .apply(configs, None, true, |transaction| {
-                self.plan_config_edits(def, transaction, false, None)
+                self.plan_config_edits(def, transaction, false, None, true)
                     .map_err(anyhow::Error::msg)
             })
             .await
@@ -1429,7 +1429,18 @@ impl HookStrategy {
         } else {
             None
         };
+        let interception = self.native_interceptor_enabled(def).await;
         for legacy in self.legacy_hook_definitions(def) {
+            if requires_native_sdk(def) && !self.native_hook_selected(def, &legacy, interception) {
+                if self.hook_manager.is_hook_installed(&legacy).await
+                    || sdk_settings.as_ref().is_some_and(|settings| {
+                        !self.installed_sdk_hooks(def, settings, &legacy).is_empty()
+                    })
+                {
+                    return true;
+                }
+                continue;
+            }
             if qoder_subagent_hook(&legacy) && direct_binary.is_none() {
                 continue;
             }
@@ -1729,14 +1740,21 @@ impl HookStrategy {
             )
         }
         .map_err(|err| err.to_string())?;
+        let interception = !uninstall && self.native_interceptor_enabled(def).await;
         assets
             .apply(
                 configs,
                 (def.id == "claude-code").then_some(settings.as_str()),
                 uninstall,
                 |transaction| {
-                    self.plan_config_edits(def, transaction, uninstall, scope.as_ref())
-                        .map_err(anyhow::Error::msg)
+                    self.plan_config_edits(
+                        def,
+                        transaction,
+                        uninstall,
+                        scope.as_ref(),
+                        interception,
+                    )
+                    .map_err(anyhow::Error::msg)
                 },
             )
             .await
@@ -1753,6 +1771,7 @@ impl HookStrategy {
         transaction: &ActivationTransaction,
         uninstall: bool,
         scope: Option<&ScopeChange>,
+        interception: bool,
     ) -> Result<BTreeMap<String, String>, String> {
         let snapshot = |key: &str| -> Result<Option<String>, String> {
             transaction
@@ -1946,6 +1965,15 @@ impl HookStrategy {
             let prune_empty = uninstall && self.preserve_runtime_assets;
             for legacy in self.legacy_hook_definitions(def) {
                 let interceptor = self.is_interceptor_definition(def, &legacy);
+                if requires_native_sdk(def)
+                    && !self.native_hook_selected(def, &legacy, interception)
+                {
+                    for installed in self.installed_sdk_hooks(def, &document.data, &legacy) {
+                        document.apply_hook(&installed, true, prune_empty)?;
+                    }
+                    document.apply_hook(&legacy, true, prune_empty)?;
+                    continue;
+                }
                 if def.id != "qoder"
                     && def.id != "qoder-cn"
                     && !requires_native_sdk(def)
@@ -2457,6 +2485,19 @@ impl HookStrategy {
             .collect()
     }
 
+    async fn native_interceptor_enabled(&self, def: &AgentDefinition) -> bool {
+        if !requires_native_sdk(def)
+            || def
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.interceptor.is_none())
+        {
+            return true;
+        }
+        let config = crate::interceptor::load_interceptor_config(None).await;
+        crate::interceptor::should_deploy_interceptor_hooks(&config)
+    }
+
     fn is_interceptor_definition(&self, def: &AgentDefinition, hook: &HookDefinition) -> bool {
         (def.id == "qoder-cn" || self.resource_roots.is_some())
             && self
@@ -2466,6 +2507,22 @@ impl HookStrategy {
                     candidate.hook_json_path == hook.hook_json_path
                         && candidate.hook_command == hook.hook_command
                 })
+    }
+
+    fn native_hook_selected(
+        &self,
+        def: &AgentDefinition,
+        hook: &HookDefinition,
+        interception: bool,
+    ) -> bool {
+        if self.is_interceptor_definition(def, hook) {
+            return interception;
+        }
+        // QwenWorkCN uses prompt Hook registration to decide whether to write
+        // the prompt. The verdict Hook also satisfies that registration.
+        !(interception
+            && def.id == "qwen-work-cn"
+            && hook.hook_json_path.last().map(String::as_str) == Some("UserPromptSubmit"))
     }
 
     fn sdk_hook_binary(&self, def: &AgentDefinition) -> Option<PathBuf> {
@@ -4144,7 +4201,7 @@ mod tests {
         let configs = HookAssets::prepare_configs(&strategy.config_targets(&def).unwrap()).unwrap();
         let mut transaction = assets.begin(&configs).unwrap();
         let edits = strategy
-            .plan_config_edits(&def, &transaction, false, None)
+            .plan_config_edits(&def, &transaction, false, None, true)
             .unwrap();
         assets.prepare(&mut transaction).unwrap();
         transaction

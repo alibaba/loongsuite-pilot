@@ -931,6 +931,79 @@ fn staged_install_registers_the_versioned_cursor_helper_without_script_assets() 
 }
 
 #[test]
+fn development_deploy_registers_the_qwen_sdk_hook_from_the_running_cargo_profile() {
+    let fixture = Fixture::new();
+    // Exercise the recognized development layout even when the test build
+    // itself uses an external CARGO_TARGET_DIR.
+    let checkout = &fixture.candidate;
+    let profile = checkout.join("target/debug");
+    for relative in ["agents.d", "assets", "src", "target"] {
+        fs::create_dir_all(checkout.join(relative)).unwrap();
+    }
+    fs::write(checkout.join("Cargo.toml"), include_str!("../Cargo.toml")).unwrap();
+    fs::write(checkout.join("src/main.rs"), "fn main() {}\n").unwrap();
+    fs::write(
+        checkout.join("agents.d/qwen-work-cn.json"),
+        include_str!("../agents.d/qwen-work-cn.json"),
+    )
+    .unwrap();
+    fs::rename(checkout.join("bin"), &profile).unwrap();
+    let hook = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(hook, profile.join(hook.file_name().unwrap())).unwrap();
+    let deployment = profile.join(fixture.binary.file_name().unwrap());
+    let settings = fixture.root.path().join(".qwenworkcn/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    fs::create_dir_all(&fixture.data).unwrap();
+    let config = fixture.data.join("config.json");
+    fs::write(
+        &config,
+        json!({"dataDir":fixture.data,"dashboard":{"enabled":false},"autoUpdate":{"enabled":false}})
+            .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        &settings,
+        r#"{"hooks":{"Stop":[{"matcher":"foreign","hooks":[{"type":"command","command":"foreign-hook"}]}]}}"#,
+    )
+    .unwrap();
+    let deploy = || {
+        let mut command = fixture.command(&deployment);
+        command.env("AGENT_DATA_COLLECTION_CONFIG", &config).args([
+            "deploy",
+            "--require=qwen-work-cn",
+            "--json",
+        ]);
+        let result = bounded(command);
+        assert!(
+            result.status.success(),
+            "{}\n{}\n{}",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        );
+    };
+    deploy();
+    let first = fs::read_to_string(&settings).unwrap();
+    let parsed: Value = serde_json::from_str(&first).unwrap();
+    let commands: Vec<_> = parsed["hooks"]["Stop"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|group| group["hooks"].as_array().unwrap())
+        .filter_map(|hook| hook["command"].as_str())
+        .collect();
+    assert_eq!(commands.len(), 2);
+    assert!(commands.contains(&"foreign-hook"));
+    assert!(commands.iter().any(|command| {
+        command.contains("loongsuite-pilot-sdk-hook")
+            && command.contains("sdk-hook --channel observe --agent qwen-work-cn --event Stop")
+    }));
+    assert!(!first.contains("qwenworkcn-loongsuite-pilot-hook"));
+    deploy();
+    assert_eq!(fs::read_to_string(settings).unwrap(), first);
+}
+
+#[test]
 fn installation_applies_agent_selection_before_real_hook_injection() {
     let fixture = Fixture::new();
     fixture.package_with(&[

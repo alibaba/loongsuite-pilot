@@ -1,5 +1,5 @@
 //! Shared bounded empty-file lock; interoperable with existing Agent host scripts.
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::Path;
 
@@ -8,6 +8,15 @@ pub fn with_file_lock<T>(
     wait_ms: u64,
     stale_ms: u64,
     action: impl FnOnce() -> T,
+) -> Option<T> {
+    with_file_lock_handle(lock_file, wait_ms, stale_ms, |_| action())
+}
+
+pub(crate) fn with_file_lock_handle<T>(
+    lock_file: &Path,
+    wait_ms: u64,
+    stale_ms: u64,
+    action: impl FnOnce(&File) -> T,
 ) -> Option<T> {
     let deadline = lock_now() + std::time::Duration::from_millis(wait_ms);
     if let Some(parent) = lock_file.parent() {
@@ -21,9 +30,8 @@ pub fn with_file_lock<T>(
             .open(lock_file)
         {
             Ok(file) => {
-                drop(file);
                 acquired = true;
-                break Some(action());
+                break Some(action(&file));
             }
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                 if let Ok(meta) = fs::metadata(lock_file) {

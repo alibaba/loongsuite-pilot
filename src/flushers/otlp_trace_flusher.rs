@@ -3175,6 +3175,10 @@ fn resolve_group_key(entry: &AgentActivityEntry) -> (KeySource, String, String) 
 }
 
 fn is_terminal_event(entry: &AgentActivityEntry) -> bool {
+    if entry.is_qwen_collaboration() {
+        return entry.event_name == Some(crate::types::AgentEventName::Other)
+            && entry.turn_end == Some(true);
+    }
     let agent_type = normalize_agent_type(&entry.agent_type);
     if matches!(agent_type.as_str(), "antigravity" | "antigravity-cli") {
         return entry.turn_end == Some(true);
@@ -4855,6 +4859,38 @@ mod tests {
             flusher.shutdown().await.unwrap();
             assert_eq!(converter.calls.lock().unwrap().len(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn qwen_collaboration_exports_when_the_native_card_finishes() {
+        let (flusher, converter) = make_flusher();
+        let boundary = |id: &str, time: &str, kind: &str| {
+            let mut event = json!({
+                "event.id": id,
+                "event.name": "other",
+                "gen_ai.agent.type": "qwen-work-cn",
+                "gen_ai.session.id": "private-space",
+                "gen_ai.turn.id": "completed-card",
+                "agent.source": "qwen-work-cn-collaboration",
+                "loongsuite.observation.scope": "agent_turn",
+                "time_unix_nano": time,
+            });
+            event[format!("gen_ai.turn.{kind}")] = json!(true);
+            event
+        };
+        let start = entry(boundary("start", "1795098300000000000", "start"));
+        let end = entry(boundary("end", "1795098301000000000", "end"));
+        flusher.send(start, None).await.unwrap();
+        assert!(converter.calls.lock().unwrap().is_empty());
+        flusher.send(end, None).await.unwrap();
+        {
+            let calls = converter.calls.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].len(), 2);
+            assert_eq!(calls[0][1].event_id, "end");
+        }
+        flusher.shutdown().await.unwrap();
+        assert_eq!(converter.calls.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

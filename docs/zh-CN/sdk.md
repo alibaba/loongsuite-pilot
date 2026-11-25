@@ -123,6 +123,18 @@ The development profile `cursor_hook_v1` accepts one authorized `hook_jsonl` dir
 
 For local validation, start a new Cursor session with `LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY=1` and the full Pilot SDK listener running against the same Pilot data directory. The Hook can then reply after appending one bounded event to Pilot's private inbox. The collector imports it into a durable journal and assembles the turn in the background. This mode uses Hook events as its source. Native transcript, skill recovery, and Windows install behavior require their own validation before enabling this mode more broadly. Use the regular Hook for deployments that need those paths.
 
+### 千问办公普通会话和协作会话
+
+`qwen_work_cn_trace_v1` 接受一个 `hook_jsonl` 或 `transcript` 主来源，可附带 `segments` 补充模型用量。要补充 Flash CLI 用量，宿主同时声明 `desktop_database` 和 `flash_database`，并授权读取这两个数据库。完整版常规模式从已有 Hook history 读取，并导入已有 input checkpoint。宿主提供允许读取的目录、内容策略和工作目录排除规则。协作会话 `qwen_work_cn_collaboration_v1` 使用独立来源和进度，可与普通会话同时使用。
+
+开发验证原生会话时，宿主可以向已配置 `transcript` 的实例安装 Stop 观察命令。这个入口只发布不含正文的会话和文件进度元数据，读 transcript、关联和重试由采集器处理。
+
+```sh
+loongsuite-pilot-sdk-hook sdk-hook --agent qwen-work-cn --event Stop --channel observe --data-dir /path/to/sdk-instance
+```
+
+完整 Pilot 的当前默认 Hook 负责维护 history，既有同步拦截由相应入口处理。启用上游关联或多模态时沿用完整 Pilot 的原生采集。原生会话单轮读盘预算和协作快照大小仍需按实际负载验证。切换生产者时停用旧入口，避免双方推进同一个会话。
+
 ## 活动、监控与背压
 
 `on_activity` 接收多条独立 JSON 视图，沿用现有 Pilot 事件格式作为 `aah.activity.v2` 的兼容基线。数据在交付前序列化一次，SQLite 事务同时接收事件和对应进度；重试、恢复复用原始字节及 `event.id`。

@@ -1109,6 +1109,83 @@ mod tests {
         assert!(!cache.join("update-recovery.json").exists());
     }
 
+    #[tokio::test]
+    async fn qwen_settings_and_pointers_recover_together_after_interruption() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = root.path().join("cache");
+        let data = root.path().join("data");
+        let service = root.path().join("bin/service");
+        let settings = root.path().join("settings/qwen.json");
+        let original = b"{\"hooks\":{\"Stop\":[]},\"user\":true}\n";
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        let native = cache.join("versions/current-rust");
+        fs::create_dir_all(native.join("agents.d")).unwrap();
+        fs::write(native.join("runtime-manifest.json"), "{}").unwrap();
+        let mut definition: Value =
+            serde_json::from_str(include_str!("../../agents.d/qwen-work-cn.json")).unwrap();
+        definition["hook"]["settingsPath"] = json!(settings);
+        fs::write(
+            native.join("agents.d/qwen-work-cn.json"),
+            definition.to_string(),
+        )
+        .unwrap();
+        fs::write(cache.join("current"), b"current-rust\n").unwrap();
+        fs::write(cache.join("previous"), b"old-node\n").unwrap();
+
+        // A first deployment interrupted after journaling hasn't created settings yet.
+        let hook_cache = data.join(".hook-install");
+        fs::create_dir_all(&hook_cache).unwrap();
+        let mut deployment = ActivationTransaction::begin(
+            &hook_cache,
+            BTreeMap::from([("config".to_owned(), settings.clone())]),
+        )
+        .unwrap();
+        let pending = hook_cache.join("update-recovery.json");
+        let before = fs::read(&pending).unwrap();
+        let result = NativeHookRetirement::with_locks(&cache, &data, false, |_| async { Ok(()) })
+            .await
+            .unwrap_err();
+        assert!(result
+            .to_string()
+            .contains("Recover the pending Hook transaction"));
+        assert_eq!(fs::read(&pending).unwrap(), before);
+        assert!(!settings.exists());
+
+        // A package without a native SDK Hook declaration has no Hook to retire.
+        let qwen_definition = native.join("agents.d/qwen-work-cn.json");
+        fs::remove_file(&qwen_definition).unwrap();
+        NativeHookRetirement::with_locks(&cache, &data, false, |_| async { Ok(()) })
+            .await
+            .unwrap();
+        fs::write(qwen_definition, definition.to_string()).unwrap();
+        deployment.rollback().unwrap();
+
+        fs::write(&settings, original).unwrap();
+        let base = activation_targets(&cache, &service, &data.join("config.json"));
+        let mut tx = ActivationTransaction::begin(&cache, base.clone()).unwrap();
+        NativeHookRetirement::with_locks(&cache, &data, false, |plan| async move {
+            let hooks = plan.targets();
+            let role = hooks.keys().next().unwrap().clone();
+            tx.enroll_native_hook_settings(hooks)?;
+            tx.write_preserving_mode(&role, b"{}", 0o600)?;
+            tx.write("previous", b"current-rust\n", 0o600)?;
+            tx.write("current", b"old-node\n", 0o600)?;
+            std::mem::forget(tx);
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        recover_runtime_files_with_data(&cache, base, &data)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(settings).unwrap(), original);
+        assert_eq!(fs::read(cache.join("current")).unwrap(), b"current-rust\n");
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), b"old-node\n");
+        assert!(!cache.join("update-recovery.json").exists());
+    }
+
     #[test]
     fn legacy_service_journal_is_recovered_before_a_new_publication() {
         let root = tempfile::tempdir().unwrap();

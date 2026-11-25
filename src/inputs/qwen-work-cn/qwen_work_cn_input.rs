@@ -1,5 +1,6 @@
 //! Port of `src/inputs/qwen-work-cn/qwen-work-cn-input.ts`.
 
+use super::native_wakeups::{NativeWakeupReader, QwenWorkCnNativeWakeups};
 use crate::inputs::base::{hosted_hook, HookBody, HookPaths, InputRuntime};
 use crate::normalization::enrich_canonical_entry_with_git;
 use crate::types::{AgentActivityEntry, ClientType};
@@ -15,6 +16,7 @@ pub struct QwenWorkCnInput {
 struct QwenWorkCnBody {
     paths: HookPaths,
     last_agent_version: Mutex<String>,
+    native_wakeups: NativeWakeupReader,
 }
 
 pub struct QwenWorkCnOptions {
@@ -64,12 +66,17 @@ impl QwenWorkCnInput {
                 QwenWorkCnBody {
                     paths,
                     last_agent_version: Mutex::new(String::new()),
+                    native_wakeups: NativeWakeupReader::default(),
                 },
                 "QwenWorkCNInput",
                 opts.state_store,
                 opts.poll_interval_ms.or(Some(DEFAULT_POLL_INTERVAL_MS)),
             ),
         }
+    }
+
+    pub(crate) fn set_native_wakeups(&self, native: QwenWorkCnNativeWakeups) {
+        self.inner.body.inner().native_wakeups.configure(native);
     }
 
     pub async fn start(&self) -> Result<(), String> {
@@ -120,6 +127,25 @@ impl HookBody for QwenWorkCnBody {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        self.native_wakeups.start(rt);
+        Ok(())
+    }
+
+    async fn on_stop(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+        self.native_wakeups.stop().await
+    }
+
+    async fn before_collect(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        if let Err(error) = self.native_wakeups.drain(rt).await {
+            rt.warn(
+                "Qwen Work transcript wakeup drain failed",
+                serde_json::json!({"error": error.to_string()}).as_object(),
+            );
+        }
+        Ok(())
     }
 
     async fn transform_record(

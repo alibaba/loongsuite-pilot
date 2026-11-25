@@ -6,6 +6,10 @@ use crate::inputs::base::{HostedInput, InputBody};
 use crate::inputs::codex_aborted_turn::{CodexAbortedTurnInput, CodexAbortedTurnInputOptions};
 use crate::inputs::codex_transcript::{CodexTranscriptInput, CodexTranscriptInputOptions};
 use crate::inputs::qoder_trace::{QoderTraceInput, QoderTraceOptions, QoderTraceReaders};
+use crate::inputs::qwen_work_cn::{
+    QwenWorkCnCollaborationInput, QwenWorkCnNativeWakeups, QwenWorkCnTraceInput,
+    QwenWorkCnTraceOptions,
+};
 use crate::types::AgentActivityEntry;
 use crate::utils::source_access::{self, SourceScope};
 use async_trait::async_trait;
@@ -30,6 +34,25 @@ struct Agent {
     thread: Option<JoinHandle<()>>,
     report: Arc<Mutex<Value>>,
     metrics: Arc<Mutex<Option<Arc<InputManager>>>>,
+}
+
+pub(crate) fn configure_qwen_wakeups(
+    data_dir: &Path,
+    transcript_root: Option<&Path>,
+) -> anyhow::Result<()> {
+    let path = data_dir.join("wakeups/qwen-work-cn-policy.json");
+    if transcript_root.is_some() || path.try_exists()? {
+        write_checkpoint(&path, &qwen_wakeup_policy(transcript_root))?;
+    }
+    Ok(())
+}
+
+fn qwen_wakeup_policy(transcript_root: Option<&Path>) -> String {
+    match transcript_root {
+        Some(root) => json!({"schema":1,"enabled":true,"transcript_root":root}),
+        None => json!({"schema":1,"enabled":false}),
+    }
+    .to_string()
 }
 
 impl Collector {
@@ -81,7 +104,22 @@ impl Collector {
                 );
             }
         }
-        commit()?;
+        let qwen_root = policy.agents.get("qwen-work-cn").and_then(|plan| {
+            plan.sources
+                .iter()
+                .find(|source| source.kind == "transcript")
+                .map(|source| source.path.as_path())
+        });
+        let qwen_policy = self.init.data_dir.join("wakeups/qwen-work-cn-policy.json");
+        let backup = if qwen_root.is_some() || qwen_policy.try_exists()? {
+            stage_checkpoint_mirror(&qwen_policy, Some(&qwen_wakeup_policy(qwen_root)), false)?
+        } else {
+            MirrorRollback::Unchanged
+        };
+        if let Err(error) = commit() {
+            backup.restore(&qwen_policy)?;
+            return Err(error);
+        }
         for id in removed {
             self.agents.remove(&id);
         }
@@ -367,6 +405,61 @@ fn run_agent(
             let linker = crate::core::TraceLinker::new(crate::core::CorrelationStore::new(dir));
             Some((Arc::new(linker), ttl))
         });
+    let native_wakeups = if plan.agent == "qwen-work-cn" {
+        if let Some(source) = plan
+            .sources
+            .iter()
+            .find(|source| source.kind == "transcript")
+        {
+            let directory = init.data_dir.join("wakeups/qwen-work-cn");
+            source_access::private_path(&directory)?;
+            std::fs::create_dir_all(&directory)?;
+            source_access::private_path(&directory)?;
+            // The full host already has a durable Hook history and cursor. Publish
+            // native transcript records to the same source the collector reads.
+            let shared_history = plan.pilot_host.as_ref().filter(|host| {
+                plan.sources.iter().any(|source| {
+                    source.kind == "hook_jsonl"
+                        && source.path == host.data_dir.join("logs/qwen-work-cn/history")
+                })
+            });
+            let producer_data_dir = shared_history.map_or_else(
+                || state_dir.join("qwen-work-cn-producer"),
+                |host| host.data_dir.clone(),
+            );
+            let history = producer_data_dir.join("logs/qwen-work-cn/history");
+            source_access::private_path(&history)?;
+            std::fs::create_dir_all(&history)?;
+            if shared_history.is_none() {
+                let capture = plan.capture_message_content.or_else(|| {
+                    plan.pilot_host
+                        .as_ref()
+                        .and_then(|state| state.capture_message_content)
+                });
+                let exclusions = plan.pilot_host.as_ref().map_or_else(
+                    || plan.exclude_workspaces.clone(),
+                    |state| state.exclude_workspaces.clone(),
+                );
+                let config = json!({"userId":init.user_id,
+                "agents":{"qwen-work-cn":{"captureMessageContent":capture.unwrap_or(true)}},
+                "privacy":{"excludeWorkspaces":exclusions}});
+                write_checkpoint(&producer_data_dir.join("config.json"), &config.to_string())?;
+            }
+            roots.push(super::policy::canonical_candidate(&directory)?);
+            Some(QwenWorkCnNativeWakeups {
+                directory,
+                pilot_policy_dir: None,
+                transcript_root: source.path.clone(),
+                producer_data_dir,
+                user_id: init.user_id.clone(),
+                legacy_cursor_root: plan.pilot_host.as_ref().map(|state| state.data_dir.clone()),
+            })
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     if let Some(state) = &plan.pilot_host {
         let agent_roots: &[&str] = match checkpoint_key {
             "codex-transcript" => &[
@@ -374,6 +467,8 @@ fn run_agent(
                 "state/codex/transcript-span-contexts",
             ],
             "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
+            "qwen-work-cn-trace" => &["state/hooks", "hooks"],
+            "qwen-work-cn-collaboration" => &[],
             "qoder-trace" => &["state/qoder-transcripts/qoder", "logs/qoder"],
             _ => &[],
         };
@@ -456,7 +551,10 @@ fn run_agent(
         }
     }
     let store = Arc::new(
-        if isolated_codex || super::hook_history::find(&plan.agent).is_some() {
+        if isolated_codex
+            || super::hook_history::find(&plan.agent).is_some()
+            || plan.agent == "qwen-work-cn"
+        {
             StateStore::new_sdk_source(&checkpoint)
         } else {
             StateStore::new(&checkpoint)
@@ -473,13 +571,7 @@ fn run_agent(
     }
     let (ready, activate) = activation;
     if ready.send(Ok(())).is_err() || activate.recv().is_err() {
-        match backup {
-            MirrorRollback::Created => std::fs::remove_file(&checkpoint)?,
-            MirrorRollback::Restore(saved) => {
-                saved.persist(&checkpoint)?;
-            }
-            MirrorRollback::Unchanged => {}
-        }
+        backup.restore(&checkpoint)?;
         return Ok(());
     }
     drop(backup);
@@ -540,12 +632,25 @@ fn run_agent(
             )
             .map_err(anyhow::Error::msg)?,
         );
+    } else if !plan.exclude_workspaces.is_empty() {
+        manager.set_workspace_policy(
+            crate::core::WorkspacePolicy::new(
+                &plan.exclude_workspaces,
+                Some(
+                    state_dir
+                        .join("workspace-exclusions")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+            )
+            .map_err(anyhow::Error::msg)?,
+        );
     }
-    if let Some(capture_message_content) = plan
-        .pilot_host
-        .as_ref()
-        .and_then(|state| state.capture_message_content)
-    {
+    if let Some(capture_message_content) = plan.capture_message_content.or_else(|| {
+        plan.pilot_host
+            .as_ref()
+            .and_then(|state| state.capture_message_content)
+    }) {
         manager.set_agents_config(&crate::types::AgentsConfig::from([(
             plan.agent.clone(),
             crate::types::AgentConfig {
@@ -750,6 +855,121 @@ fn run_agent(
                 })
             },
         )
+    } else if checkpoint_key == "qwen-work-cn-collaboration" {
+        let input = Arc::new(QwenWorkCnCollaborationInput::new(
+            std::path::PathBuf::from(source_path("collaboration").expect("validated Qwen source")),
+            plan.include_conversation_ids.as_deref(),
+            store.clone(),
+            Some(plan.poll_interval_ms),
+        ));
+        let policy = plan
+            .pilot_host
+            .as_ref()
+            .map(|state| {
+                crate::inputs::base::WorkspacePolicy::new(
+                    state.exclude_workspaces.clone(),
+                    Some(state.data_dir.join("state/workspace-exclusions")),
+                )
+            })
+            .or_else(|| {
+                (!plan.exclude_workspaces.is_empty()).then(|| {
+                    crate::inputs::base::WorkspacePolicy::new(
+                        plan.exclude_workspaces.clone(),
+                        Some(state_dir.join("workspace-exclusions")),
+                    )
+                })
+            });
+        if let Some(policy) = policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.bind_sdk_collector(capture_codex, record_delta);
+        bind(
+            &input.0,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "qwen-work-cn",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
+    } else if checkpoint_key == "qwen-work-cn-trace" {
+        let input = Arc::new(QwenWorkCnTraceInput::with_flash_databases(
+            QwenWorkCnTraceOptions {
+                state_store: store.clone(),
+                log_dir: Some(source_path("hook_jsonl").unwrap_or_else(|| {
+                    native_wakeups
+                        .as_ref()
+                        .expect("validated Qwen source")
+                        .producer_data_dir
+                        .join("logs/qwen-work-cn/history")
+                        .to_string_lossy()
+                        .into_owned()
+                })),
+                segments_root: Some(source_path("segments").unwrap_or_else(|| {
+                    state_dir.join("no-segments").to_string_lossy().into_owned()
+                })),
+                poll_interval_ms: Some(plan.poll_interval_ms),
+                multimodal: None,
+            },
+            source_path("desktop_database").zip(source_path("flash_database")),
+        ));
+        if let Some(native) = native_wakeups {
+            input.set_native_wakeups(native);
+        }
+        let input_policy = plan
+            .pilot_host
+            .as_ref()
+            .map(|state| {
+                crate::inputs::base::WorkspacePolicy::new(
+                    state.exclude_workspaces.clone(),
+                    Some(state.data_dir.join("state/workspace-exclusions")),
+                )
+            })
+            .or_else(|| {
+                (!plan.exclude_workspaces.is_empty()).then(|| {
+                    crate::inputs::base::WorkspacePolicy::new(
+                        plan.exclude_workspaces.clone(),
+                        Some(state_dir.join("workspace-exclusions")),
+                    )
+                })
+            });
+        if let Some(policy) = input_policy {
+            input.set_collector_workspace_policy(policy);
+        }
+        input.bind_sdk_collector(capture_codex, record_delta);
+        bind(
+            &input.inner,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            "qwen-work-cn",
+            input,
+            |i| i.collector_running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
     } else {
         let paths = plan
             .sources
@@ -848,7 +1068,12 @@ fn run_agent(
         let available = plan
             .sources
             .iter()
-            .filter(|source| matches!(source.kind.as_str(), "hook_jsonl" | "transcript"))
+            .filter(|source| {
+                matches!(
+                    source.kind.as_str(),
+                    "hook_jsonl" | "transcript" | "collaboration"
+                )
+            })
             .any(|source| source.path.exists())
             || (checkpoint_key == "codex-transcript"
                 && !started
@@ -927,6 +1152,19 @@ enum MirrorRollback {
     Unchanged,
     Created,
     Restore(tempfile::NamedTempFile),
+}
+
+impl MirrorRollback {
+    fn restore(self, path: &Path) -> anyhow::Result<()> {
+        match self {
+            Self::Created => std::fs::remove_file(path)?,
+            Self::Restore(saved) => {
+                saved.persist(path)?;
+            }
+            Self::Unchanged => {}
+        }
+        Ok(())
+    }
 }
 
 fn stage_checkpoint_mirror(
