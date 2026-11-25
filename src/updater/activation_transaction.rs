@@ -12,7 +12,18 @@ const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 // Thirty-one registered resource roles plus at most six activation targets.
 // Includes the nine Codex Node Hook resources that can be restored on rollback.
 const MAX_TARGETS: usize = 47;
+// Agent settings also use the fixed byte budget below. Give recorded settings
+// their own target slots so a full package does not crowd them out.
+const MAX_NATIVE_HOOK_SETTINGS: usize = MAX_TARGETS;
 const MAX_JOURNAL_BYTES: usize = MAX_TARGETS * MAX_SNAPSHOT_BYTES * 4 + 64 * 1024;
+
+fn target_count_valid(targets: &BTreeMap<String, PathBuf>) -> bool {
+    let settings = targets
+        .keys()
+        .filter(|key| key.starts_with(binding::NATIVE_HOOK_SETTINGS_PREFIX))
+        .count();
+    settings <= MAX_NATIVE_HOOK_SETTINGS && targets.len() - settings <= MAX_TARGETS
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -46,14 +57,11 @@ pub(crate) struct ActivationTransaction {
 
 impl ActivationTransaction {
     pub fn begin(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<Self> {
-        ensure!(targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        ensure!(target_count_valid(&targets), "更新目标数量无效");
         let targets = binding::bind_all(targets)?;
         let journal_path = binding::bind(&cache.join("update-recovery.json"))?;
         binding::validate(&targets, &journal_path)?;
-        ensure!(
-            !targets.is_empty() && targets.len() <= MAX_TARGETS,
-            "更新目标数量无效"
-        );
+        ensure!(!targets.is_empty(), "更新目标数量无效");
         ensure!(
             targets.values().all(|path| path.is_absolute()),
             "更新目标必须为绝对路径"
@@ -95,6 +103,55 @@ impl ActivationTransaction {
         Ok(transaction)
     }
 
+    /// Enroll discovered settings after the caller holds the Hook asset and file locks.
+    pub(crate) fn enroll_native_hook_settings(
+        &mut self,
+        settings: BTreeMap<String, PathBuf>,
+    ) -> Result<()> {
+        if settings.is_empty() {
+            return Ok(());
+        }
+        ensure!(!self.finished, "更新事务已结束");
+        let mut targets = self.targets.clone();
+        for (key, path) in &settings {
+            ensure!(
+                key.starts_with(binding::NATIVE_HOOK_SETTINGS_PREFIX) && !targets.contains_key(key),
+                "Hook 恢复目标角色无效或重复"
+            );
+            // The corresponding lock authorizes this physical path only.
+            binding::ensure_bound(path)?;
+            targets.insert(key.clone(), path.clone());
+        }
+        ensure!(target_count_valid(&targets), "更新目标数量无效");
+        binding::validate(&targets, &self.path)?;
+        let changes = settings
+            .iter()
+            .map(|(key, path)| {
+                Ok((
+                    key.clone(),
+                    Change {
+                        original: snapshot(path)?,
+                        intended: None,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        self.targets = targets;
+        self.journal.targets.extend(settings);
+        self.journal.changes.extend(changes);
+        self.persist()
+    }
+
+    pub(crate) fn has_target_prefix(cache: &Path, prefix: &str) -> Result<bool> {
+        let path = binding::bind(&cache.join("update-recovery.json"))?;
+        let Some(bytes) = read_bounded(&path, MAX_JOURNAL_BYTES)? else {
+            return Ok(false);
+        };
+        let journal: Journal =
+            serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
+        Ok(journal.targets.keys().any(|key| key.starts_with(prefix)))
+    }
+
     pub fn recover(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<()> {
         Self::recover_compatible(cache, targets.clone(), targets)
     }
@@ -124,7 +181,7 @@ impl ActivationTransaction {
         };
         let journal: Journal =
             serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
-        ensure!(journal.targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        ensure!(target_count_valid(&journal.targets), "更新目标数量无效");
         // Keep the original physical authority. Never canonicalize a recorded path
         // again and silently authorize the new destination of a replaced ancestor.
         for recorded in journal.targets.values() {
@@ -169,7 +226,6 @@ impl ActivationTransaction {
             journal.schema == 2
                 && journal.targets.len() == targets.len()
                 && !targets.is_empty()
-                && targets.len() <= MAX_TARGETS
                 && targets.values().all(|path| path.is_absolute())
                 && targets
                     .values()
@@ -457,6 +513,31 @@ mod tests {
             ("service".into(), root.join("bin/service")),
         ]
         .into()
+    }
+
+    #[test]
+    fn registered_hook_settings_fit_when_the_existing_target_budget_is_full() {
+        let root = tempfile::tempdir().unwrap();
+        let base: BTreeMap<_, _> = (0..MAX_TARGETS)
+            .map(|index| {
+                (
+                    format!("base-{index}"),
+                    root.path().join(format!("base-{index}")),
+                )
+            })
+            .collect();
+        let key = format!("{}fixture", binding::NATIVE_HOOK_SETTINGS_PREFIX);
+        let settings = root.path().join("qwen-settings.json");
+        let registered = BTreeMap::from([(key.clone(), settings.clone())]);
+        let mut targets = base.clone();
+        targets.extend(registered.clone());
+        fs::write(&settings, b"original").unwrap();
+        let mut tx = ActivationTransaction::begin(root.path(), targets).unwrap();
+        tx.write_preserving_mode(&key, b"retired", 0o600).unwrap();
+        std::mem::forget(tx);
+
+        ActivationTransaction::recover_registered(root.path(), &[base], &registered).unwrap();
+        assert_eq!(fs::read(settings).unwrap(), b"original");
     }
 
     #[test]

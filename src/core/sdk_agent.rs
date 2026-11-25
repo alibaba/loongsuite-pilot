@@ -12,6 +12,9 @@ use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
 
 const PENDING: i32 = -1;
+// Poll-driven inputs already collect a batch before enqueueing it. Keep the
+// additional wait short when the receiving host is in the same process.
+const HOST_ACTIVITY_FLUSH_INTERVAL_MS: u64 = 100;
 
 pub(super) struct SdkAgent {
     input: &'static str,
@@ -35,11 +38,18 @@ impl SdkAgent {
     pub fn new(
         input: &'static str,
         init: Value,
-        policy: Value,
+        mut policy: Value,
         manager: &Arc<InputManager>,
         sdk_data: PathBuf,
         legacy_state: &Arc<StateStore>,
     ) -> Self {
+        if policy
+            .pointer("/sdk_options/delivery/flush_interval_ms")
+            .is_none()
+        {
+            policy["sdk_options"]["delivery"]["flush_interval_ms"] =
+                Value::from(HOST_ACTIVITY_FLUSH_INTERVAL_MS);
+        }
         Self {
             input,
             init: init.to_string().into_bytes(),

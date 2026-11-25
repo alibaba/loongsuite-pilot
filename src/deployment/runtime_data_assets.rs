@@ -569,8 +569,11 @@ pub(crate) fn recover(
     base: BTreeMap<String, PathBuf>,
     legacy: BTreeMap<String, PathBuf>,
     data: &Path,
+    hook_settings: BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    ActivationTransaction::recover_registered(cache, &[base, legacy], &registry(data, true))
+    let mut registered = registry(data, true);
+    registered.extend(hook_settings);
+    ActivationTransaction::recover_registered(cache, &[base, legacy], &registered)
 }
 
 pub(crate) fn recovery_pending(data: &Path) -> bool {

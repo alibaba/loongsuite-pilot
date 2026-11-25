@@ -134,6 +134,13 @@ pub(crate) fn read_hook_manifest(pilot: &Path) -> Result<RuntimeManifest> {
 }
 
 fn load_assets(def: &AgentDefinition, pilot: &Path, data: &Path) -> Result<Vec<(String, String)>> {
+    if def
+        .hook
+        .as_ref()
+        .is_some_and(|hook| hook.native_sdk_data.is_some())
+    {
+        return Ok(Vec::new());
+    }
     let assets = managed_assets(def, data)?;
     if assets.is_empty() {
         return Ok(Vec::new());
@@ -247,7 +254,12 @@ impl HookAssets {
     pub(super) fn cleanup(def: &AgentDefinition, root: &Path, managed: bool) -> Result<Self> {
         // 清理只需要当前声明的目标集合，不要求待删除引用的源包仍然完整。
         let mut files = Vec::new();
-        if managed {
+        if managed
+            && def
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.native_sdk_data.is_none())
+        {
             for relative in managed_assets(def, root)? {
                 let path = safe_destination(root, &relative)?;
                 files.push((relative, path, String::new()));
@@ -502,7 +514,7 @@ fn pin_configuration_parent(path: &Path) -> Result<PathBuf> {
     }
 }
 
-async fn with_config_locks<T, Fut>(
+pub(super) async fn with_config_locks<T, Fut>(
     paths: &[PathBuf],
     body: impl FnOnce() -> Fut + Send,
 ) -> Result<T>

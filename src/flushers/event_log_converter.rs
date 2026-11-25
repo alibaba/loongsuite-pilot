@@ -1,5 +1,6 @@
 //! 将归一化事件转换为保留外部时间与标识的 GenAI Span。
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use serde_json::{Map, Value};
@@ -333,8 +334,54 @@ fn convert_group(
     );
     agent.parent_span_id = Some(delegated_parent.unwrap_or(&entry_id).to_owned());
     agent.attributes.extend(root.attributes.clone());
-    // The event-log SDK takes turn metadata from its first carrying record.
-    // It belongs to the agent invocation, while ENTRY keeps only human input.
+    if let Some(conversation) = source
+        .iter()
+        .find_map(|record| {
+            record
+                .get("gen_ai.conversation.id")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+        })
+        .or_else(|| (!first.session_id.is_empty()).then_some(first.session_id.as_str()))
+    {
+        agent.attributes.insert(
+            "gen_ai.conversation.id".into(),
+            Value::String(conversation.into()),
+        );
+    }
+    let mut responses = source
+        .iter()
+        .rev()
+        .filter(|record| record.event_name == Some(AgentEventName::LlmResponse));
+    let mut request_models = source
+        .iter()
+        .filter_map(|record| record.request_model.as_ref());
+    for (key, value) in [
+        (
+            "gen_ai.request.model",
+            request_models
+                .clone()
+                .find(|model| !model.is_empty() && model.as_str() != "unknown")
+                .or_else(|| request_models.find(|model| !model.is_empty())),
+        ),
+        (
+            "gen_ai.response.model",
+            responses.clone().find_map(|r| r.response_model.as_ref()),
+        ),
+        (
+            "gen_ai.response.id",
+            responses.find_map(|r| r.response_id.as_ref()),
+        ),
+    ] {
+        if let Some(value) = value {
+            agent
+                .attributes
+                .insert(key.into(), Value::String(value.clone()));
+        }
+    }
+    // The event-log SDK uses the first turn-level metadata on the agent and
+    // model invocations. Producers may send it only on the first request.
+    let mut llm_turn_metadata = Vec::new();
     for (key, value) in [
         (
             "gen_ai.system_instructions",
@@ -353,6 +400,14 @@ fn convert_group(
             agent
                 .attributes
                 .insert(key.into(), attribute(value.clone()));
+            if let Some(mut items) = message_array(value) {
+                if key == "gen_ai.tool.definitions" {
+                    items.retain(|item| item.get("name").is_some_and(Value::is_string));
+                }
+                if !items.is_empty() {
+                    llm_turn_metadata.push((key, Value::String(Value::Array(items).to_string())));
+                }
+            }
         }
     }
     agent.attributes.insert(
@@ -432,6 +487,32 @@ fn convert_group(
                 leaf.attributes.insert(key, value);
             }
         }
+        if pair.kind == "LLM" {
+            if !start.session_id.is_empty() {
+                leaf.attributes
+                    .entry("gen_ai.conversation.id")
+                    .or_insert_with(|| Value::String(start.session_id.clone()));
+            }
+            for (key, value) in &llm_turn_metadata {
+                leaf.attributes.entry(*key).or_insert_with(|| value.clone());
+            }
+        } else {
+            let tool_type = [start, finish]
+                .into_iter()
+                .chain(pair.updates.iter().copied())
+                .find_map(|record| {
+                    record
+                        .get("gen_ai.tool.type")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("function");
+            leaf.attributes.insert(
+                "gen_ai.tool.type".into(),
+                Value::String(tool_type.to_owned()),
+            );
+            restore_skill_identity(&mut leaf.attributes, start, finish);
+        }
         // The DSH adapter reports disjoint usage already folded into input
         // and output. Derive only the missing total from those evidenced
         // counts; cache and reasoning must not be added again.
@@ -493,7 +574,7 @@ fn convert_group(
                 &trace,
                 &step_span_id,
                 "STEP",
-                &format!("react step {round}"),
+                "react step",
                 start_time,
                 end_time,
             );
@@ -541,7 +622,14 @@ fn convert_group(
             }) {
                 input_records.retain(|record| record.event_name != Some(AgentEventName::Other));
             }
-            if let Some(input) = materialize_input(&input_records) {
+            let input = if first.agent_type == "openclaw"
+                && start.event_name == Some(AgentEventName::LlmRequest)
+            {
+                openclaw_request_input(start, &input_records)
+            } else {
+                None
+            };
+            if let Some(input) = input.or_else(|| materialize_input(&input_records)) {
                 leaf.attributes.insert(
                     "gen_ai.input.messages".into(),
                     Value::String(input.to_string()),
@@ -763,11 +851,17 @@ fn context_attributes(
                 .or_insert_with(|| Value::String(record.user_id.clone()));
         }
         for (key, value) in entry_to_object(record) {
-            if key.starts_with("gen_ai.agent.")
+            if key == "gen_ai.provider.name" {
+                let provider = result.entry(key).or_insert_with(|| value.clone());
+                if matches!(provider.as_str(), Some("" | "unknown"))
+                    && value.as_str().is_some_and(|value| !value.is_empty())
+                {
+                    *provider = value;
+                }
+            } else if key.starts_with("gen_ai.agent.")
                 || key.starts_with("gen_ai.subagent.")
                 || key == "gen_ai.session.id"
                 || key == "gen_ai.turn.id"
-                || key == "gen_ai.provider.name"
                 || key == "gen_ai.user.id"
                 || options.passthrough_keys.contains(&key)
             {
@@ -776,6 +870,84 @@ fn context_attributes(
         }
     }
     result
+}
+
+fn skill_object(value: &Value) -> Option<Cow<'_, Map<String, Value>>> {
+    match value {
+        Value::Object(object) => Some(Cow::Borrowed(object)),
+        Value::String(text) => serde_json::from_str(text).ok().map(Cow::Owned),
+        _ => None,
+    }
+}
+
+fn restore_skill_identity(
+    attributes: &mut Map<String, Value>,
+    start: &AgentActivityEntry,
+    finish: &AgentActivityEntry,
+) {
+    const SKILL_TOOLS: &[&str] = &[
+        "skill",
+        "load_skill",
+        "read_skill",
+        "skill_view",
+        "skill_manage",
+    ];
+    if start
+        .tool_name
+        .as_deref()
+        .or(finish.tool_name.as_deref())
+        .is_some_and(|name| {
+            SKILL_TOOLS
+                .iter()
+                .any(|tool| tool.eq_ignore_ascii_case(name))
+        })
+    {
+        let result = finish
+            .tool_call_result
+            .as_ref()
+            .and_then(skill_object)
+            .filter(|result| result.get("success").and_then(Value::as_bool) != Some(false));
+        let arguments = start.tool_call_arguments.as_ref().and_then(skill_object);
+        for data in result.iter().chain(arguments.iter()) {
+            let text = |key| {
+                data.get(key)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+            };
+            for (key, value) in [
+                ("gen_ai.skill.name", text("skill").or_else(|| text("name"))),
+                ("gen_ai.skill.id", text("id")),
+            ] {
+                if let Some(value) = value {
+                    attributes
+                        .entry(key)
+                        .or_insert_with(|| Value::String(value.into()));
+                }
+            }
+        }
+    }
+    if let Some(name) = attributes.get("gen_ai.skill.name").cloned() {
+        attributes.entry("gen_ai.skill.id").or_insert(name);
+    }
+}
+
+fn openclaw_request_input(
+    request: &AgentActivityEntry,
+    records: &[&AgentActivityEntry],
+) -> Option<Value> {
+    if let Some(full) = request.input_messages.as_ref().and_then(message_array) {
+        return Some(Value::Array(full));
+    }
+    // The full snapshot belongs to that model call. Subsequent incremental
+    // calls use the conversation deltas and carry system instructions separately.
+    let deltas: Vec<_> = records
+        .iter()
+        .filter(|record| record.event_name == Some(AgentEventName::LlmRequest))
+        .filter_map(|record| record.input_messages_delta.as_ref().and_then(message_array))
+        .flatten()
+        .collect();
+    (!deltas.is_empty()).then_some(Value::Array(deltas))
 }
 
 fn materialize_input(records: &[&AgentActivityEntry]) -> Option<Value> {
@@ -907,7 +1079,7 @@ mod tests {
         for (kind, operation, name) in [
             ("ENTRY", "enter", "enter_ai_application_system"),
             ("AGENT", "invoke_agent", "invoke_agent codex"),
-            ("STEP", "react", "react step 1"),
+            ("STEP", "react", "react step"),
             ("LLM", "chat", "chat unknown"),
         ] {
             let span = result
@@ -918,6 +1090,149 @@ mod tests {
             assert_eq!(span.attributes["gen_ai.operation.name"], operation);
             assert_eq!(span.name, name);
         }
+    }
+
+    #[test]
+    fn preserves_turn_llm_metadata_and_tool_types() {
+        let system = json!([{"type":"text","content":"Read the test file"}]);
+        let definitions = json!([{"type":"function","name":"read"}]);
+        let mut first = event("llm.request", "100");
+        first.system_instructions = Some(system.clone());
+        first.tool_definitions = Some(definitions.clone());
+        let mut records = vec![first, event("llm.response", "200")];
+        for (kind, time) in [("llm.request", "300"), ("llm.response", "400")] {
+            let mut row = event(kind, time);
+            row.step_id = Some("s2".into());
+            row.span_id = None;
+            records.push(row);
+        }
+        for (turn, time, tool_type) in [("t", 500, None), ("other", 700, Some("extension"))] {
+            let mut call = event("tool.call", &time.to_string());
+            call.turn_id = Some(turn.into());
+            call.tool_call_id = Some(turn.into());
+            call.span_id = None;
+            if let Some(tool_type) = tool_type {
+                call.extra
+                    .insert("gen_ai.tool.type".into(), json!(tool_type));
+            }
+            let mut result = call.clone();
+            result.event_name = Some(AgentEventName::ToolResult);
+            result.time_unix_nano = (time + 100).to_string();
+            records.extend([call, result]);
+        }
+        for (kind, time) in [("llm.request", "910"), ("llm.response", "920")] {
+            let mut row = event(kind, time);
+            row.turn_id = Some("other".into());
+            row.span_id = None;
+            records.push(row);
+        }
+        let converted = GenAiEventLogConverter
+            .convert(&records, &ConvertOptions::default())
+            .unwrap();
+        let mut matched_models = 0;
+        let mut matched_tools = 0;
+        for span in &converted.spans {
+            let attrs = &span.attributes;
+            let same_turn = attrs["gen_ai.turn.id"] == "t";
+            match attrs["gen_ai.span.kind"].as_str() {
+                Some("LLM") if same_turn => {
+                    assert_eq!(attrs["gen_ai.tool.definitions"], definitions.to_string());
+                    assert_eq!(attrs["gen_ai.system_instructions"], system.to_string());
+                    matched_models += 1;
+                }
+                Some("LLM") => {
+                    assert!(!attrs.contains_key("gen_ai.tool.definitions"));
+                    assert!(!attrs.contains_key("gen_ai.system_instructions"));
+                }
+                Some("TOOL") => {
+                    assert_eq!(
+                        attrs["gen_ai.tool.type"],
+                        if same_turn { "function" } else { "extension" }
+                    );
+                    matched_tools += 1;
+                }
+                Some("STEP") => assert_eq!(span.name, "react step"),
+                _ => {}
+            }
+        }
+        assert_eq!((matched_models, matched_tools), (2, 2));
+    }
+
+    #[test]
+    fn preserves_conversation_models_provider_and_skill_identity() {
+        let mut hook = event("other", "90");
+        hook.request_model = Some("unknown".into());
+        let mut request = event("llm.request", "100");
+        request.request_model = Some("requested-model".into());
+        request.provider_name = "test-provider".into();
+        let mut response = event("llm.response", "200");
+        response.response_model = Some("served-model".into());
+        response.provider_name = "unknown".into();
+        let mut call = event("tool.call", "300");
+        call.tool_name = Some("Skill".into());
+        call.tool_call_id = Some("skill-call".into());
+        call.tool_call_arguments = Some(json!({"skill": "qw-app"}));
+        call.span_id = None;
+        let mut result = event("tool.result", "400");
+        result.tool_name = call.tool_name.clone();
+        result.tool_call_id = call.tool_call_id.clone();
+        result.tool_call_result = Some(json!({"success": false, "name": "unreliable-result"}));
+        result.span_id = None;
+        let converted = GenAiEventLogConverter
+            .convert(
+                &[hook, request, response, call, result],
+                &ConvertOptions::default(),
+            )
+            .unwrap();
+        let attrs = |kind| {
+            &converted
+                .spans
+                .iter()
+                .find(|span| span.attributes["gen_ai.span.kind"] == kind)
+                .unwrap()
+                .attributes
+        };
+        assert_eq!(attrs("AGENT")["gen_ai.provider.name"], "test-provider");
+        assert_eq!(attrs("AGENT")["gen_ai.request.model"], "requested-model");
+        assert_eq!(attrs("AGENT")["gen_ai.response.model"], "served-model");
+        assert_eq!(attrs("AGENT")["gen_ai.response.id"], "response");
+        for kind in ["AGENT", "LLM"] {
+            assert_eq!(attrs(kind)["gen_ai.conversation.id"], "s");
+        }
+        assert_eq!(attrs("TOOL")["gen_ai.skill.name"], "qw-app");
+        assert_eq!(attrs("TOOL")["gen_ai.skill.id"], "qw-app");
+    }
+
+    #[test]
+    fn openclaw_incremental_requests_do_not_repeat_snapshot_system_messages() {
+        let system = json!({"role": "system", "parts": [{"type": "text", "content": "system"}]});
+        let user = json!({"role": "user", "parts": [{"type": "text", "content": "user"}]});
+        let tool = json!({"role": "tool", "parts": [{"type": "tool_call_response", "id": "read"}]});
+        let mut first = event("llm.request", "100");
+        let mut end = event("llm.response", "200");
+        let mut next = event("llm.request", "300");
+        let mut next_end = event("llm.response", "400");
+        first.input_messages = Some(json!([system, user]));
+        first.input_messages_delta = Some(json!([user]));
+        next.input_messages_delta = Some(json!([tool]));
+        for event in [&mut next, &mut next_end] {
+            event.step_id = Some("s2".into());
+            event.response_id = Some("second-response".into());
+            event.span_id = None;
+        }
+        for event in [&mut first, &mut end, &mut next, &mut next_end] {
+            event.agent_type = "openclaw".into();
+        }
+        let converted = GenAiEventLogConverter
+            .convert(&[first, end, next, next_end], &ConvertOptions::default())
+            .unwrap();
+        let observed: Vec<_> = converted
+            .spans
+            .iter()
+            .filter(|span| span.attributes["gen_ai.span.kind"] == "LLM")
+            .map(|span| message_array(&span.attributes["gen_ai.input.messages"]).unwrap())
+            .collect();
+        assert_eq!(observed, vec![vec![system, user.clone()], vec![user, tool]]);
     }
 
     #[test]

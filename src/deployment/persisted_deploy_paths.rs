@@ -254,6 +254,7 @@ mod tests {
                 system_settings_path: None,
                 events: vec!["stop".into()],
                 hook_command: "/pilot/hooks/grok.sh".into(),
+                native_sdk_data: None,
                 format: HookFormat::Nested,
                 matcher: None,
                 event_matchers: None,

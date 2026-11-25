@@ -313,6 +313,7 @@ mod tests {
             system_settings_path: None,
             events: vec!["PreToolUse".into(), "Stop".into()],
             hook_command: "/opt/hooks/claude-code-loongsuite-pilot-hook.sh".into(),
+            native_sdk_data: None,
             format: HookFormat::Nested,
             matcher: Some("*".into()),
             event_matchers: None,

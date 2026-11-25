@@ -2,7 +2,9 @@
 
 use super::hook_assets::HookAssets;
 use crate::hooks::{legacy_claude_hook_paths, quote_claude_hook_path, HookDefinition, HookManager};
-use crate::sdk::agent_hooks::{codex_command, codex_command_executable, quote_codex_path};
+use crate::sdk::agent_hooks::{
+    codex_command, codex_command_executable, quote_codex_path, sdk_hook_command,
+};
 use crate::types::{
     AgentDefinition, AgentHookConfig, DeployMode, DeployResult, DeployStrategy,
     DeployedAgentRecord, EventSubcommand, HookInsert, SettingsSyntax,
@@ -402,6 +404,30 @@ pub(super) fn sdk_hook_binary_name() -> &'static str {
     } else {
         "loongsuite-pilot-sdk-hook"
     }
+}
+
+// Anchor development Hooks to the running Cargo build. A resource override
+// or an incomplete installed manifest cannot provide an arbitrary executable.
+fn development_sdk_hook_binary(pilot: &Path) -> Option<PathBuf> {
+    let executable = std::env::current_exe().ok()?.canonicalize().ok()?;
+    let root = pilot.canonicalize().ok()?;
+    if !crate::utils::runtime_paths::is_development_root(&root)
+        || !matches!(std::fs::symlink_metadata(root.join("runtime-manifest.json")),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound)
+        || executable.file_name()? != pilot_binary_name()
+    {
+        return None;
+    }
+    let profile = executable
+        .parent()?
+        .strip_prefix(root.join("target"))
+        .ok()?;
+    if profile.components().count() > 2
+        || !matches!(profile.file_name()?.to_str()?, "debug" | "release")
+    {
+        return None;
+    }
+    Some(executable.with_file_name(sdk_hook_binary_name()))
 }
 
 pub(super) fn installed_qoder_hook_binary(
@@ -1007,7 +1033,7 @@ impl EmbeddedCodexHookPlan {
     pub(crate) fn write(&self, tx: &mut ActivationTransaction) -> anyhow::Result<()> {
         if let Some((strategy, definition, uninstall)) = &self.config {
             let edits = strategy
-                .plan_config_edits(definition, tx, *uninstall, None)
+                .plan_config_edits(definition, tx, *uninstall, None, true)
                 .map_err(anyhow::Error::msg)?;
             for (key, value) in edits {
                 tx.write_preserving_mode(&key, value.as_bytes(), 0o600)?;
@@ -1316,7 +1342,7 @@ impl HookStrategy {
         let configs = self.config_targets(def).map_err(anyhow::Error::msg)?;
         super::hook_assets::HookAssets::configuration_cleanup(data)
             .apply(configs, None, true, |transaction| {
-                self.plan_config_edits(def, transaction, false, None)
+                self.plan_config_edits(def, transaction, false, None, true)
                     .map_err(anyhow::Error::msg)
             })
             .await
@@ -1387,11 +1413,12 @@ impl HookStrategy {
             return self.kiro_agent_needs_deploy(def).await;
         }
         let direct_binary = self.sdk_hook_binary(def);
-        let sdk_settings = if let Some(hook) = def
-            .hook
-            .as_ref()
-            .filter(|_| matches!(def.id.as_str(), "qoder" | "codex" | "qoder-cn"))
-        {
+        if requires_native_sdk(def) && direct_binary.is_none() {
+            return true;
+        }
+        let sdk_settings = if let Some(hook) = def.hook.as_ref().filter(|_| {
+            matches!(def.id.as_str(), "qoder" | "codex" | "qoder-cn") || requires_native_sdk(def)
+        }) {
             let Ok(document) =
                 SettingsDocument::read(&resolve_home(&hook.settings_path), settings_syntax(hook))
                     .await
@@ -1402,7 +1429,18 @@ impl HookStrategy {
         } else {
             None
         };
+        let interception = self.native_interceptor_enabled(def).await;
         for legacy in self.legacy_hook_definitions(def) {
+            if requires_native_sdk(def) && !self.native_hook_selected(def, &legacy, interception) {
+                if self.hook_manager.is_hook_installed(&legacy).await
+                    || sdk_settings.as_ref().is_some_and(|settings| {
+                        !self.installed_sdk_hooks(def, settings, &legacy).is_empty()
+                    })
+                {
+                    return true;
+                }
+                continue;
+            }
             if qoder_subagent_hook(&legacy) && direct_binary.is_none() {
                 continue;
             }
@@ -1418,6 +1456,7 @@ impl HookStrategy {
             }
             if def.id != "qoder"
                 && def.id != "qoder-cn"
+                && !requires_native_sdk(def)
                 && legacy.exec_args.is_none()
                 && interceptor
             {
@@ -1429,7 +1468,9 @@ impl HookStrategy {
             let binary = direct_binary
                 .as_deref()
                 .filter(|_| def.id != "qoder-cn" || interceptor);
-            let desired = self.sdk_desired_hook(legacy.clone(), binary);
+            let Some(desired) = self.desired_hook(def, legacy.clone(), binary) else {
+                return true;
+            };
             if let Some(settings) = &sdk_settings {
                 let installed = self.installed_sdk_hooks(def, settings, &legacy);
                 if installed.len() > usize::from(direct_binary.is_some())
@@ -1699,14 +1740,21 @@ impl HookStrategy {
             )
         }
         .map_err(|err| err.to_string())?;
+        let interception = !uninstall && self.native_interceptor_enabled(def).await;
         assets
             .apply(
                 configs,
                 (def.id == "claude-code").then_some(settings.as_str()),
                 uninstall,
                 |transaction| {
-                    self.plan_config_edits(def, transaction, uninstall, scope.as_ref())
-                        .map_err(anyhow::Error::msg)
+                    self.plan_config_edits(
+                        def,
+                        transaction,
+                        uninstall,
+                        scope.as_ref(),
+                        interception,
+                    )
+                    .map_err(anyhow::Error::msg)
                 },
             )
             .await
@@ -1723,6 +1771,7 @@ impl HookStrategy {
         transaction: &ActivationTransaction,
         uninstall: bool,
         scope: Option<&ScopeChange>,
+        interception: bool,
     ) -> Result<BTreeMap<String, String>, String> {
         let snapshot = |key: &str| -> Result<Option<String>, String> {
             transaction
@@ -1889,6 +1938,9 @@ impl HookStrategy {
             }
         } else {
             let direct_binary = (!uninstall).then(|| self.sdk_hook_binary(def)).flatten();
+            if !uninstall && requires_native_sdk(def) && direct_binary.is_none() {
+                return Err("The installed SDK Hook binary is required".into());
+            }
             let indexed_codex = def.id == "codex"
                 && self.resource_roots.is_some()
                 && (direct_binary.is_some() || self.codex_legacy_cache.is_some());
@@ -1913,14 +1965,29 @@ impl HookStrategy {
             let prune_empty = uninstall && self.preserve_runtime_assets;
             for legacy in self.legacy_hook_definitions(def) {
                 let interceptor = self.is_interceptor_definition(def, &legacy);
-                if def.id != "qoder" && def.id != "qoder-cn" && interceptor {
+                if requires_native_sdk(def)
+                    && !self.native_hook_selected(def, &legacy, interception)
+                {
+                    for installed in self.installed_sdk_hooks(def, &document.data, &legacy) {
+                        document.apply_hook(&installed, true, prune_empty)?;
+                    }
+                    document.apply_hook(&legacy, true, prune_empty)?;
+                    continue;
+                }
+                if def.id != "qoder"
+                    && def.id != "qoder-cn"
+                    && !requires_native_sdk(def)
+                    && interceptor
+                {
                     document.apply_hook(&legacy, true, prune_empty)?;
                     continue;
                 }
                 let binary = direct_binary
                     .as_deref()
                     .filter(|_| def.id != "qoder-cn" || interceptor);
-                let desired = self.sdk_desired_hook(legacy.clone(), binary);
+                let desired = self
+                    .desired_hook(def, legacy.clone(), binary)
+                    .ok_or("Invalid SDK Hook command or data directory")?;
                 if indexed_codex || self.embedded_codex.is_some() {
                     self.edit_indexed_codex_event(
                         def,
@@ -2118,6 +2185,39 @@ impl HookStrategy {
             }
         }
         Ok(())
+    }
+
+    pub(super) fn retire_sdk_hook_settings(
+        &self,
+        def: &AgentDefinition,
+        source: &str,
+    ) -> Result<Option<String>, String> {
+        let hook = def.hook.as_ref().ok_or("missing hook config")?;
+        let mut document = SettingsDocument::from_snapshot(Some(source), settings_syntax(hook))?;
+        if document
+            .data
+            .get("hooks")
+            .is_some_and(|hooks| !hooks.is_object())
+        {
+            return Err("invalid JSON settings: hooks must be an object".into());
+        }
+        for legacy in self.legacy_hook_definitions(def) {
+            let Some(event) = legacy.hook_json_path.last() else {
+                continue;
+            };
+            if document.data["hooks"]
+                .get(event)
+                .is_some_and(|hooks| !hooks.is_array())
+            {
+                return Err(format!(
+                    "invalid JSON settings: hooks.{event} must be an array"
+                ));
+            }
+            for installed in self.installed_sdk_hooks(def, &document.data, &legacy) {
+                document.apply_hook(&installed, true, false)?;
+            }
+        }
+        Ok(document.changed().then_some(document.raw))
     }
 
     pub async fn undeploy_hooks(&self, def: &AgentDefinition) -> bool {
@@ -2385,6 +2485,19 @@ impl HookStrategy {
             .collect()
     }
 
+    async fn native_interceptor_enabled(&self, def: &AgentDefinition) -> bool {
+        if !requires_native_sdk(def)
+            || def
+                .hook
+                .as_ref()
+                .is_none_or(|hook| hook.interceptor.is_none())
+        {
+            return true;
+        }
+        let config = crate::interceptor::load_interceptor_config(None).await;
+        crate::interceptor::should_deploy_interceptor_hooks(&config)
+    }
+
     fn is_interceptor_definition(&self, def: &AgentDefinition, hook: &HookDefinition) -> bool {
         (def.id == "qoder-cn" || self.resource_roots.is_some())
             && self
@@ -2396,6 +2509,22 @@ impl HookStrategy {
                 })
     }
 
+    fn native_hook_selected(
+        &self,
+        def: &AgentDefinition,
+        hook: &HookDefinition,
+        interception: bool,
+    ) -> bool {
+        if self.is_interceptor_definition(def, hook) {
+            return interception;
+        }
+        // QwenWorkCN uses prompt Hook registration to decide whether to write
+        // the prompt. The verdict Hook also satisfies that registration.
+        !(interception
+            && def.id == "qwen-work-cn"
+            && hook.hook_json_path.last().map(String::as_str) == Some("UserPromptSubmit"))
+    }
+
     fn sdk_hook_binary(&self, def: &AgentDefinition) -> Option<PathBuf> {
         if def.id == "codex" && self.codex_legacy_cache.is_some() {
             return None;
@@ -2404,13 +2533,39 @@ impl HookStrategy {
             return Some(sdk.binary.clone());
         }
         let (pilot, data) = self.resource_roots.as_ref()?;
-        if super::hook_assets::is_sdk_codex(def) {
+        let cache = hook_cache_dir(data);
+        if requires_native_sdk(def) {
+            use crate::utils::runtime_paths::{resource_file, runtime_metadata};
+            // The installer deploys from the validated candidate in versions/
+            // before advancing current. Its transaction owns this registration.
+            let installed = std::fs::canonicalize(cache.join("versions")).is_ok_and(|versions| {
+                std::fs::canonicalize(pilot.parent().unwrap_or(pilot))
+                    .is_ok_and(|parent| parent == versions)
+            });
+            let binary = if installed {
+                let hook = format!("bin/{}", sdk_hook_binary_name());
+                let binary = resource_file(pilot, &hook).ok()?;
+                super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                    .ok()?
+                    .map_or(binary, |runtime| runtime.hook_path().to_owned())
+            } else {
+                development_sdk_hook_binary(pilot)?
+            };
+            let metadata = runtime_metadata(&binary).ok()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return None;
+                }
+            }
+            return metadata.is_file().then_some(binary);
+        } else if super::hook_assets::is_sdk_codex(def) {
             let binary = crate::utils::runtime_paths::resource_file(
                 pilot,
                 &format!("bin/{}", sdk_hook_binary_name()),
             )
             .ok()?;
-            let cache = hook_cache_dir(data);
             // publish-package deploys hooks from the staged candidate before
             // committing the current pointer. Only that candidate's own process
             // may pin its sibling during the install transaction.
@@ -2451,7 +2606,7 @@ impl HookStrategy {
         if !qoder_definition_supports_exec(def, data) && self.codex_sdk_data(def).is_none() {
             return None;
         }
-        installed_qoder_hook_binary(pilot, data, &hook_cache_dir(data))
+        installed_qoder_hook_binary(pilot, data, &cache)
     }
 
     fn codex_sdk_data(&self, def: &AgentDefinition) -> Option<PathBuf> {
@@ -2618,7 +2773,7 @@ impl HookStrategy {
                 })
                 .unwrap_or_default();
         }
-        if def.id != "codex" {
+        if def.id != "codex" && !requires_native_sdk(def) {
             return self.qoder_installed_exec_hooks(def, settings, legacy);
         }
         let Some(event) = legacy.hook_json_path.last() else {
@@ -2633,8 +2788,35 @@ impl HookStrategy {
             })
             .filter_map(|handler| {
                 let command = handler.get("command")?.as_str()?;
-                if handler["type"] != "command" || !self.owns_codex_sdk_command(def, event, command)
-                {
+                if handler["type"] != "command" {
+                    return None;
+                }
+                let owned = if requires_native_sdk(def) {
+                    let (pilot, data) = self.resource_roots.as_ref()?;
+                    let cache = hook_cache_dir(data);
+                    let binary = codex_command_executable(command)?;
+                    let installed = super::runtime_launcher::RuntimeLauncher::read(&cache, data)
+                        .ok()
+                        .flatten();
+                    (installed
+                        .as_ref()
+                        .is_some_and(|runtime| runtime.hook_path() == binary)
+                        || qoder_version_binary(&binary, &cache)
+                        // Installation resolves the resource root physically. The
+                        // configured cache may still use that root's lexical alias.
+                        || cache.canonicalize().is_ok_and(|physical| {
+                            qoder_version_binary(&binary, &physical)
+                        })
+                        || development_sdk_hook_binary(pilot).is_some_and(|dev| {
+                            crate::sdk::agent_hooks::codex_shell_path(&dev).as_ref() == binary
+                        }))
+                        && self
+                            .desired_hook(def, legacy.clone(), Some(&binary))
+                            .is_some_and(|desired| desired.hook_command == command)
+                } else {
+                    self.owns_codex_sdk_command(def, event, command)
+                };
+                if !owned {
                     return None;
                 }
                 let mut hook = legacy.clone();
@@ -2725,6 +2907,66 @@ impl HookStrategy {
             .map_or(legacy.clone(), |(_, data)| {
                 qoder_exec_definition(&legacy, binary, data)
             })
+    }
+
+    fn desired_hook(
+        &self,
+        def: &AgentDefinition,
+        mut legacy: HookDefinition,
+        binary: Option<&Path>,
+    ) -> Option<HookDefinition> {
+        let Some(relative) = def
+            .hook
+            .as_ref()
+            .and_then(|hook| hook.native_sdk_data.as_deref())
+        else {
+            return Some(self.sdk_desired_hook(legacy, binary));
+        };
+        let Some(binary) = binary else {
+            return Some(legacy); // Uninstall also recognizes the historical script.
+        };
+        let (_, root) = self.resource_roots.as_ref()?;
+        let relative = Path::new(relative);
+        if !relative.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        }) {
+            return None;
+        }
+        let event = legacy.hook_json_path.last()?;
+        let interception = self.is_interceptor_definition(def, &legacy);
+        let (data_dir, channel) = if interception {
+            (
+                root.join(format!("state/standalone-{}-interceptor-sdk", def.id)),
+                "local",
+            )
+        } else {
+            (
+                if relative == Path::new(".") {
+                    root.clone()
+                } else {
+                    root.join(relative)
+                },
+                "observe",
+            )
+        };
+        // Cursor desktop and CLI share the same configuration and registration.
+        let agent = if def.id == "cursor-cli" {
+            "cursor"
+        } else {
+            &def.id
+        };
+        let command = sdk_hook_command(binary, &data_dir, agent, event, channel)?;
+        let old = std::mem::replace(&mut legacy.hook_command, command);
+        legacy
+            .replace_hook_commands
+            .get_or_insert_with(Vec::new)
+            .push(old);
+        legacy.shell = None;
+        legacy.timeout = Some(4.0);
+        Some(legacy)
     }
 
     fn build_hook_definitions(&self, def: &AgentDefinition) -> Vec<HookDefinition> {
@@ -2983,6 +3225,12 @@ impl HookStrategy {
         }
         Ok(())
     }
+}
+
+fn requires_native_sdk(def: &AgentDefinition) -> bool {
+    def.hook
+        .as_ref()
+        .is_some_and(|hook| hook.native_sdk_data.is_some())
 }
 
 fn default_timeout(event: &str) -> Option<f64> {
@@ -3447,6 +3695,7 @@ mod tests {
                 system_settings_path: None,
                 events: vec!["Stop".into()],
                 hook_command: "/opt/hook.sh".into(),
+                native_sdk_data: None,
                 format: HookFormat::Nested,
                 matcher: Some("*".into()),
                 event_matchers: None,
@@ -3952,7 +4201,7 @@ mod tests {
         let configs = HookAssets::prepare_configs(&strategy.config_targets(&def).unwrap()).unwrap();
         let mut transaction = assets.begin(&configs).unwrap();
         let edits = strategy
-            .plan_config_edits(&def, &transaction, false, None)
+            .plan_config_edits(&def, &transaction, false, None, true)
             .unwrap();
         assets.prepare(&mut transaction).unwrap();
         transaction

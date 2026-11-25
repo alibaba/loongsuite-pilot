@@ -5,6 +5,7 @@ pub(crate) mod host_loader;
 mod monitoring;
 mod policy;
 mod runtime;
+pub(crate) use runtime::configure_qwen_wakeups;
 
 pub(crate) mod outbox;
 
