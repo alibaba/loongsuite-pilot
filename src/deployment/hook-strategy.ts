@@ -17,6 +17,7 @@ import {
   resolveHome,
   ensureDir,
 } from '../utils/fs-utils.js';
+import { configJsonPath } from '../utils/data-dir.js';
 import { detectAgent } from './detect-utils.js';
 import { reconcileQoderTokenUsageDefaults } from './qoder-token-usage.js';
 import { createLogger } from '../utils/logger.js';
@@ -128,6 +129,13 @@ export interface HookStrategyOptions {
   deployInterceptorHooks?: boolean;
 }
 
+function cursorConfigLocation(): string {
+  return JSON.stringify({
+    path: path.resolve(configJsonPath()),
+    implicitDefault: !(process.env.AGENT_DATA_COLLECTION_CONFIG ?? '').trim(),
+  });
+}
+
 export class HookStrategy implements DeployStrategy {
   private readonly hookManager: HookManager;
   private readonly deployInterceptorHooks: boolean;
@@ -147,6 +155,15 @@ export class HookStrategy implements DeployStrategy {
     if (def.hook?.scope === 'system') {
       const { systemTomlHooksInstalled } = await import('./system-toml-hooks.js');
       return !(await systemTomlHooksInstalled(def));
+    }
+    if ((def.id === 'cursor' || def.id === 'cursor-cli') && def.hook?.hookCommand) {
+      const hookDir = path.dirname(resolveHome(def.hook.hookCommand));
+      try {
+        const deployedPath = await fs.readFile(path.join(hookDir, 'cursor-config-path'), 'utf8');
+        if (deployedPath.trim() !== cursorConfigLocation()) return true;
+      } catch {
+        return true;
+      }
     }
     if (await this.needsSettingsRepairForCodex(def)) {
       return true;
@@ -224,6 +241,10 @@ export class HookStrategy implements DeployStrategy {
         const { updateSystemTomlHooks } = await import('./system-toml-hooks.js');
         await updateSystemTomlHooks(def, true);
         return { success: true, agentId: def.id, deployMode: 'hook' };
+      }
+      if ((def.id === 'cursor' || def.id === 'cursor-cli') && hookConfig.hookCommand) {
+        const hookDir = path.dirname(resolveHome(hookConfig.hookCommand));
+        await writeTextFileAtomic(path.join(hookDir, 'cursor-config-path'), cursorConfigLocation());
       }
       const ensureSettings = () => this.ensureSettingsFile(hookConfig.settingsPath);
       if (def.id === 'claude-code') await withClaudeSettingsLock(hookConfig.settingsPath, ensureSettings);
