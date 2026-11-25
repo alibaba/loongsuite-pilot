@@ -72,7 +72,7 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Kiro CLI | Hook / session polling | No | No | No | No |
 | MiMo Code | Plugin injection | No | No | No | No |
 | OpenClaw | Plugin injection | No | No | No | No |
-| OpenCode | Plugin injection | No | No | No | No |
+| OpenCode | Plugin injection (macOS arm64, 1.19.6 and 2.3.2) | Yes | Yes | Yes | Yes |
 | Pi Coding Agent | Extension injection | No | No | No | No |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN | Hook | No | No | No | No |

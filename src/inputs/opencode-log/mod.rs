@@ -71,6 +71,9 @@ fn opencode_transform() -> TransformFn {
     Arc::new(move |mut record: Map<String, Value>| {
         let shared = Arc::clone(&shared);
         Box::pin(async move {
+            record.remove(crate::sdk::hook_history::PRIVACY_POLICY_FIELD);
+            record.remove(crate::sdk::hook_history::NATIVE_SESSION_FIELD);
+            record.remove(crate::sdk::hook_history::TRACE_CHECKED_FIELD);
             for key in ["gen_ai.tool.call.arguments", "gen_ai.tool.call.result"] {
                 let Some(text) = record.get(key).and_then(Value::as_str) else {
                     continue;

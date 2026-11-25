@@ -1,11 +1,6 @@
 //! Checkpoint-only recovery of JSON numbers outside f64's finite range.
 //! Ordinary JSON/config parsing retains its existing strict behavior.
 use super::json_file::JVal;
-use std::path::Path;
-
-pub(super) async fn read_json(path: &Path) -> Option<JVal> {
-    parse(&tokio::fs::read_to_string(path).await.ok()?)
-}
 
 pub(super) fn parse(text: &str) -> Option<JVal> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
