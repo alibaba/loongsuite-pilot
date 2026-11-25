@@ -679,6 +679,228 @@ fn openclaw_history_advances_past_a_record_larger_than_the_poll_budget() {
     assert_eq!(ids(&resumed), ["next"]);
 }
 
+#[test]
+fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let pilot = root.join("pilot");
+    let data = pilot.join("state/standalone-cursor-sdk");
+    let history = pilot.join("logs/cursor/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::create_dir(pilot.join("hooks")).unwrap();
+    let config = root.join("cursor-policy.json");
+    std::fs::write(
+        &config,
+        json!({"agents":{
+            "cursor":{"captureMessageContent":false},
+            "cursor-cli":{"captureMessageContent":true},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        pilot.join("hooks/cursor-config-path"),
+        json!({"path":config,
+        "implicitDefault":false})
+        .to_string(),
+    )
+    .unwrap();
+    let queue = |session, generation, version, name, field: &str, value| {
+        let mut body = json!({"conversation_id":session,"generation_id":generation,
+            "cursor_version":version,"cwd":root,"model":"cursor-test"});
+        body[field] = json!(value);
+        let reply = sdk_hook_command(&pilot, "observe", "cursor", name, &body)
+            .wait_with_output()
+            .unwrap();
+        assert!(reply.status.success() && reply.stderr.is_empty());
+        assert_eq!(String::from_utf8_lossy(&reply.stdout).trim(), "{}");
+    };
+    let cli = "2026.11.25-abcd";
+    let ide = "3.30.14";
+    queue(
+        "ide-session",
+        "a",
+        ide,
+        "beforeSubmitPrompt",
+        "prompt",
+        "private-ide",
+    );
+    queue(
+        "cli-session",
+        "b",
+        cli,
+        "beforeSubmitPrompt",
+        "prompt",
+        "collect-cli",
+    );
+    queue(
+        "ambiguous",
+        "c",
+        "unknown",
+        "beforeSubmitPrompt",
+        "prompt",
+        "private-ambiguous",
+    );
+    queue("cli-session", "b", cli, "stop", "status", "completed");
+    queue(
+        "ide-session",
+        "a",
+        ide,
+        "afterAgentResponse",
+        "text",
+        "private-ide-answer",
+    );
+    queue("ide-session", "a", ide, "stop", "status", "completed");
+    queue(
+        "cli-session",
+        "b",
+        cli,
+        "afterAgentResponse",
+        "text",
+        "collect-cli-answer",
+    );
+    let inbox = pilot.join("state/cursor/deferred/inbox");
+    let files: Vec<_> = std::fs::read_dir(&inbox)
+        .unwrap()
+        .map(|f| f.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 7);
+    for file in files {
+        let raw = std::fs::read_to_string(file).unwrap();
+        assert!(!raw.contains("private-"));
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        if value["cursor_hook"]["conversation_id"] != "cli-session" {
+            assert_eq!(value["content_omitted"], true);
+        }
+    }
+
+    let policy = json!({"agents":["cursor"],"hcd":{"agent_configs":{"cursor":{"collection":{
+        "enabled":true,"profile":"cursor_hook_v1","allowed_roots":[pilot],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100},"pilot_host":{"data_dir":pilot}
+    }}}},"sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    let response_sessions = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|row| {
+                let entry: Value = serde_json::from_slice(row).unwrap();
+                (entry["event.name"] == "llm.response")
+                    .then(|| entry["gen_ai.session.id"].as_str().unwrap().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    until(|| response_sessions(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    assert_eq!(
+        response_sessions(&host),
+        ["cli-session".to_owned(), "ide-session".to_owned()].into()
+    );
+    let rows = host.ctx.rows.lock().unwrap();
+    assert!(rows
+        .iter()
+        .any(|row| String::from_utf8_lossy(row).contains("collect-cli-answer")));
+    assert!(rows
+        .iter()
+        .all(|row| !String::from_utf8_lossy(row).contains("private-")));
+    drop(rows);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    queue(
+        "after-restart",
+        "d",
+        cli,
+        "beforeSubmitPrompt",
+        "prompt",
+        "next prompt",
+    );
+    queue(
+        "after-restart",
+        "d",
+        cli,
+        "afterAgentResponse",
+        "text",
+        "next answer",
+    );
+    queue("after-restart", "d", cli, "stop", "status", "completed");
+    until(|| !response_sessions(&resumed).is_empty());
+    assert_eq!(
+        response_sessions(&resumed),
+        ["after-restart".to_owned()].into()
+    );
+    resumed.stop();
+}
+
+#[test]
+fn cursor_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["cursor"],"hcd":{"agent_configs":{"cursor":{"collection":{
+        "enabled":true,"profile":"cursor_hook_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":8388608}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("cursor-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"cursor", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 9 * 1024 * 1024), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }

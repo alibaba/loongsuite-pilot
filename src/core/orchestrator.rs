@@ -525,6 +525,12 @@ impl Orchestrator {
         if let Some(config) = interceptor_config.as_ref().filter(|_| interception_enabled) {
             self.register_qoder_cn_hooks(&mut detection, &pilot_dir, config, verdicts);
         }
+        if let Some(profile) = crate::sdk::hook_history::find("cursor")
+            .filter(|profile| self.uses_sdk_hook_history(profile.agent))
+        {
+            self.register_sdk_hook_history(&mut detection, &pilot_dir, &state_store, profile)
+                .await;
+        }
         let openclaw_sdk = if let Some(profile) = crate::sdk::hook_history::find("openclaw")
             .filter(|profile| self.uses_sdk_hook_history(profile.agent))
         {
@@ -2710,22 +2716,33 @@ impl Orchestrator {
             )
             .await;
         }
-        let cursor_dir = self.data_dir_join("logs/cursor/history");
-        self.attach_hook(
-            entries,
-            "cursor-hook",
-            "cursor",
-            CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook")),
-            vec![cursor_dir.clone()],
-            {
-                let cursor_dir = cursor_dir.clone();
-                move || {
+        if !self.uses_sdk_hook_history("cursor") {
+            let cursor_dir = self.data_dir_join("logs/cursor/history");
+            let input =
+                CursorHookInput::new(self.hook_opts_dir(state_store, &cursor_dir, "cursor-hook"));
+            if self.standalone && self.runtime_options.manage_host_services {
+                ensure_dir(&cursor_dir).await;
+                input.set_cursor_root(
+                    std::path::PathBuf::from(&self.data_dir),
+                    Some(std::path::PathBuf::from(resolve_home("~/.cursor"))),
+                );
+            }
+            self.attach_hook(
+                entries,
+                "cursor-hook",
+                "cursor",
+                input,
+                vec![cursor_dir.clone()],
+                {
                     let cursor_dir = cursor_dir.clone();
-                    async move { directory_exists(&cursor_dir).await }
-                }
-            },
-        )
-        .await;
+                    move || {
+                        let cursor_dir = cursor_dir.clone();
+                        async move { directory_exists(&cursor_dir).await }
+                    }
+                },
+            )
+            .await;
+        }
         self.attach_simple_hooks(entries, state_store).await;
     }
 
@@ -3178,6 +3195,7 @@ impl Orchestrator {
         let init = serde_json::json!({
             "data_dir": sdk_data,
             "resource_dir": pilot_dir,
+            "home_dir": resolve_home("~"),
             "user_id": self.config.user_id,
         });
         let mut policy = profile.policy(
@@ -3195,6 +3213,7 @@ impl Orchestrator {
                 .enabled
                 .then_some(self.config.upstream_link.ttl_ms),
         );
+        profile.allow_cursor_transcripts(&mut policy, std::path::Path::new(&resolve_home("~")));
         policy["hcd"]["agent_configs"][agent]["collection"]["pilot_host"]["mask_rule_manifest"] =
             self.inputs.mask_rule_manifest();
         let sdk = Arc::new(
@@ -4195,9 +4214,10 @@ impl LegacyHookHistory {
     async fn take_ownership(&self) -> Result<Option<std::fs::File>, String> {
         use crate::sdk::hook_history::LegacyHistoryOwnership;
         let state = self.state.as_ref().ok_or("Pilot checkpoint unavailable")?;
+        let home = std::path::PathBuf::from(resolve_home("~"));
         if let LegacyHistoryOwnership::Ready(lock) = self
             .profile
-            .export_checkpoint(&self.data, state)
+            .export_checkpoint(&self.data, state, &home)
             .await
             .map_err(|error| error.to_string())?
         {
@@ -4225,7 +4245,7 @@ impl LegacyHookHistory {
         sdk.stop_with_result().await?;
         match self
             .profile
-            .export_checkpoint(&self.data, state)
+            .export_checkpoint(&self.data, state, &home)
             .await
             .map_err(|error| error.to_string())?
         {

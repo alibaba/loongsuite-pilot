@@ -117,6 +117,12 @@ The development profile `opencode_plugin_v1` accepts one authorized `hook_jsonl`
 
 The development profile `openclaw_plugin_v1` accepts one authorized `hook_jsonl` directory from the OpenClaw host plug-in. The full Pilot uses this SDK collector on the regular path and continues to own plug-in deployment and output. Streaming events, subagent identifiers, invocation logs, and the existing interceptor are supplied by the host plug-in. The collector reuses the existing parser and imports its input checkpoint.
 
+### Cursor Hook history and optional deferred assembly
+
+The development profile `cursor_hook_v1` accepts one authorized `hook_jsonl` directory. The full Pilot uses the SDK collector for the ordinary Cursor history path, including activity emitted by Cursor CLI.
+
+For local validation, start a new Cursor session with `LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY=1` and the full Pilot SDK listener running against the same Pilot data directory. The Hook can then reply after appending one bounded event to Pilot's private inbox. The collector imports it into a durable journal and assembles the turn in the background. This mode uses Hook events as its source. Native transcript, skill recovery, and Windows install behavior require their own validation before enabling this mode more broadly. Use the regular Hook for deployments that need those paths.
+
 ## 活动、监控与背压
 
 `on_activity` 接收多条独立 JSON 视图，沿用现有 Pilot 事件格式作为 `aah.activity.v2` 的兼容基线。数据在交付前序列化一次，SQLite 事务同时接收事件和对应进度；重试、恢复复用原始字节及 `event.id`。

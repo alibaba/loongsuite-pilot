@@ -44,6 +44,13 @@ pub(crate) const PROFILES: &[HookHistoryProfile] = &[
             .sdk_hosted()
         },
     },
+    HookHistoryProfile {
+        agent: "cursor",
+        listener: "cursor-hook",
+        profile: "cursor_hook_v1",
+        history: "logs/cursor/history",
+        build: |options| crate::inputs::cursor_hook::CursorHookInput::new(options).sdk_hosted(),
+    },
 ];
 
 pub(crate) fn find(agent: &str) -> Option<&'static HookHistoryProfile> {
@@ -90,6 +97,15 @@ impl HookHistoryProfile {
         policy
     }
 
+    pub(crate) fn allow_cursor_transcripts(&self, policy: &mut Value, home: &Path) {
+        if self.agent == "cursor" {
+            policy["hcd"]["agent_configs"][self.agent]["collection"]["allowed_roots"]
+                .as_array_mut()
+                .expect("history policy has allowed roots")
+                .push(json!(home.join(".cursor")));
+        }
+    }
+
     pub(crate) fn has_outbox(&self, data: &Path) -> anyhow::Result<bool> {
         let database = self.sdk_data(data).join("outbox/delivery.sqlite");
         crate::utils::source_access::private_path(&database)?;
@@ -120,6 +136,7 @@ impl HookHistoryProfile {
         &self,
         data: &Path,
         legacy: &StateStore,
+        home: &Path,
     ) -> anyhow::Result<LegacyHistoryOwnership> {
         let data = canonical_data_dir(data)?;
         if !self.has_outbox(&data)? {
@@ -140,7 +157,7 @@ impl HookHistoryProfile {
         };
         // Privacy and polling affect the reader, but are excluded from its
         // namespace. Build the same source plan used at normal startup.
-        let policy = self.policy(
+        let mut policy = self.policy(
             &data,
             crate::utils::DEFAULT_POLL_INTERVAL_MS,
             None,
@@ -148,6 +165,7 @@ impl HookHistoryProfile {
             None,
             None,
         );
+        self.allow_cursor_transcripts(&mut policy, home);
         let plan = Policy::parse(policy, &init)?;
         let namespace = plan.agents[self.agent].namespace();
         let handoff = LegacyCheckpointHandoff::HookHistory(self.agent);
@@ -235,7 +253,10 @@ mod tests {
         legacy.set("codex-transcript", InputState::new().with_last_offset(52.0));
         legacy.save().await.unwrap();
         assert!(matches!(
-            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            profile
+                .export_checkpoint(&root, &legacy, &root)
+                .await
+                .unwrap(),
             LegacyHistoryOwnership::Pending
         ));
         assert_eq!(legacy.get_offset(profile.listener), 31.0);
@@ -244,24 +265,36 @@ mod tests {
         queue
             .checkpoint(&namespace, r#"{"openclaw-plugin-log":{}}"#)
             .unwrap();
-        assert!(profile.export_checkpoint(&root, &legacy).await.is_err());
+        assert!(profile
+            .export_checkpoint(&root, &legacy, &root)
+            .await
+            .is_err());
         assert_eq!(legacy.get_offset(profile.listener), 31.0);
         queue.checkpoint(&namespace, checkpoint).unwrap();
         assert!(matches!(
-            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            profile
+                .export_checkpoint(&root, &legacy, &root)
+                .await
+                .unwrap(),
             LegacyHistoryOwnership::Ready(Some(_))
         ));
         assert_eq!(legacy.get_offset(profile.listener), 97.0);
         legacy.set(profile.listener, legacy_cursor(128.0));
         legacy.save().await.unwrap();
         assert!(matches!(
-            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            profile
+                .export_checkpoint(&root, &legacy, &root)
+                .await
+                .unwrap(),
             LegacyHistoryOwnership::Ready(Some(_))
         ));
         assert_eq!(legacy.get_offset(profile.listener), 128.0);
         assert_eq!(legacy.get_offset("codex-transcript"), 52.0);
 
         std::fs::remove_file(checkpoint_path).unwrap();
-        assert!(profile.export_checkpoint(&root, &legacy).await.is_err());
+        assert!(profile
+            .export_checkpoint(&root, &legacy, &root)
+            .await
+            .is_err());
     }
 }

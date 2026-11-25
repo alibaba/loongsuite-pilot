@@ -873,12 +873,70 @@ fn first_install_previews_config_without_publishing_then_commits_it_with_runtime
 }
 
 #[test]
+fn staged_install_registers_the_versioned_cursor_helper_without_script_assets() {
+    let fixture = Fixture::new();
+    let hook = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(
+        hook,
+        fixture
+            .candidate
+            .join("bin")
+            .join(hook.file_name().unwrap()),
+    )
+    .unwrap();
+    fixture.package_with(&[(
+        "agents.d/cursor.json",
+        include_str!("../agents.d/cursor.json"),
+    )]);
+    let cursor = fixture.root.path().join(".cursor/hooks.json");
+    fs::create_dir_all(cursor.parent().unwrap()).unwrap();
+    fs::write(
+        &cursor,
+        r#"{"version":1,"hooks":{"stop":[{"command":"third-party-hook"}]}}"#,
+    )
+    .unwrap();
+    let mut options = fixture.runtime_options(&fixture.candidate);
+    options["configOptions"] = json!({
+        "selectedAgents":"cursor", "agentSelectionExplicit":true,
+        "probeResult":[{"id":"cursor", "detected":true}, {"id":"cursor-cli", "detected":false}]
+    });
+    let staged = fixture.helper("stage-package", &options, true);
+    success(&staged);
+    let name = String::from_utf8(staged.stdout).unwrap().trim().to_owned();
+    let installed = fixture.root.path().join("cache/versions").join(name);
+    options["sourceDir"] = json!(installed);
+    options["deployHooks"] = json!(true);
+    success(&fixture.helper("publish-package", &options, true));
+    let first = fs::read_to_string(&cursor).unwrap();
+    let parsed: Value = serde_json::from_str(&first).unwrap();
+    let stop = parsed["hooks"]["stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert!(stop
+        .iter()
+        .any(|hook| hook["command"] == "third-party-hook"));
+    assert!(stop.iter().any(|hook| {
+        hook["command"].as_str().is_some_and(|command| {
+            command.contains("loongsuite-pilot-sdk-hook")
+                && command.contains("sdk-hook --channel observe --agent cursor --event stop")
+        })
+    }));
+    let hooks = fixture.data.join("hooks");
+    let marker = hooks.join("cursor-config-path");
+    assert!(marker.is_file());
+    assert!(!hooks.join("pilot-bin").exists());
+    assert!(!hooks.join("cursor-loongsuite-pilot-hook.sh").exists());
+    assert!(!hooks.join("cursor-loongsuite-pilot-hook.ps1").exists());
+    success(&fixture.helper("publish-package", &options, false));
+    assert_eq!(fs::read_to_string(cursor).unwrap(), first);
+}
+
+#[test]
 fn installation_applies_agent_selection_before_real_hook_injection() {
     let fixture = Fixture::new();
     fixture.package_with(&[
         (
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         ),
         (
             "agents.d/codex.json",
@@ -1813,7 +1871,7 @@ fn native_uninstall_preflight_and_repeat_cleanup_preserve_user_hooks_and_configu
     let fixture = Fixture::new();
     fixture.package_with(&[(
         "agents.d/cursor.json",
-        include_str!("../agents.d/cursor.json"),
+        include_str!("fixtures/legacy-cursor-agent.json"),
     )]);
     let path = fixture.root.path().join(".cursor/hooks.json");
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1889,7 +1947,7 @@ fn native_uninstall_rejects_invalid_or_unknown_deployment_state_before_config_ch
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let path = fixture.root.path().join(".cursor/hooks.json");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1967,7 +2025,7 @@ fn native_uninstall_refuses_unrecognized_owned_commands_without_dropping_state_o
     let fixture = Fixture::new();
     fixture.package_with(&[(
         "agents.d/cursor.json",
-        include_str!("../agents.d/cursor.json"),
+        include_str!("fixtures/legacy-cursor-agent.json"),
     )]);
     let config = fixture.root.path().join(".cursor/hooks.json");
     fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -2184,7 +2242,7 @@ fn native_uninstall_shell_preserves_conflicts_and_cleans_custom_cache_without_ex
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let cache = fixture.root.path().join("cache");
         let installed = cache.join("versions/1.2.0_test");
@@ -2363,7 +2421,7 @@ fn native_uninstall_windows_bridge_preserves_preflight_failures_and_cleans_witho
                 let fixture = Fixture::new();
                 fixture.package_with(&[(
                     "agents.d/cursor.json",
-                    include_str!("../agents.d/cursor.json"),
+                    include_str!("fixtures/legacy-cursor-agent.json"),
                 )]);
                 let cache = fixture.root.path().join("cache");
                 let installed = cache.join("versions/1.2.0_test");
@@ -2475,7 +2533,7 @@ fn native_uninstall_cleans_recorded_and_all_existing_alternative_configuration_p
             (
                 "cursor",
                 "agents.d/cursor.json",
-                include_str!("../agents.d/cursor.json"),
+                include_str!("fixtures/legacy-cursor-agent.json"),
             )
         } else {
             (
@@ -2560,7 +2618,7 @@ fn native_uninstall_rejects_invalid_local_overrides_while_discovery_keeps_builti
         let fixture = Fixture::new();
         fixture.package_with(&[(
             "agents.d/cursor.json",
-            include_str!("../agents.d/cursor.json"),
+            include_str!("fixtures/legacy-cursor-agent.json"),
         )]);
         let local = fixture.data.join("agents.d.local/cursor.json");
         fs::create_dir_all(local.parent().unwrap()).unwrap();

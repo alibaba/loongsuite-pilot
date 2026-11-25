@@ -9,7 +9,7 @@ mod claude_code;
 pub(crate) mod codex;
 mod common;
 mod copilot;
-mod cursor;
+pub(crate) mod cursor;
 mod cursor_policy;
 pub(crate) use cursor_policy::{cursor_config_record, CONFIG_MARKER as CURSOR_CONFIG_MARKER};
 mod grok_build;
@@ -60,8 +60,9 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
-        if bounded_qoder || agent == "trae-cn" {
-            let limit = if bounded_qoder {
+        let bounded_cursor = agent == "cursor" && args.iter().any(|arg| arg == "--defer-assembly");
+        if bounded_qoder || bounded_cursor || agent == "trae-cn" {
+            let limit = if agent != "trae-cn" {
                 1024 * 1024
             } else {
                 4 * 1024 * 1024

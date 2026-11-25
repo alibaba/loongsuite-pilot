@@ -71,9 +71,9 @@ async fn scope_l31_actual_build_and_eager_never_create_or_overwrite_hook_install
             agents.insert(def.id.clone(), json!({"enabled":false}));
         }
         agents.insert("cursor".into(), json!({"enabled":true}));
-        let mut cursor: crate::types::AgentDefinition = serde_json::from_slice(
-            &std::fs::read(Path::new(&pilot).join("agents.d/cursor.json")).unwrap(),
-        )
+        let mut cursor: crate::types::AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
         .unwrap();
         cursor.detection.paths = vec![home.to_string_lossy().into_owned()];
         cursor.detection.commands.clear();

@@ -21,8 +21,9 @@ use tokio::sync::Notify;
 
 use crate::checkpoints::{InputState, InputStatePatch, StateStore};
 use crate::normalization::{
-    build_agent_activity_entry, build_shared_hook_activity_entry, enrich_canonical_entry_with_git,
-    is_canonical_payload_key, is_reserved_key, normalize_event_name,
+    build_shared_hook_activity_entry, build_standard_with_canonical_payloads,
+    enrich_canonical_entry_with_git, is_canonical_payload_key, is_reserved_key,
+    normalize_event_name,
 };
 use crate::types::{AgentActivityEntry, ClientType, CollectionMethod};
 use crate::utils::{
@@ -134,6 +135,7 @@ struct HookInner {
     transform: TransformFn,
     history_replay: Option<Mutex<HookReplay>>,
     pending_line: Mutex<Option<PendingHookLine>>,
+    deferred_cursor: std::sync::OnceLock<Arc<crate::hook_process::cursor::DeferredCursor>>,
 }
 
 impl HookJsonlInput {
@@ -148,6 +150,10 @@ impl HookJsonlInput {
             Arc::clone(&self.inner.state_store),
             Some(self.poll.interval_ms()),
         )
+    }
+
+    pub(crate) fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        self.inner.set_cursor_root(root, transcript_root);
     }
 
     pub fn runtime_info(&self) -> crate::inputs::base::InputRuntimeInfo {
@@ -179,6 +185,7 @@ impl HookJsonlInput {
             history_replay: matches!(config.id, "opencode-log" | "pi-coding-agent-log")
                 .then(|| Mutex::new(HookReplay::new())),
             pending_line: Mutex::new(None),
+            deferred_cursor: std::sync::OnceLock::new(),
         });
         Self { inner, poll }
     }
@@ -279,6 +286,12 @@ pub(crate) struct SdkHookBody {
     inner: Arc<HookInner>,
 }
 
+impl SdkHookBody {
+    pub(crate) fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        self.inner.set_cursor_root(root, transcript_root);
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::inputs::base::InputBody for SdkHookBody {
     fn checkpoint_namespaces(&self) -> Option<Vec<String>> {
@@ -316,6 +329,14 @@ impl crate::inputs::base::InputBody for SdkHookBody {
 }
 
 impl HookInner {
+    fn set_cursor_root(&self, root: PathBuf, transcript_root: Option<PathBuf>) {
+        let worker = Arc::new(crate::hook_process::cursor::DeferredCursor::new(
+            root,
+            transcript_root,
+        ));
+        let _ = self.deferred_cursor.set(worker);
+    }
+
     async fn on_start(&self) {
         if let Some(replay) = &self.history_replay {
             *replay.lock().expect("hook replay") = HookReplay::new();
@@ -330,6 +351,18 @@ impl HookInner {
     async fn collect(&self) -> Result<Vec<AgentActivityEntry>, String> {
         if self.cursor_first_run_guard {
             cursor_first_run_guard(self).await;
+        }
+        if let Some(worker) = self.deferred_cursor.get() {
+            let worker = Arc::clone(worker);
+            if let Err(error) = tokio::task::spawn_blocking(move || worker.collect())
+                .await
+                .map_err(|error| error.to_string())?
+            {
+                self.logger.warn(
+                    &format!("Cursor deferred assembly will retry: {error}"),
+                    None,
+                );
+            }
         }
         collect_hook_files(self).await
     }
@@ -1708,9 +1741,12 @@ pub fn build_canonical_hook_entry(
         if !is_canonical_key(key) {
             continue;
         }
-        if let Some(value) = json_value_from(raw) {
-            opts.insert(key.clone(), value);
-        }
+        let value = if is_canonical_payload_key(key) {
+            Value::Null
+        } else {
+            raw.clone()
+        };
+        opts.insert(key.clone(), value);
     }
     let agent_type = non_empty_string(record.get("gen_ai.agent.type"))
         .unwrap_or_else(|| fallback_agent_type.to_string());
@@ -1736,7 +1772,7 @@ pub fn build_canonical_hook_entry(
     } else {
         opts.insert("attributes".to_string(), Value::Object(Map::new()));
     }
-    let mut entry = build_agent_activity_entry(&Value::Object(opts));
+    let mut entry = build_standard_with_canonical_payloads(&opts, Some(record));
     if options.preserve_safe_custom_top_level_fields {
         attach_safe_custom_top_level_fields(&mut entry, record);
     }

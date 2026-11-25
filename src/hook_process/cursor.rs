@@ -25,6 +25,10 @@ use std::time::{Duration, Instant, SystemTime};
 #[path = "cursor_assemble.rs"]
 mod assemble;
 
+#[path = "cursor_deferred.rs"]
+mod deferred;
+pub(crate) use deferred::DeferredCursor;
+
 pub const JOURNAL_LOCK_TIMEOUT_MS: u64 = 3000;
 pub const JOURNAL_LOCK_STALE_MS: u64 = 2000;
 
@@ -79,6 +83,21 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
     if !resources.is_empty() {
         event.insert("resource_attributes".into(), Value::Object(resources));
     }
+    if request.args.iter().any(|arg| arg == "--defer-assembly") {
+        if let Err(error) = deferred::enqueue(&root, &policy, event) {
+            append_error(
+                &root,
+                &now,
+                "journal_append",
+                "enqueue_failed",
+                &error,
+                None,
+                None,
+            );
+        }
+        write_empty(request.stdout);
+        return 0;
+    }
     let journal = Journal::open(&root);
     if let Err(err) = journal.append_with_policy(&mut event, Some(&policy)) {
         append_error(
@@ -111,7 +130,7 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
         }
     }
     if policy.available() {
-        if let Err(err) = journal.assemble_pending(&root, &policy, &event) {
+        if let Err(err) = journal.assemble_pending(&root, &policy, std::slice::from_ref(&event)) {
             append_error(&root, &now, "assemble", "assemble_failed", &err, None, None);
         }
     }
@@ -561,7 +580,7 @@ fn recover_stop(
     policy: &Policy,
     journal: &Journal,
     stop: &Value,
-    current: &Obj,
+    current_stop: bool,
 ) -> Result<(), String> {
     let snapshot = journal.read_all()?;
     let (owned, mixed) = turn_events(&snapshot, stop);
@@ -580,8 +599,17 @@ fn recover_stop(
         return Ok(());
     }
     // A recovered stop must not read a transcript that may contain a newer turn.
-    let current_stop = current.get("_journal_id") == stop.get("_journal_id");
+    let later_prompt = current_stop
+        && snapshot
+            .iter()
+            .skip_while(|event| event.get("_journal_id") != stop.get("_journal_id"))
+            .skip(1)
+            .any(|event| {
+                field(event, "conversation_id") == conversation
+                    && field(event, "hook_event") == "beforeSubmitPrompt"
+            });
     let transcript_path = if current_stop
+        && !later_prompt
         && !mixed
         && capture
         && !visible.iter().any(|event| event["content_omitted"] == true)
@@ -796,7 +824,12 @@ impl Journal {
         })?
     }
 
-    fn assemble_pending(&self, root: &Path, policy: &Policy, current: &Obj) -> Result<(), String> {
+    fn assemble_pending(
+        &self,
+        root: &Path,
+        policy: &Policy,
+        current: &[Obj],
+    ) -> Result<(), String> {
         // The kernel releases the lock even when the Hook process crashes.
         // Another live process may append journal rows while this lock is held.
         let file = OpenOptions::new()
@@ -828,16 +861,25 @@ impl Journal {
         // existing same-turn reconciliation when an unrelated generation fires.
         stops.retain(|stop| {
             stop.get("_journal_id").is_some()
-                || (text(current, "conversation_id") == stop["conversation_id"].as_str()
-                    && text(current, "generation_id") == stop["generation_id"].as_str())
+                || current.iter().any(|event| {
+                    text(event, "conversation_id") == stop["conversation_id"].as_str()
+                        && text(event, "generation_id") == stop["generation_id"].as_str()
+                })
         });
-        stops.sort_by_key(|stop| current.get("_journal_id") != stop.get("_journal_id"));
+        let is_current = |stop: &Value| {
+            stop.get("_journal_id").is_some_and(|id| {
+                current
+                    .iter()
+                    .any(|event| event.get("_journal_id") == Some(id))
+            })
+        };
+        stops.sort_by_key(|stop| !is_current(stop));
         if !discard.is_empty() {
             self.rewrite(&[], Some(&discard))?;
         }
         let mut first_error = None;
         for stop in stops {
-            if let Err(error) = recover_stop(root, policy, self, &stop, current) {
+            if let Err(error) = recover_stop(root, policy, self, &stop, is_current(&stop)) {
                 first_error.get_or_insert(error);
             }
         }
