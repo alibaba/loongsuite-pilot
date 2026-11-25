@@ -498,22 +498,7 @@ pub(crate) fn build_standard_with_canonical_payloads(
     opts: &Map<String, Value>,
     canonical_payloads: Option<&Map<String, Value>>,
 ) -> AgentActivityEntry {
-    build_standard_with_payloads(opts, |canonical, legacy| {
-        // Hook conversion has already selected the canonical fields. Reading
-        // its original payloads must not allow noncanonical aliases back in.
-        match canonical_payloads {
-            Some(original) => first_present(original, &[canonical]).cloned(),
-            None => json_alias(opts, canonical, legacy),
-        }
-    })
-}
-
-fn build_standard_with_payloads(
-    opts: &Map<String, Value>,
-    mut payload: impl FnMut(&str, &str) -> Option<Value>,
-) -> AgentActivityEntry {
-    // Preserve each payload's key position without cloning it before it is normalized.
-    let mut entry: Map<String, Value> = opts
+    let entry = opts
         .iter()
         .map(|(key, value)| {
             let value = if is_canonical_payload_key(key) {
@@ -524,71 +509,74 @@ fn build_standard_with_payloads(
             (key.clone(), value)
         })
         .collect();
-    let time_unix_nano = assigned_string(opts, "time_unix_nano", || match opts.get("timestamp") {
-        None | Some(Value::Null) => {
-            timestamp_to_unix_nanos(Some(&Value::from(current_time_millis())))
-        }
-        Some(value) => timestamp_to_unix_nanos(Some(value)),
-    });
-    let observed = assigned_string(opts, "observed_time_unix_nano", || {
+    normalize_standard_entry(entry, |_, canonical, legacy| match canonical_payloads {
+        Some(payloads) => first_present(payloads, &[canonical]).cloned(),
+        None => json_alias(opts, canonical, legacy),
+    })
+}
+
+/// Consume an event map from a native source. The standard helpers continue
+/// to normalize values and aliases, while unknown fields and payloads can
+/// stay in the original map.
+pub(crate) fn build_standard_from_owned(entry: Map<String, Value>) -> AgentActivityEntry {
+    normalize_standard_entry(entry, |entry, canonical, legacy| {
+        entry
+            .get_mut(canonical)
+            .filter(|value| !value.is_null())
+            .map(std::mem::take)
+            .or_else(|| first_present(entry, &[legacy]).cloned())
+    })
+}
+fn normalize_standard_entry(
+    mut entry: Map<String, Value>,
+    mut payload: impl FnMut(&mut Map<String, Value>, &str, &str) -> Option<Value>,
+) -> AgentActivityEntry {
+    let time_unix_nano =
+        assigned_string(&entry, "time_unix_nano", || match entry.get("timestamp") {
+            None | Some(Value::Null) => {
+                timestamp_to_unix_nanos(Some(&Value::from(current_time_millis())))
+            }
+            Some(value) => timestamp_to_unix_nanos(Some(value)),
+        });
+    let observed = assigned_string(&entry, "observed_time_unix_nano", || {
         timestamp_to_unix_nanos(Some(&Value::from(current_time_millis())))
     });
     set_string(&mut entry, "time_unix_nano", Some(time_unix_nano));
     set_string(&mut entry, "observed_time_unix_nano", Some(observed));
-    set_string(
-        &mut entry,
-        "event.id",
-        Some(match opts.get("event.id") {
-            None | Some(Value::Null) => new_event_id(),
-            Some(Value::String(text)) => text.clone(),
-            Some(other) => serialize_value(other),
-        }),
-    );
+    let event_id = match entry.get("event.id") {
+        None | Some(Value::Null) => new_event_id(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => serialize_value(other),
+    };
+    set_string(&mut entry, "event.id", Some(event_id));
+    let name = normalize_event_name(entry.get("event.name"));
     entry.insert(
-        "event.name".to_string(),
-        Value::String(
-            normalize_event_name(opts.get("event.name"))
-                .as_str()
-                .to_string(),
-        ),
+        "event.name".to_owned(),
+        Value::String(name.as_str().to_owned()),
     );
-    set_string(
-        &mut entry,
-        "user.id",
-        Some(match opts.get("user.id") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(text)) => text.clone(),
-            Some(other) => serialize_value(other),
-        }),
-    );
-    set_string(
-        &mut entry,
-        "gen_ai.session.id",
-        Some(string_alias(opts, "gen_ai.session.id", "session.id").unwrap_or_default()),
-    );
-    set_alias_string(&mut entry, opts, "gen_ai.turn.id", "turn.id");
-    set_alias_string(&mut entry, opts, "gen_ai.step.id", "step.id");
-    set_alias_string(&mut entry, opts, "gen_ai.response.id", "response.id");
-    set_string(
-        &mut entry,
-        "gen_ai.agent.type",
-        Some(
-            string_alias(opts, "gen_ai.agent.type", "agent.type")
-                .unwrap_or_else(|| "unknown".to_string()),
-        ),
-    );
-    set_alias_string(&mut entry, opts, "gen_ai.agent.id", "agent.id");
-    set_alias_string(&mut entry, opts, "gen_ai.agent.name", "agent.name");
-    set_string(
-        &mut entry,
-        "gen_ai.provider.name",
-        Some(infer_provider_name(opts)),
-    );
-    set_alias_string(&mut entry, opts, "gen_ai.request.id", "request.id");
-    set_alias_string(&mut entry, opts, "gen_ai.request.model", "request.model");
-    set_alias_string(&mut entry, opts, "gen_ai.response.model", "response.model");
+    let user_id = match entry.get("user.id") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => serialize_value(other),
+    };
+    set_string(&mut entry, "user.id", Some(user_id));
+    let session = string_alias(&entry, "gen_ai.session.id", "session.id").unwrap_or_default();
+    set_string(&mut entry, "gen_ai.session.id", Some(session));
+    set_alias_string(&mut entry, "gen_ai.turn.id", "turn.id");
+    set_alias_string(&mut entry, "gen_ai.step.id", "step.id");
+    set_alias_string(&mut entry, "gen_ai.response.id", "response.id");
+    let agent_type = string_alias(&entry, "gen_ai.agent.type", "agent.type")
+        .unwrap_or_else(|| "unknown".to_owned());
+    set_string(&mut entry, "gen_ai.agent.type", Some(agent_type));
+    set_alias_string(&mut entry, "gen_ai.agent.id", "agent.id");
+    set_alias_string(&mut entry, "gen_ai.agent.name", "agent.name");
+    let provider = infer_provider_name(&entry);
+    set_string(&mut entry, "gen_ai.provider.name", Some(provider));
+    set_alias_string(&mut entry, "gen_ai.request.id", "request.id");
+    set_alias_string(&mut entry, "gen_ai.request.model", "request.model");
+    set_alias_string(&mut entry, "gen_ai.response.model", "response.model");
     match normalize_finish_reasons(first_present(
-        opts,
+        &entry,
         &["gen_ai.response.finish_reasons", "response.finish_reasons"],
     )) {
         Some(reasons) => {
@@ -603,57 +591,50 @@ fn build_standard_with_payloads(
     }
     set_alias_i64(
         &mut entry,
-        opts,
         "gen_ai.usage.input_tokens",
         "usage.input_tokens",
     );
     set_alias_i64(
         &mut entry,
-        opts,
         "gen_ai.usage.output_tokens",
         "usage.output_tokens",
     );
     set_alias_i64(
         &mut entry,
-        opts,
         "gen_ai.usage.cache_read.input_tokens",
         "usage.cache_read_tokens",
     );
     set_alias_i64(
         &mut entry,
-        opts,
         "gen_ai.usage.cache_creation.input_tokens",
         "usage.cache_write_tokens",
     );
     set_alias_i64(
         &mut entry,
-        opts,
         "gen_ai.usage.total_tokens",
         "usage.total_tokens",
     );
-    set_alias_f64(&mut entry, opts, "gen_ai.usage.input_cost", "cost.input");
-    set_alias_f64(&mut entry, opts, "gen_ai.usage.output_cost", "cost.output");
+    set_alias_f64(&mut entry, "gen_ai.usage.input_cost", "cost.input");
+    set_alias_f64(&mut entry, "gen_ai.usage.output_cost", "cost.output");
     set_alias_f64(
         &mut entry,
-        opts,
         "gen_ai.usage.cache_read.input_cost",
         "cost.cache_read",
     );
     set_alias_f64(
         &mut entry,
-        opts,
         "gen_ai.usage.cache_creation.input_cost",
         "cost.cache_write",
     );
-    set_alias_f64(&mut entry, opts, "gen_ai.usage.total_cost", "cost.total");
+    set_alias_f64(&mut entry, "gen_ai.usage.total_cost", "cost.total");
     set_alias_string(
         &mut entry,
-        opts,
         "gen_ai.input.messages_hash",
         "input.messages_hash",
     );
     let mut set_payload = |entry: &mut Map<String, Value>, canonical, legacy| {
-        set_json_key(entry, canonical, payload(canonical, legacy));
+        let value = payload(entry, canonical, legacy);
+        set_json_key(entry, canonical, value);
     };
     set_payload(
         &mut entry,
@@ -662,12 +643,12 @@ fn build_standard_with_payloads(
     );
     set_payload(&mut entry, "gen_ai.input.messages", "input.messages");
     set_payload(&mut entry, "gen_ai.output.messages", "output.messages");
-    set_alias_string(&mut entry, opts, "gen_ai.tool.name", "tool.name");
-    set_alias_string(&mut entry, opts, "gen_ai.tool.call.id", "tool.call.id");
-    set_alias_string(&mut entry, opts, "gen_ai.tool.call.exec.id", "tool.exec.id");
+    set_alias_string(&mut entry, "gen_ai.tool.name", "tool.name");
+    set_alias_string(&mut entry, "gen_ai.tool.call.id", "tool.call.id");
+    set_alias_string(&mut entry, "gen_ai.tool.call.exec.id", "tool.exec.id");
     set_payload(&mut entry, "gen_ai.tool.call.arguments", "tool.arguments");
     set_payload(&mut entry, "gen_ai.tool.call.result", "tool.result.payload");
-    match tool_duration(opts) {
+    match tool_duration(&entry) {
         Some(duration) => {
             if let Some(number) = Number::from_f64(duration) {
                 entry.insert(
@@ -682,23 +663,18 @@ fn build_standard_with_payloads(
             entry.remove("gen_ai.tool.call.duration");
         }
     }
-    set_alias_string(&mut entry, opts, "gen_ai.skill.name", "skill.name");
-    set_alias_string(&mut entry, opts, "gen_ai.skill.id", "skill.id");
-    set_alias_string(
-        &mut entry,
-        opts,
-        "gen_ai.skill.description",
-        "skill.description",
-    );
-    set_alias_string(&mut entry, opts, "gen_ai.skill.version", "skill.version");
+    set_alias_string(&mut entry, "gen_ai.skill.name", "skill.name");
+    set_alias_string(&mut entry, "gen_ai.skill.id", "skill.id");
+    set_alias_string(&mut entry, "gen_ai.skill.description", "skill.description");
+    set_alias_string(&mut entry, "gen_ai.skill.version", "skill.version");
     set_payload(
         &mut entry,
         "gen_ai.system_instructions",
         "system_instructions",
     );
     set_payload(&mut entry, "gen_ai.tool.definitions", "tool.definitions");
-    apply_legacy_tool_status(&mut entry, opts);
-    flatten_attributes(&mut entry, opts);
+    apply_legacy_tool_status(&mut entry);
+    flatten_attributes(&mut entry);
     normalize_message_fields(&mut entry);
     remove_legacy_aliases(&mut entry);
     super::entry_from_map(entry)
@@ -714,8 +690,8 @@ fn is_legacy_alias(key: &str) -> bool {
     LEGACY_ALIAS_FIELDS.contains(&key)
 }
 
-fn apply_legacy_tool_status(entry: &mut Map<String, Value>, opts: &Map<String, Value>) {
-    let Some(Value::String(status)) = opts.get("tool.result.status") else {
+fn apply_legacy_tool_status(entry: &mut Map<String, Value>) {
+    let Some(Value::String(status)) = entry.get("tool.result.status") else {
         return;
     };
     let normalized = normalize_tool_result_status(&status.to_lowercase());
@@ -743,8 +719,8 @@ fn normalize_tool_result_status(status: &str) -> &'static str {
     }
 }
 
-fn flatten_attributes(entry: &mut Map<String, Value>, opts: &Map<String, Value>) {
-    let Some(Value::Object(attributes)) = opts.get("attributes") else {
+fn flatten_attributes(entry: &mut Map<String, Value>) {
+    let Some(Value::Object(attributes)) = entry.get_mut("attributes").map(std::mem::take) else {
         return;
     };
     for (key, value) in attributes {
@@ -754,7 +730,7 @@ fn flatten_attributes(entry: &mut Map<String, Value>, opts: &Map<String, Value>)
             format!("agent.{key}")
         };
         if !entry.contains_key(&target) {
-            entry.insert(target, value.clone());
+            entry.insert(target, value);
         }
     }
 }
@@ -807,22 +783,12 @@ fn set_json_key(entry: &mut Map<String, Value>, key: &str, value: Option<Value>)
     }
 }
 
-fn set_alias_string(
-    entry: &mut Map<String, Value>,
-    opts: &Map<String, Value>,
-    canonical: &str,
-    legacy: &str,
-) {
-    set_string(entry, canonical, string_alias(opts, canonical, legacy));
+fn set_alias_string(entry: &mut Map<String, Value>, canonical: &str, legacy: &str) {
+    set_string(entry, canonical, string_alias(entry, canonical, legacy));
 }
 
-fn set_alias_i64(
-    entry: &mut Map<String, Value>,
-    opts: &Map<String, Value>,
-    canonical: &str,
-    legacy: &str,
-) {
-    match aliased_number(opts, canonical, legacy).and_then(json_i64) {
+fn set_alias_i64(entry: &mut Map<String, Value>, canonical: &str, legacy: &str) {
+    match aliased_number(entry, canonical, legacy).and_then(json_i64) {
         Some(value) => {
             entry.insert(canonical.to_string(), Value::Number(Number::from(value)));
         }
@@ -832,13 +798,8 @@ fn set_alias_i64(
     }
 }
 
-fn set_alias_f64(
-    entry: &mut Map<String, Value>,
-    opts: &Map<String, Value>,
-    canonical: &str,
-    legacy: &str,
-) {
-    match aliased_number(opts, canonical, legacy).and_then(json_finite) {
+fn set_alias_f64(entry: &mut Map<String, Value>, canonical: &str, legacy: &str) {
+    match aliased_number(entry, canonical, legacy).and_then(json_finite) {
         Some(value) => match Number::from_f64(value) {
             Some(number) => {
                 entry.insert(canonical.to_string(), Value::Number(number));

@@ -185,9 +185,67 @@ enum Record {
     Prompt(InterceptSystemPrompt),
 }
 
+// Use the fixed token payload to avoid a generic object and per-key allocation.
+// Other shapes, escaped strings and duplicate fields retain Value semantics.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeInterceptRow<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+    ts: serde_json::Number,
+    #[serde(default)]
+    id: &'a str,
+    #[serde(default)]
+    content: &'a str,
+    prompt_tokens: Option<serde_json::Number>,
+    completion_tokens: Option<serde_json::Number>,
+    cached_tokens: Option<serde_json::Number>,
+    reasoning_tokens: Option<serde_json::Number>,
+    total_tokens: Option<serde_json::Number>,
+}
+
 fn parse_record(line: &str) -> Option<Record> {
-    if line.trim().is_empty() {
+    if !line.trim_start().starts_with('{') {
         return None;
+    }
+    if let Ok(row) = serde_json::from_str::<NativeInterceptRow>(line) {
+        let ts = number_as_i64(&row.ts)?;
+        return match row.kind {
+            "token" => Some(Record::Token(InterceptTokenData {
+                id: row.id.to_owned(),
+                ts,
+                prompt_tokens: row
+                    .prompt_tokens
+                    .as_ref()
+                    .and_then(number_as_i64)
+                    .unwrap_or(0),
+                completion_tokens: row
+                    .completion_tokens
+                    .as_ref()
+                    .and_then(number_as_i64)
+                    .unwrap_or(0),
+                cached_tokens: row
+                    .cached_tokens
+                    .as_ref()
+                    .and_then(number_as_i64)
+                    .unwrap_or(0),
+                reasoning_tokens: row
+                    .reasoning_tokens
+                    .as_ref()
+                    .and_then(number_as_i64)
+                    .unwrap_or(0),
+                total_tokens: row
+                    .total_tokens
+                    .as_ref()
+                    .and_then(number_as_i64)
+                    .unwrap_or(0),
+            })),
+            "system_prompt" => Some(Record::Prompt(InterceptSystemPrompt {
+                ts,
+                content: row.content.to_owned(),
+            })),
+            _ => None,
+        };
     }
     let record = serde_json::from_str::<Value>(line).ok()?;
     let ts = record
@@ -237,12 +295,28 @@ pub async fn read_intercept_file(file_path: &str, since_ts: Option<i64>) -> Inte
 }
 
 async fn read_content(file_path: &str) -> Option<String> {
+    if crate::utils::source_access::current().is_some() {
+        use std::io::Read;
+        let limit = crate::utils::source_access::read_limit(usize::MAX);
+        return crate::utils::source_access::open_with(file_path, move |file| {
+            let size = file.metadata()?.len();
+            if size > MAX_FILE_SIZE || size > limit as u64 {
+                return Ok(None);
+            }
+            let mut bytes = Vec::with_capacity((size as usize + 8192).min(limit.saturating_add(1)));
+            file.take(limit.saturating_add(1) as u64)
+                .read_to_end(&mut bytes)?;
+            Ok((bytes.len() <= limit)
+                .then(|| String::from_utf8(bytes).ok())
+                .flatten())
+        })
+        .await
+        .ok()
+        .flatten();
+    }
     let logger = create_logger("InterceptTokenReader");
     match tokio::fs::metadata(file_path).await {
         Ok(meta) if meta.len() > MAX_FILE_SIZE => {
-            if crate::utils::source_access::current().is_some() {
-                return None;
-            }
             let old = format!("{file_path}.old");
             let _ = tokio::fs::remove_file(&old).await;
             if tokio::fs::rename(file_path, old).await.is_ok() {
@@ -255,6 +329,12 @@ async fn read_content(file_path: &str) -> Option<String> {
             .ok(),
         Err(_) => None,
     }
+}
+
+fn number_as_i64(number: &serde_json::Number) -> Option<i64> {
+    number
+        .as_i64()
+        .or_else(|| number.as_f64().map(|n| n as i64))
 }
 
 fn num(record: &Value, key: &str) -> i64 {
