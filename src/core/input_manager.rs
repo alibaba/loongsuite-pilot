@@ -963,9 +963,11 @@ impl InputManager {
         let encoded = if codex {
             // The full shell owns workspace inspection and upstream correlation for Codex.
             let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
-            if let Some(linker) = self.trace_linker() {
-                linker.stamp(&mut entries).await;
-                changed = true;
+            if codex {
+                if let Some(linker) = self.trace_linker() {
+                    linker.stamp(&mut entries).await;
+                    changed = true;
+                }
             }
             // Canonical Codex rows can use the raw dispatch fast path once
             // workspace and audit defaults have been accounted for.
@@ -985,7 +987,7 @@ impl InputManager {
         self.accept_sdk_batch(input_id, entries, encoded).await
     }
 
-    async fn accept_hook_history_activity(
+    pub(super) async fn accept_hook_history_activity(
         &self,
         input_id: &str,
         agent: &str,
@@ -2333,7 +2335,7 @@ mod migration_remaining_contracts {
     }
 
     #[tokio::test]
-    async fn sdk_history_handoff_applies_current_privacy_and_preserves_ids() {
+    async fn sdk_hook_history_rechecks_excluded_native_session_and_current_privacy() {
         let directory = tempfile::tempdir().unwrap();
         let private = directory.path().join("private");
         let public = directory.path().join("public");
@@ -2452,6 +2454,50 @@ mod migration_remaining_contracts {
         assert!(exported.contains("[LOCAL_MASKED]"));
         assert!(!exported.contains("private-fixture-654321"));
         assert!(!rows[0].extra.contains_key(PRIVACY_POLICY_FIELD));
+    }
+
+    #[tokio::test]
+    async fn sdk_history_handoff_applies_current_privacy_and_preserves_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let public = directory.path().join("public");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&public).unwrap();
+        let manager = InputManager::new();
+        register(&manager, "openclaw-plugin-log", "openclaw");
+        manager.set_workspace_policy(
+            WorkspacePolicy::new(&[private.to_string_lossy().into_owned()], None).unwrap(),
+        );
+        manager.set_agents_config(
+            &serde_json::from_value(json!({"openclaw":{"captureMessageContent":false}})).unwrap(),
+        );
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut retained = entry("retained", AgentEventName::LlmResponse);
+        retained.agent_type = "openclaw".into();
+        retained.session_id = "public-session".into();
+        retained.workspace_path = Some(public.to_string_lossy().into_owned());
+        retained.output_messages = Some(json!([{"role":"assistant","content":"retained text"}]));
+        let mut excluded = retained.clone();
+        excluded.event_id = "excluded".into();
+        excluded.session_id = "private-session".into();
+        excluded.workspace_path = Some(private.to_string_lossy().into_owned());
+        let retained = serde_json::to_vec(&retained).unwrap();
+        let excluded = serde_json::to_vec(&excluded).unwrap();
+
+        manager
+            .accept_hook_history_activity(
+                "openclaw-plugin-log",
+                "openclaw",
+                &[&retained, &excluded],
+            )
+            .await
+            .unwrap();
+
+        let rows = flattened(&sink);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, "retained");
+        assert!(rows[0].output_messages.is_none());
     }
 
     #[tokio::test]

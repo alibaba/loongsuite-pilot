@@ -18,13 +18,33 @@ pub(crate) struct HookHistoryProfile {
     pub build: fn(HookInputOptions) -> Arc<HostedInput<SdkHookBody>>,
 }
 
-pub(crate) const PROFILES: &[HookHistoryProfile] = &[HookHistoryProfile {
-    agent: "opencode",
-    listener: "opencode-log",
-    profile: "opencode_plugin_v1",
-    history: "logs/opencode",
-    build: |options| crate::inputs::opencode_log::OpenCodeLogInput::new(options).sdk_hosted(),
-}];
+pub(crate) const PROFILES: &[HookHistoryProfile] = &[
+    HookHistoryProfile {
+        agent: "opencode",
+        listener: "opencode-log",
+        profile: "opencode_plugin_v1",
+        history: "logs/opencode",
+        build: |options| crate::inputs::opencode_log::OpenCodeLogInput::new(options).sdk_hosted(),
+    },
+    HookHistoryProfile {
+        agent: "openclaw",
+        listener: "openclaw-plugin-log",
+        profile: "openclaw_plugin_v1",
+        history: "logs/openclaw",
+        build: |options| {
+            crate::inputs::openclaw_plugin::OpenClawPluginInput::new(
+                crate::inputs::openclaw_plugin::OpenClawPluginInputOptions {
+                    state_store: options.state_store,
+                    log_dir: options.log_dir,
+                    log_prefix: options.log_prefix,
+                    poll_interval_ms: options.poll_interval_ms,
+                    data_dir: None,
+                },
+            )
+            .sdk_hosted()
+        },
+    },
+];
 
 pub(crate) fn find(agent: &str) -> Option<&'static HookHistoryProfile> {
     PROFILES.iter().find(|profile| profile.agent == agent)
@@ -170,4 +190,78 @@ impl HookHistoryProfile {
 pub(crate) enum LegacyHistoryOwnership {
     Pending,
     Ready(Option<File>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoints::InputState;
+    use crate::sdk::policy::Delivery;
+
+    #[tokio::test]
+    async fn openclaw_handoff_waits_for_ack_and_preserves_newer_legacy_progress() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        let profile = find("openclaw").unwrap();
+        std::fs::create_dir_all(root.join(profile.history)).unwrap();
+        let sdk_data = profile.sdk_data(&root);
+        let init = Init {
+            data_dir: sdk_data.clone(),
+            resource_dir: root.clone(),
+            home_dir: None,
+            codex_home: None,
+            user_id: String::new(),
+        };
+        let policy = profile.policy(&root, 1234, Some(true), &[], None, None);
+        let namespace = Policy::parse(policy, &init).unwrap().agents["openclaw"].namespace();
+        let delivery = Delivery::default();
+        let queue = Outbox::open(&sdk_data.join("outbox"), delivery.clone()).unwrap();
+        File::create(sdk_data.join("collector.lock")).unwrap();
+        let checkpoint =
+            r#"{"openclaw-plugin-log":{"lastFile":"openclaw-2026-10-01.jsonl","lastOffset":97}}"#;
+        let legacy_cursor = |offset| {
+            InputState::new()
+                .with_last_file("openclaw-2026-10-01.jsonl")
+                .with_last_offset(offset)
+        };
+        queue.checkpoint(&namespace, checkpoint).unwrap();
+        queue
+            .enqueue_hook(br#"{"event.id":"pending-openclaw"}"#)
+            .unwrap();
+
+        let checkpoint_path = root.join("logs/input-state.json");
+        let legacy = StateStore::new(&checkpoint_path);
+        legacy.set(profile.listener, legacy_cursor(31.0));
+        legacy.set("codex-transcript", InputState::new().with_last_offset(52.0));
+        legacy.save().await.unwrap();
+        assert!(matches!(
+            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            LegacyHistoryOwnership::Pending
+        ));
+        assert_eq!(legacy.get_offset(profile.listener), 31.0);
+
+        queue.ack(&queue.read_batch(&delivery).unwrap().0).unwrap();
+        queue
+            .checkpoint(&namespace, r#"{"openclaw-plugin-log":{}}"#)
+            .unwrap();
+        assert!(profile.export_checkpoint(&root, &legacy).await.is_err());
+        assert_eq!(legacy.get_offset(profile.listener), 31.0);
+        queue.checkpoint(&namespace, checkpoint).unwrap();
+        assert!(matches!(
+            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            LegacyHistoryOwnership::Ready(Some(_))
+        ));
+        assert_eq!(legacy.get_offset(profile.listener), 97.0);
+        legacy.set(profile.listener, legacy_cursor(128.0));
+        legacy.save().await.unwrap();
+        assert!(matches!(
+            profile.export_checkpoint(&root, &legacy).await.unwrap(),
+            LegacyHistoryOwnership::Ready(Some(_))
+        ));
+        assert_eq!(legacy.get_offset(profile.listener), 128.0);
+        assert_eq!(legacy.get_offset("codex-transcript"), 52.0);
+
+        std::fs::remove_file(checkpoint_path).unwrap();
+        assert!(profile.export_checkpoint(&root, &legacy).await.is_err());
+    }
 }

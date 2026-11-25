@@ -541,9 +541,9 @@ fn legacy_hook_reader_recovers_an_unexported_drained_checkpoint() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let queue = Outbox::open(&root, settings()).unwrap();
-    let handoff = LegacyCheckpointHandoff::HookHistory("opencode");
-    let source = "opencode-source";
-    let checkpoint = r#"{"opencode-log:fixture":{"lastOffset":97}}"#;
+    let handoff = LegacyCheckpointHandoff::HookHistory("openclaw");
+    let source = "openclaw-source";
+    let checkpoint = r#"{"openclaw-plugin-log:fixture":{"lastOffset":97}}"#;
     queue.checkpoint(source, checkpoint).unwrap();
     queue
         .enqueue_hook(br#"{"event.id":"still-queued"}"#)

@@ -703,10 +703,14 @@ impl Policy {
         } else {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
+        let standalone_managed_hook = hooks["agents"]
+            .as_array()
+            .is_some_and(|agents| agents.iter().any(|agent| agent == "openclaw"));
         hooks["managed_host_rules"] = Value::Bool(
-            ["qoder", "codex", "qoder-cn"]
-                .into_iter()
-                .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
+            (standalone_managed_hook
+                || ["qoder", "codex", "qoder-cn"]
+                    .into_iter()
+                    .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object()))
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
         );
         hooks["embedded_codex"] = serde_json::json!(init.codex_home.is_some());

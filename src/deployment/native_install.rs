@@ -297,8 +297,6 @@ pub(super) async fn run_with_retirement(
     .await
 }
 
-/// The previous pointer authorizes the rollback target, including an installed
-/// Node release that predates native manifests.
 struct LegacyHistoryRollback {
     sdk_locks: Vec<fs::File>,
     collector: crate::utils::SingleInstanceLock,
@@ -359,6 +357,8 @@ async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRo
     Ok(ownership)
 }
 
+/// The previous pointer authorizes the rollback target, including an installed
+/// Node release that predates native manifests.
 fn rollback_manifest(paths: &InstallPaths) -> Result<RuntimeManifest> {
     ensure!(
         paths.config_options.is_none() && !paths.deploy_hooks,

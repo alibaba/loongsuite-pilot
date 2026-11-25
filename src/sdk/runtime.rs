@@ -285,6 +285,7 @@ fn bind<T: InputBody>(
                 anyhow::ensure!(!global.load(Ordering::SeqCst), "SDK stopping");
                 queue.before_collect(&cancel).await?;
                 scope.reset();
+                scope.set_entry_buffer_limit(queue.options.read().unwrap().queue_memory_bytes);
                 *buffer.lock().unwrap() = Cycle {
                     entries: Vec::new(),
                     estimated: 0,
