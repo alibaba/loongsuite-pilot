@@ -139,4 +139,14 @@ describe('readJsonFile', () => {
     await fs.writeFile(broken, '\uFEFF{"a":', 'utf8');
     expect(await readJsonFile(broken)).toBeNull();
   });
+
+  it('reports failure categories without passing through parser errors', async () => {
+    const invalid = path.join(dir, 'broken.json');
+    await fs.writeFile(invalid, '{"token":"synthetic-sensitive-text"', 'utf8');
+    const category = vi.fn();
+    expect(await readJsonFile(path.join(dir, 'missing.json'), category)).toBeNull();
+    expect(await readJsonFile(invalid, category)).toBeNull();
+    expect(await readJsonFile(dir, category)).toBeNull();
+    expect(category.mock.calls).toEqual([['missing'], ['invalid'], ['unreadable']]);
+  });
 });
