@@ -79,9 +79,13 @@ const ARCHIVE_EXTRACT_TIMEOUT_MS = 2 * 60_000;
 function buildChildEnv(nodeBin: string = process.execPath): NodeJS.ProcessEnv {
   const env = { ...process.env };
   const nodeDir = path.dirname(nodeBin);
-  const currentPath = env.PATH ?? '';
-  if (!currentPath.split(path.delimiter).includes(nodeDir)) {
-    env.PATH = nodeDir + path.delimiter + currentPath;
+  const pathKey = process.platform === 'win32'
+    ? Object.keys(env).find(key => key.toUpperCase() === 'PATH') ?? 'PATH'
+    : 'PATH';
+  const currentPath = env[pathKey];
+  const pathEntries = currentPath ? currentPath.split(path.delimiter) : [];
+  if (pathEntries[0] !== nodeDir) {
+    env[pathKey] = [nodeDir, ...pathEntries.filter(entry => entry !== nodeDir)].join(path.delimiter);
   }
   return env;
 }
@@ -752,7 +756,7 @@ export class Updater {
 
   /**
    * Resolve the managed-node OS/arch tuple, or null when this platform has no
-   * managed artifact (win-arm64, linux-musl, or anything outside the matrix) —
+   * managed artifact (linux-musl or anything outside the OS/architecture matrix) —
    * in which case the caller falls back to the running node + npm install.
    */
   private managedNodePlatform(): { os: string; arch: string } | null {
@@ -765,17 +769,22 @@ export class Updater {
         logger.info('managed node: unsupported platform, using system node', { platform: process.platform });
         return null;
     }
+    let machine: string = process.arch;
+    if (os === 'win') {
+      // The running Node may be an emulated x64 build on a Windows ARM64 host.
+      machine = (process.env.PROCESSOR_ARCHITEW6432?.trim()
+        || process.env.PROCESSOR_ARCHITECTURE?.trim()
+        || machine).toLowerCase();
+    }
     let arch: string;
-    switch (process.arch) {
-      case 'arm64': arch = 'arm64'; break;
+    switch (machine) {
+      case 'arm64':
+      case 'aarch64': arch = 'arm64'; break;
+      case 'amd64':
       case 'x64': arch = 'x64'; break;
       default:
-        logger.info('managed node: unsupported arch, using system node', { arch: process.arch });
+        logger.info('managed node: unsupported arch, using system node', { arch: machine });
         return null;
-    }
-    if (os === 'win' && arch === 'arm64') {
-      logger.info('managed node: no win-arm64 artifact, using system node');
-      return null;
     }
     if (os === 'linux' && this.isMuslLibc()) {
       logger.info('managed node: no linux-musl artifact, using system node');

@@ -339,12 +339,8 @@ function Get-ManagedNodePlatform {
     $archRaw = $env:PROCESSOR_ARCHITEW6432
     if (-not $archRaw) { $archRaw = $env:PROCESSOR_ARCHITECTURE }
     switch ($archRaw) {
-        "AMD64" { return [pscustomobject]@{ Os = "win"; Arch = "x64" } }
-        "ARM64" {
-            Msg "    ⚠️ 托管 Node.js 无 win-arm64 产物，回退系统 node + npm install" `
-                "    ⚠️ No win-arm64 managed Node.js artifact, falling back to system node + npm install"
-            return $null
-        }
+        "AMD64" { return @{ Os = "win"; Arch = "x64" } }
+        "ARM64" { return @{ Os = "win"; Arch = "arm64" } }
         default {
             Msg "    ⚠️ 托管 Node.js 不支持架构 $archRaw，回退系统 node + npm install" `
                 "    ⚠️ Managed Node.js does not support arch $archRaw, falling back to system node + npm install"
@@ -437,7 +433,7 @@ function Remove-PilotPathQuietly {
 # <<< pilot-short-path <<<
 
 # >>> pilot-ascii-temp >>>
-# Temp root guaranteed to be ASCII, for the two tar.exe staging dirs only.
+# Temp root for downloaded archives, kept ASCII for tar.exe.
 #
 # PowerShell hands native command arguments to CreateProcessW as UTF-16, but bsdtar
 # (%SystemRoot%\System32\tar.exe) enters through the ANSI CRT and converts them back
@@ -644,7 +640,7 @@ function Test-ManagedNodeChecksum {
     param([string]$Archive, [string]$ShasumsFile, [string]$Name)
     try {
         $expected = $null
-        foreach ($line in (Get-Content $ShasumsFile)) {
+        foreach ($line in (Get-Content -LiteralPath $ShasumsFile)) {
             if ($line -match ("^([0-9a-fA-F]{64})\s+\*?" + [regex]::Escape($Name) + "\s*$")) {
                 $expected = $Matches[1].ToLower()
                 break
@@ -654,7 +650,7 @@ function Test-ManagedNodeChecksum {
             Msg "    ❌ SHASUMS256.txt 中缺少 $Name 的校验和" "    ❌ SHASUMS256.txt has no entry for $Name"
             return $false
         }
-        $actual = (Get-FileHash -Algorithm SHA256 -Path $Archive).Hash.ToLower()
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLower()
         if ($actual -ne $expected) {
             Msg "    ❌ $Name sha256 校验失败 (expected $expected, got $actual)" "    ❌ sha256 mismatch for $Name (expected $expected, got $actual)"
             return $false
@@ -669,9 +665,9 @@ function Resolve-ManagedNodeBin {
     param([string]$NodeDir)
     # Prefer the bin/ layout; official Node.js win zips put node.exe at the root.
     $binLayout = Join-Path $NodeDir "bin\node.exe"
-    if (Test-Path $binLayout) { return $binLayout }
+    if (Test-Path -LiteralPath $binLayout) { return $binLayout }
     $officialLayout = Join-Path $NodeDir "node.exe"
-    if (Test-Path $officialLayout) { return $officialLayout }
+    if (Test-Path -LiteralPath $officialLayout) { return $officialLayout }
     return $null
 }
 
@@ -691,19 +687,24 @@ function Ensure-ManagedNode {
     }
 
     $base = $script:NODE_DEPS_BASE.TrimEnd('/') + "/$($script:NODE_VERSION)"
-    $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $tmp = $null
+    $replacingRuntime = $false
     try {
-        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-x64)..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-x64)..."
+        # Keep staging inside the fallback path. The archive root does not
+        # need the .NET temp-path call that ConstrainedLanguage blocks.
+        $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-managed-node-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmp -Force -ErrorAction Stop | Out-Null
+        Msg "==> 下载托管 Node.js v$($script:NODE_VERSION) (win-$($platform.Arch))..." "==> Downloading managed Node.js v$($script:NODE_VERSION) (win-$($platform.Arch))..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
         if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $null }
         if (-not (Invoke-ManagedNodeDownload "$base/SHASUMS256.txt" $shasumsPath)) { return $null }
         if (-not (Test-ManagedNodeChecksum $archivePath $shasumsPath $archive)) { return $null }
 
-        if (Test-Path $nodeDir) { Remove-Item -LiteralPath (Get-PilotLongPath $nodeDir) -Recurse -Force }
-        if (-not (Test-Path $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
-        Expand-Archive -Path $archivePath -DestinationPath $runtimeDir -Force
+        $replacingRuntime = $true
+        if (Test-Path -LiteralPath $nodeDir) { Remove-Item -LiteralPath (Get-PilotLongPath $nodeDir) -Recurse -Force }
+        if (-not (Test-Path -LiteralPath $runtimeDir)) { New-Item -ItemType Directory -Path $runtimeDir -Force | Out-Null }
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $runtimeDir -Force
         $nodeBin = Resolve-ManagedNodeBin $nodeDir
         if (-not $nodeBin) {
             Msg "    ❌ 解压产物中未找到 node.exe（bin\ 或根目录布局）" "    ❌ No node.exe found in extracted archive (bin\ or root layout)"
@@ -712,7 +713,7 @@ function Ensure-ManagedNode {
         }
         return $nodeBin
     } catch {
-        Remove-PilotPathQuietly $nodeDir
+        if ($replacingRuntime) { Remove-PilotPathQuietly $nodeDir }
         return $null
     } finally {
         Remove-PilotPathQuietly $tmp
@@ -721,26 +722,33 @@ function Ensure-ManagedNode {
 
 function Ensure-NodeModules {
     param([string]$AppVersion = "latest")
-    $platform = Get-ManagedNodePlatform
-    if (-not $platform) { return $false }
+    # Match the selected Node, which can be an emulated system runtime.
+    if (-not $script:NODE_BIN) { return $false }
+    try {
+        $arch = (& $script:NODE_BIN -p 'process.arch' 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or $arch -notin @('arm64', 'x64')) { return $false }
+    } catch {
+        return $false
+    }
 
     $modulesDir = Join-Path $script:PERMANENT_DIR "node_modules"
     $marker = Join-Path $modulesDir ".pilot-modules-version"
-    $stamp = "$AppVersion $($platform.Os) $($platform.Arch)"
+    $stamp = "$AppVersion win $arch"
     if ((Test-Path $modulesDir) -and (Test-Path $marker)) {
         $existing = (Get-Content $marker -ErrorAction SilentlyContinue | Out-String).Trim()
         if ($existing -eq $stamp) { return $true }
     }
 
-    $archive = "node-modules-$($platform.Os)-$($platform.Arch).tar.gz"
+    $archive = "node-modules-win-$arch.tar.gz"
     $base = $script:NODE_MODULES_BASE.TrimEnd('/') + "/$AppVersion"
     # ASCII temp root: the archive is unpacked with tar.exe, which cannot see a
     # non-ASCII path (see Get-PilotAsciiTempRoot). Move-Item below lands it in the
     # real, possibly non-ASCII, install dir.
-    $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+    $tmp = $null
     try {
-        Msg "==> 下载预编译 node_modules (win-x64, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-x64, app v$AppVersion)..."
+        $tmp = Join-Path (Get-PilotAsciiTempRoot) ("pilot-node-modules-" + [guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmp -Force -ErrorAction Stop | Out-Null
+        Msg "==> 下载预编译 node_modules (win-$arch, app v$AppVersion)..." "==> Downloading prebuilt node_modules (win-$arch, app v$AppVersion)..."
         $archivePath = Join-Path $tmp $archive
         $shasumsPath = Join-Path $tmp "SHASUMS256.txt"
         if (-not (Invoke-ManagedNodeDownload "$base/$archive" $archivePath)) { return $false }

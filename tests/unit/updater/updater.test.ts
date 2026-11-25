@@ -712,12 +712,75 @@ describe('Updater', () => {
       ]);
     });
 
+    it.each([
+      { processArch: 'arm64', architecture: 'ARM64', nativeArchitecture: '' },
+      { processArch: 'x64', architecture: 'AMD64', nativeArchitecture: 'ARM64' },
+    ])('provisions the managed Windows ARM64 runtime from $processArch Node', async ({
+      processArch, architecture, nativeArchitecture,
+    }) => {
+      const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+      const originalArch = Object.getOwnPropertyDescriptor(process, 'arch')!;
+      Object.defineProperty(process, 'platform', { ...originalPlatform, value: 'win32' });
+      Object.defineProperty(process, 'arch', { ...originalArch, value: processArch });
+      vi.stubEnv('PROCESSOR_ARCHITECTURE', architecture);
+      vi.stubEnv('PROCESSOR_ARCHITEW6432', nativeArchitecture);
+      try {
+        const archive = 'node-v22.22.2-win-arm64.zip';
+        const digest = 'a'.repeat(64);
+        let extracted = false;
+        mockFetch.mockResolvedValueOnce(makeResponseStream()).mockResolvedValueOnce(makeResponseStream());
+        mockFsReadFile.mockResolvedValue(`${digest}  ${archive}\n`);
+        mockComputeSha256.mockResolvedValue(digest);
+        mockFsAccess.mockImplementation(async file => {
+          const normalized = file.replace(/\\/g, '/');
+          if (!extracted || !normalized.endsWith('/runtime/node-v22.22.2-win-arm64/node.exe')) {
+            throw new Error('ENOENT');
+          }
+        });
+        mockExecFile.mockImplementation(async (command, args) => {
+          if (command === 'powershell.exe' && args.some((arg: string) => arg.includes('Expand-Archive'))) {
+            extracted = true;
+          }
+          return { stdout: '', stderr: '' };
+        });
+
+        const updater = new Updater(makeConfig(), tmpDir);
+        const node = await updater['ensureManagedNode']();
+
+        expect(node?.replace(/\\/g, '/')).toBe(`${tmpDir}/runtime/node-v22.22.2-win-arm64/node.exe`);
+        expect(mockFetch).toHaveBeenNthCalledWith(1, expect.stringMatching(/\/22\.22\.2\/node-v22\.22\.2-win-arm64\.zip$/), expect.anything());
+        expect(mockFetch).toHaveBeenNthCalledWith(2, expect.stringMatching(/\/22\.22\.2\/SHASUMS256\.txt$/), expect.anything());
+        expect(mockComputeSha256).toHaveBeenCalledWith(expect.stringContaining(archive));
+        expect(mockExecFile).toHaveBeenCalledWith('powershell.exe', expect.arrayContaining([
+          '-Command',
+          expect.stringContaining('Expand-Archive -LiteralPath'),
+        ]), expect.anything());
+      } finally {
+        Object.defineProperty(process, 'platform', originalPlatform);
+        Object.defineProperty(process, 'arch', originalArch);
+      }
+    });
+
+    it('puts the selected managed Node first for npm fallback even when it is already on PATH', async () => {
+      setupForDownload();
+      const managedDir = path.join(tmpDir, 'runtime', 'managed');
+      const systemDir = path.join(tmpDir, 'system');
+      vi.stubEnv('PATH', [systemDir, managedDir].join(path.delimiter));
+      const updater = new Updater(makeConfig(), tmpDir);
+      vi.spyOn(updater as any, 'ensureManagedNode').mockResolvedValue(path.join(managedDir, 'node'));
+      vi.spyOn(updater as any, 'ensureNodeModules').mockResolvedValue(false);
+
+      await updater.check();
+
+      const npm = mockExecFile.mock.calls.find(([command]) => command === 'npm');
+      expect(npm?.[2].env.PATH.split(path.delimiter)).toEqual([managedDir, systemDir]);
+    });
+
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
       const expOs = process.platform === 'win32' ? 'win' : process.platform;
       const expArch = process.arch;
       const supported = ['darwin', 'linux', 'win'].includes(expOs)
-        && ['x64', 'arm64'].includes(expArch)
-        && !(expOs === 'win' && expArch === 'arm64');
+        && ['x64', 'arm64'].includes(expArch);
       // On an unsupported host the updater keeps the system node; nothing to assert.
       if (!supported) return;
 
@@ -785,8 +848,7 @@ describe('Updater', () => {
       const expOs = process.platform === 'win32' ? 'win' : process.platform;
       const expArch = process.arch;
       const supported = ['darwin', 'linux', 'win'].includes(expOs)
-        && ['x64', 'arch'].includes(expArch === 'arm64' ? 'arch' : expArch)
-        && !(expOs === 'win' && expArch === 'arm64');
+        && ['x64', 'arm64'].includes(expArch);
       // On an unsupported host the managed runtime is never adopted, so there is no
       // pin step to fail; the ABI-consistency hazard this guards does not arise.
       if (!supported) return;

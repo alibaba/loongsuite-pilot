@@ -580,7 +580,7 @@ export class Orchestrator extends EventEmitter {
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
     await this.metricsSummaryWriter?.stop();
-    this.runtimeWriter?.stop();
+    await this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
     this.updaterWatchdog = null;
     this.legacySlsFailedLogCleanupService?.stop();

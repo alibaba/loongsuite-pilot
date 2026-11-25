@@ -116,7 +116,10 @@ ${body}
     writeFileSync(scriptPath, harness);
     const r = spawnSync('bash', [scriptPath, ossDir], {
       encoding: 'utf-8',
-      env: { ...process.env, FAKE_OS: 'Darwin', FAKE_ARCH: 'arm64', ...env },
+      env: {
+        ...process.env, FAKE_OS: 'Darwin', FAKE_ARCH: 'arm64',
+        PROCESSOR_ARCHITECTURE: '', PROCESSOR_ARCHITEW6432: '', ...env,
+      },
     });
     if (r.status !== 0) {
       const e = new Error(`harness exited ${r.status}\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
@@ -191,6 +194,7 @@ describe('managed_node_platform mapping', () => {
     ['Linux', 'x86_64', 'linux x64'],
     ['Linux', 'aarch64', 'linux arm64'],
     ['MINGW64_NT-10.0', 'x86_64', 'win x64'],
+    ['MINGW64_NT-10.0', 'aarch64', 'win arm64'],
   ];
   for (const [os, arch, expected] of cases) {
     it(`maps ${os}/${arch} -> ${expected}`, () => {
@@ -199,10 +203,14 @@ describe('managed_node_platform mapping', () => {
     });
   }
 
-  it('rejects win-arm64 (no managed artifact)', () => {
-    const res = runBashFail('managed_node_platform', { env: { FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'aarch64' } });
-    expect(res.failed).toBe(true);
-    expect(res.err).toMatch(/win-arm64/);
+  it('detects the Windows ARM64 host from an emulated Git Bash session', () => {
+    const { out } = runBash('managed_node_platform', {
+      env: {
+        FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'x86_64',
+        PROCESSOR_ARCHITECTURE: 'AMD64', PROCESSOR_ARCHITEW6432: 'ARM64',
+      },
+    });
+    expect(out.trim()).toBe('win arm64');
   });
 
   it('rejects unsupported architecture', () => {
@@ -347,6 +355,21 @@ cat "$PERMANENT_DIR/node_modules/.pilot-modules-version"
     expect(out.trim()).toBe('1.2.3 darwin arm64');
     expect(err).toContain('Downloading prebuilt node_modules (darwin-arm64, app v1.2.3)');
     expect(err).not.toContain('No such file or directory');
+  });
+
+  it('uses x64 Windows modules when the selected system Node runs on emulation', () => {
+    const { out } = runBash(`
+NODE_BIN="$DATA_DIR/system runtime/node.exe"
+mkdir -p "$(dirname "$NODE_BIN")"
+printf '%s\n' '#!/bin/sh' '[ "$1" = "-p" ] && [ "$2" = "process.arch" ] || exit 1' 'echo x64' > "$NODE_BIN"
+chmod +x "$NODE_BIN"
+ensure_node_modules "1.2.3"
+cat "$PERMANENT_DIR/node_modules/.pilot-modules-version"
+`, {
+      env: { FAKE_OS: 'MINGW64_NT-10.0', FAKE_ARCH: 'aarch64' },
+      fixture: (oss) => makeModulesTarball(oss, 'win', 'x64'),
+    });
+    expect(out.trim()).toBe('1.2.3 win x64');
   });
 
   it('is idempotent when the marker matches', () => {

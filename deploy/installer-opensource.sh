@@ -428,7 +428,7 @@ _mn_msg() {
 }
 
 managed_node_platform() {
-    local os arch
+    local os arch machine
     case "$(uname -s)" in
         Darwin) os="darwin" ;;
         Linux) os="linux" ;;
@@ -437,18 +437,17 @@ managed_node_platform() {
             echo "managed node: unsupported platform $(uname -s)" >&2
             return 1 ;;
     esac
-    case "$(uname -m)" in
-        arm64|aarch64) arch="arm64" ;;
-        x86_64|amd64) arch="x64" ;;
+    machine=$(uname -m)
+    if [ "$os" = "win" ]; then
+        machine="${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-$machine}}"
+    fi
+    case "$machine" in
+        arm64|aarch64|ARM64) arch="arm64" ;;
+        x86_64|amd64|AMD64|x64) arch="x64" ;;
         *)
-            echo "managed node: unsupported architecture $(uname -m)" >&2
+            echo "managed node: unsupported architecture $machine" >&2
             return 1 ;;
     esac
-    if [ "$os" = "win" ] && [ "$arch" = "arm64" ]; then
-        _mn_msg "managed node: win-arm64 无托管产物，回退系统 node + npm install" \
-                "managed node: no win-arm64 artifact, falling back to system node + npm install"
-        return 1
-    fi
     if [ "$os" = "linux" ] && managed_node_is_musl; then
         _mn_msg "managed node: linux musl (Alpine) 无托管产物，回退系统 node + npm install" \
                 "managed node: no linux-musl artifact, falling back to system node + npm install"
@@ -586,6 +585,12 @@ ensure_node_modules() {
     local tuple os arch
     tuple=$(managed_node_platform) || return 1
     os="${tuple% *}"; arch="${tuple#* }"
+    if [ "$os" = "win" ]; then
+        # A fallback or explicitly selected Node may run under emulation.
+        arch=$("${NODE_BIN:-node}" -p 'process.arch' 2>/dev/null) || return 1
+        arch="${arch%$'\r'}"
+        case "$arch" in arm64|x64) ;; *) return 1 ;; esac
+    fi
 
     local modules_dir="$PERMANENT_DIR/node_modules"
     local marker="$modules_dir/.pilot-modules-version"
