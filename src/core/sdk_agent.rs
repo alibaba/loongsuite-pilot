@@ -12,6 +12,9 @@ use std::sync::{mpsc, Arc, Weak};
 use std::time::Duration;
 
 const PENDING: i32 = -1;
+// Poll-driven inputs already collect a batch before enqueueing it. Keep the
+// additional wait short when the receiving host is in the same process.
+const HOST_ACTIVITY_FLUSH_INTERVAL_MS: u64 = 100;
 
 pub(super) struct SdkAgent {
     input: &'static str,
@@ -22,6 +25,7 @@ pub(super) struct SdkAgent {
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
     managed: Option<Arc<ManagedHook>>,
+    linked: bool,
     running: Arc<AtomicBool>,
     session: tokio::sync::Mutex<Option<Session>>,
 }
@@ -35,11 +39,18 @@ impl SdkAgent {
     pub fn new(
         input: &'static str,
         init: Value,
-        policy: Value,
+        mut policy: Value,
         manager: &Arc<InputManager>,
         sdk_data: PathBuf,
         legacy_state: &Arc<StateStore>,
     ) -> Self {
+        if policy
+            .pointer("/sdk_options/delivery/flush_interval_ms")
+            .is_none()
+        {
+            policy["sdk_options"]["delivery"]["flush_interval_ms"] =
+                Value::from(HOST_ACTIVITY_FLUSH_INTERVAL_MS);
+        }
         Self {
             input,
             init: init.to_string().into_bytes(),
@@ -49,9 +60,15 @@ impl SdkAgent {
             sdk_data,
             legacy_state: Arc::downgrade(legacy_state),
             verdicts: None,
+            linked: false,
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
+    }
+
+    pub(super) fn with_linked_sdk(mut self, linked: bool) -> Self {
+        self.linked = linked;
+        self
     }
 
     pub fn hook_only(
@@ -71,6 +88,7 @@ impl SdkAgent {
             sdk_data,
             legacy_state: Weak::new(),
             verdicts: Some(verdicts),
+            linked: false,
             running: Arc::new(AtomicBool::new(false)),
             session: tokio::sync::Mutex::new(None),
         }
@@ -98,6 +116,7 @@ impl SdkAgent {
             legacy_state: self.legacy_state.clone(),
             verdicts: self.verdicts.clone(),
             managed: self.managed.clone(),
+            linked: self.linked,
             start_result: AtomicI32::new(PENDING),
             stop_result: AtomicI32::new(PENDING),
         });
@@ -128,14 +147,21 @@ impl SdkAgent {
     }
 
     pub async fn stop(&self) {
+        if self.stop_with_result().await.is_err() {
+            super::logger("SdkAgent").warn("SDK instance failed to stop cleanly", None);
+        }
+    }
+
+    pub(super) async fn stop_with_result(&self) -> Result<(), String> {
         let mut session = self.session.lock().await;
         if let Some(Session { stop, worker }) = session.take() {
             let _ = stop.send(());
-            let outcome = tokio::task::spawn_blocking(move || worker.join()).await;
-            if !matches!(outcome, Ok(Ok(Ok(())))) {
-                super::logger("SdkAgent").warn("SDK instance failed to stop cleanly", None);
-            }
+            return tokio::task::spawn_blocking(move || worker.join())
+                .await
+                .map_err(|error| error.to_string())?
+                .map_err(|_| "SDK host thread panicked".to_owned())?;
         }
+        Ok(())
     }
 }
 
@@ -165,6 +191,7 @@ struct Context {
     legacy_state: Weak<StateStore>,
     verdicts: Option<Arc<ToolVerdictStore>>,
     managed: Option<Arc<ManagedHook>>,
+    linked: bool,
     start_result: AtomicI32,
     stop_result: AtomicI32,
 }
@@ -248,6 +275,12 @@ impl Context {
         let persisted = Outbox::read_persisted_checkpoint(&self.sdk_data.join("outbox"), namespace)
             .map_err(|error| error.to_string())?;
         self.runtime.block_on(async {
+            if matches!(handoff, Some(LegacyCheckpointHandoff::HookHistory(_))) {
+                legacy
+                    .check_for_handoff(None)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             if let Some(text) = persisted.as_deref() {
                 checkpoint
                     .load_checkpoint_text(text)
@@ -256,11 +289,29 @@ impl Context {
                 // A fresh SDK source may only have imported the Node checkpoint.
                 checkpoint.load().await;
             }
+            let history_profile = match handoff {
+                Some(LegacyCheckpointHandoff::HookHistory(agent)) => {
+                    crate::sdk::hook_history::find(agent)
+                }
+                _ => None,
+            };
+            let can_export = if let Some(profile) = history_profile {
+                profile
+                    .can_export_checkpoint(
+                        &checkpoint,
+                        persisted.as_deref().is_some_and(|text| text != "{}"),
+                    )
+                    .map_err(|error| error.to_string())?
+            } else {
+                true
+            };
             let mut imported = false;
-            for id in checkpoint.keys() {
-                if crate::checkpoints::key_in_namespace(&id, self.input) {
-                    legacy.set(&id, checkpoint.get(&id));
-                    imported = true;
+            if can_export {
+                for id in checkpoint.keys() {
+                    if crate::checkpoints::key_in_namespace(&id, self.input) {
+                        legacy.set(&id, checkpoint.get(&id));
+                        imported = true;
+                    }
                 }
             }
             if imported {
@@ -457,8 +508,15 @@ fn run(
     stopping: mpsc::Receiver<()>,
     running: &AtomicBool,
 ) -> Result<(), String> {
-    let library = Library::open(&host_loader::library_path()?)?;
-    let api = library.api();
+    let library = if context.linked {
+        None
+    } else {
+        Some(Library::open(&host_loader::library_path()?)?)
+    };
+    let api = match &library {
+        Some(library) => library.api(),
+        None => crate::sdk::linked_api(),
+    };
     let required = abi::CAP_ACTIVITY_V2 | abi::CAP_HOOK_UDP | abi::CAP_MONITORING;
     if api.capabilities & required != required {
         return Err("SDK is missing required host capabilities".into());

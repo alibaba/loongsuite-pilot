@@ -353,6 +353,19 @@ fn run_agent(
             }
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let hook_history_host = super::hook_history::find(&plan.agent).and(plan.pilot_host.as_ref());
+    let upstream = hook_history_host
+        .and_then(|host| host.upstream_link_ttl_ms.map(|ttl| (host, ttl)))
+        .and_then(|(host, ttl)| {
+            let dir = host.data_dir.join("acp-correlate");
+            if let Err(error) = source_access::private_path(&dir) {
+                queue.alarm("SDK_SOURCE_READ", &format!("upstream correlation: {error}"));
+                return None;
+            }
+            roots.push(dir.clone());
+            let linker = crate::core::TraceLinker::new(crate::core::CorrelationStore::new(dir));
+            Some((Arc::new(linker), ttl))
+        });
     if let Some(state) = &plan.pilot_host {
         let agent_roots: &[&str] = match checkpoint_key {
             "codex-transcript" => &[
@@ -360,7 +373,8 @@ fn run_agent(
                 "state/codex/transcript-span-contexts",
             ],
             "codex-aborted-turn" => &["state/codex/sessions", "logs/diagnostics"],
-            _ => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            "qoder-trace" => &["state/qoder-transcripts/qoder", "logs/qoder"],
+            _ => &[],
         };
         if checkpoint_key == "codex-transcript" {
             if let Some(home) = roots[0].parent() {
@@ -423,13 +437,7 @@ fn run_agent(
         .build()?;
     let shell_handoff = plan.pilot_host.as_ref().and_then(|host| {
         let handoff = LegacyCheckpointHandoff::for_input(checkpoint_key)?;
-        let expected = if handoff == LegacyCheckpointHandoff::Qoder {
-            host.data_dir.join(super::STANDALONE_QODER_DATA)
-        } else {
-            host.data_dir
-                .join("state")
-                .join(format!("standalone-{checkpoint_key}-sdk"))
-        };
+        let expected = handoff.data_dir(&host.data_dir, checkpoint_key);
         (init.data_dir == expected).then_some((host, handoff))
     });
     let mut preview = if let Some((host, handoff)) = shell_handoff {
@@ -446,11 +454,13 @@ fn run_agent(
             preview = runtime.block_on(read_pilot_checkpoint(&host.data_dir, checkpoint_key))?;
         }
     }
-    let store = Arc::new(if isolated_codex {
-        StateStore::new_sdk_source(&checkpoint)
-    } else {
-        StateStore::new(&checkpoint)
-    });
+    let store = Arc::new(
+        if isolated_codex || super::hook_history::find(&plan.agent).is_some() {
+            StateStore::new_sdk_source(&checkpoint)
+        } else {
+            StateStore::new(&checkpoint)
+        },
+    );
     if let Some(text) = preview.as_deref() {
         store.load_checkpoint_text(text)?;
     }
@@ -505,7 +515,16 @@ fn run_agent(
     });
     let manager = Arc::new(InputManager::new());
     manager.set_state_store(store.clone());
-    manager.set_mask_config(plan.mask.clone());
+    if let Some(manifest) = hook_history_host.and_then(|host| host.mask_rule_manifest.as_ref()) {
+        manager
+            .set_hosted_mask_manifest(plan.mask.clone(), manifest)
+            .map_err(anyhow::Error::msg)?;
+    } else {
+        manager.set_mask_config(plan.mask.clone());
+    }
+    if let Some((linker, _)) = &upstream {
+        manager.set_trace_linker(linker.clone());
+    }
     if let Some(state) = &plan.pilot_host {
         manager.set_workspace_policy(
             crate::core::WorkspacePolicy::new(
@@ -533,6 +552,9 @@ fn run_agent(
                 ..Default::default()
             },
         )]));
+    }
+    if hook_history_host.is_some() {
+        manager.set_sdk_hook_history_privacy(&plan.agent);
     }
     manager.set_configured_user_id(init.user_id.clone());
     manager.set_flusher(flusher);
@@ -673,6 +695,43 @@ fn run_agent(
                 })
             },
         )
+    } else if let Some(profile) = super::hook_history::find(&plan.agent) {
+        let input = (profile.build)(crate::inputs::rest_support::HookInputOptions {
+            state_store: store.clone(),
+            log_dir: source_path("hook_jsonl"),
+            log_prefix: None,
+            poll_interval_ms: Some(plan.poll_interval_ms),
+        });
+        if let Some(state) = &plan.pilot_host {
+            let policy = crate::inputs::base::WorkspacePolicy::new(
+                state.exclude_workspaces.clone(),
+                Some(state.data_dir.join("state/workspace-exclusions")),
+            );
+            input.runtime.set_workspace_policy(policy);
+        }
+        input.set_owned_entries_handler(capture_codex);
+        input.on_runtime_delta(record_delta);
+        bind(
+            &input,
+            manager.clone(),
+            queue.clone(),
+            scope,
+            cancel.clone(),
+            global.clone(),
+            buffer,
+        );
+        live(
+            checkpoint_key,
+            profile.agent,
+            input,
+            |i| i.running(),
+            |i| Box::pin(async move { i.start().await }),
+            |i| {
+                Box::pin(async move {
+                    let _ = i.stop().await;
+                })
+            },
+        )
     } else {
         let paths = plan
             .sources
@@ -756,7 +815,18 @@ fn run_agent(
     // create a directory in the Agent installation merely because HCD names it.
     let mut started = false;
     let mut next_start = std::time::Instant::now();
+    let mut last_prune = next_start;
     while !cancel.load(Ordering::SeqCst) && !global.load(Ordering::SeqCst) {
+        if let Some((linker, ttl)) = &upstream {
+            if last_prune.elapsed() >= std::time::Duration::from_secs(3600) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+                linker.prune_idle(now.saturating_sub(u128::from(*ttl)));
+                last_prune = std::time::Instant::now();
+            }
+        }
         let available = plan
             .sources
             .iter()

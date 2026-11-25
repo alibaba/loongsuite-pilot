@@ -23,7 +23,15 @@ pub async fn create_hook_history_startup_checkpoint(
     }
     let log_file_name = format!("{log_prefix}-{}.jsonl", get_today_date_string());
     let log_file = Path::new(log_dir).join(&log_file_name);
-    let existing_bytes = match tokio::fs::metadata(&log_file).await {
+    let metadata = if crate::utils::source_access::current().is_some() {
+        match crate::utils::source_access::open_async(&log_file).await {
+            Ok(file) => file.metadata().await,
+            Err(error) => Err(error),
+        }
+    } else {
+        tokio::fs::metadata(&log_file).await
+    };
+    let existing_bytes = match metadata {
         Ok(meta) => meta.len(),
         Err(err) if err.kind() == ErrorKind::NotFound => 0,
         Err(err) => return Err(err.into()),

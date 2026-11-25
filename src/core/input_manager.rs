@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::Local;
@@ -14,12 +14,17 @@ use tokio::sync::{watch, Mutex as AsyncMutex};
 
 use crate::flushers::{BaseFlusher, FlushError, QuotaAlarm};
 use crate::inputs::base::InputRuntimeDelta;
-use crate::mask::{load_mask_plan, mask_agent_activity_entry, MaskPlan, PlanOrRules};
+use crate::mask::{
+    load_mask_plan, mask_agent_activity_entry, mask_plan_from_manifest, MaskPlan, PlanOrRules,
+};
 use crate::metrics::{AlarmContext, AlarmManager};
 use crate::multimodal::MultimodalProcessor;
 use crate::normalization::{
     apply_invocation_identity, enrich_canonical_entries_with_git, expand_agent_input_events,
     TurnBoundaryProcessor,
+};
+use crate::sdk::hook_history::{
+    NATIVE_SESSION_FIELD, PRIVACY_POLICY_FIELD, PROFILES, TRACE_CHECKED_FIELD,
 };
 use crate::types::{AgentActivityEntry, AgentsConfig, MaskConfig, MaskMode, MaskReplacementMode};
 use crate::utils::format_time;
@@ -170,6 +175,28 @@ async fn wait_output_cancellation(mut receiver: watch::Receiver<bool>) {
 
 type FlushListener = Arc<dyn Fn(usize, u64) + Send + Sync>;
 
+struct ActivityMask {
+    config: MaskConfig,
+    plan: MaskPlan,
+    manifest: serde_json::Value,
+    fingerprint: String,
+}
+
+impl ActivityMask {
+    fn new(config: MaskConfig, plan: MaskPlan) -> Self {
+        let manifest = plan.rule_manifest();
+        let fingerprint = crate::utils::content_hash(
+            &serde_json::json!([config, manifest, env!("CARGO_PKG_VERSION")]).to_string(),
+        );
+        Self {
+            config,
+            plan,
+            manifest,
+            fingerprint,
+        }
+    }
+}
+
 pub struct InputManager {
     inputs: Mutex<HashMap<String, Arc<LiveInput>>>,
     counters: Mutex<HashMap<String, InputCounter>>,
@@ -181,8 +208,8 @@ pub struct InputManager {
     user_id: Mutex<String>,
     configured_user_id: Mutex<String>,
     content_policy: Mutex<AgentsConfig>,
-    mask_config: Mutex<MaskConfig>,
-    mask_plan: Mutex<MaskPlan>,
+    mask: Mutex<ActivityMask>,
+    sdk_hook_history_privacy: OnceLock<String>,
     trace_linker: Mutex<Option<Arc<dyn UpstreamTrace>>>,
     intercept_linker: Mutex<Option<Arc<InterceptResultLinker>>>,
     multimodal: Mutex<Option<Arc<MultimodalProcessor>>>,
@@ -193,6 +220,12 @@ pub struct InputManager {
 
 impl InputManager {
     pub fn new() -> Self {
+        let mask = MaskConfig {
+            mode: MaskMode::None,
+            types: Vec::new(),
+            replacement_mode: Some(MaskReplacementMode::Placeholder),
+        };
+        let plan = load_mask_plan(&mask);
         Self {
             inputs: Mutex::new(HashMap::new()),
             counters: Mutex::new(HashMap::new()),
@@ -204,16 +237,8 @@ impl InputManager {
             user_id: Mutex::new(String::new()),
             configured_user_id: Mutex::new(String::new()),
             content_policy: Mutex::new(AgentsConfig::new()),
-            mask_config: Mutex::new(MaskConfig {
-                mode: MaskMode::None,
-                types: Vec::new(),
-                replacement_mode: Some(MaskReplacementMode::Placeholder),
-            }),
-            mask_plan: Mutex::new(load_mask_plan(&MaskConfig {
-                mode: MaskMode::None,
-                types: Vec::new(),
-                replacement_mode: Some(MaskReplacementMode::Placeholder),
-            })),
+            mask: Mutex::new(ActivityMask::new(mask, plan)),
+            sdk_hook_history_privacy: OnceLock::new(),
             trace_linker: Mutex::new(None),
             intercept_linker: Mutex::new(None),
             multimodal: Mutex::new(None),
@@ -262,8 +287,42 @@ impl InputManager {
     }
 
     pub fn set_mask_config(&self, config: MaskConfig) {
-        *self.mask_plan.lock().expect("plan") = load_mask_plan(&config);
-        *self.mask_config.lock().expect("mask") = config;
+        let plan = load_mask_plan(&config);
+        *self.mask.lock().expect("mask") = ActivityMask::new(config, plan);
+    }
+
+    pub(crate) fn set_hosted_mask_manifest(
+        &self,
+        config: MaskConfig,
+        manifest: &serde_json::Value,
+    ) -> Result<(), String> {
+        let plan = mask_plan_from_manifest(&config, manifest)?;
+        *self.mask.lock().expect("mask") = ActivityMask::new(config, plan);
+        Ok(())
+    }
+
+    pub(super) fn mask_rule_manifest(&self) -> serde_json::Value {
+        self.mask.lock().expect("mask").manifest.clone()
+    }
+
+    pub(crate) fn set_sdk_hook_history_privacy(&self, agent: &str) {
+        let capture = self.capture_message_policy(agent);
+        self.sdk_hook_history_privacy
+            .set(self.hook_history_privacy_id(capture))
+            .expect("SDK source manager privacy is configured once");
+    }
+
+    fn capture_message_policy(&self, agent: &str) -> Option<bool> {
+        self.content_policy
+            .lock()
+            .expect("content policy")
+            .get(agent)
+            .and_then(|config| config.capture_message_content)
+    }
+
+    fn hook_history_privacy_id(&self, capture: Option<bool>) -> String {
+        let mask = self.mask.lock().expect("mask");
+        format!("{}:{}", capture != Some(false), mask.fingerprint)
     }
 
     pub(crate) fn trace_linker(&self) -> Option<Arc<dyn UpstreamTrace>> {
@@ -509,13 +568,17 @@ impl InputManager {
     }
 
     pub async fn start_input(&self, id: &str) {
+        let _ = self.start_input_checked(id).await;
+    }
+
+    pub(super) async fn start_input_checked(&self, id: &str) -> Result<(), String> {
         let input = self.inputs.lock().expect("inputs").get(id).cloned();
         let Some(input) = input else {
             logger("InputManager").warn(
                 "cannot start unknown input",
                 Some(&fields(serde_json::json!({ "id": id }))),
             );
-            return;
+            return Err("unknown input".into());
         };
         if let Some(gate) = self.queues.lock().expect("queues").get(id) {
             let mut slot = gate.cancellation.lock().expect("cancellation");
@@ -528,12 +591,13 @@ impl InputManager {
                 "input start failed",
                 Some(&fields(serde_json::json!({ "id": id, "error": err }))),
             );
-            return;
+            return Err(err);
         }
         logger("InputManager").info(
             "input started",
             Some(&fields(serde_json::json!({ "id": id }))),
         );
+        Ok(())
     }
 
     pub async fn stop_input(&self, id: &str) {
@@ -718,13 +782,33 @@ impl InputManager {
                 counter.start_time = format_time(Local::now());
             }
         }
-        let trace_linker = self.trace_linker.lock().expect("trace").clone();
-        if let Some(linker) = trace_linker {
+        let trace_linker = self.trace_linker();
+        if let Some(linker) = &trace_linker {
             linker.stamp(&mut entries).await;
+        }
+        if self.sdk_hook_history_privacy.get().is_some() {
+            for entry in &mut entries {
+                entry.extra.insert(
+                    NATIVE_SESSION_FIELD.into(),
+                    serde_json::Value::String(entry.session_id.clone()),
+                );
+                entry.extra.insert(
+                    TRACE_CHECKED_FIELD.into(),
+                    serde_json::Value::Bool(trace_linker.is_some()),
+                );
+            }
         }
         self.apply_identity(&mut entries);
         self.enrich_turn_boundaries_fail_open(&mut entries);
-        let expanded = expand_agent_input_events(self.apply_policy_and_mask(entries));
+        let mut expanded = expand_agent_input_events(self.apply_policy_and_mask(entries));
+        if let Some(policy_id) = self.sdk_hook_history_privacy.get() {
+            for entry in &mut expanded {
+                entry.extra.insert(
+                    PRIVACY_POLICY_FIELD.into(),
+                    serde_json::Value::String(policy_id.clone()),
+                );
+            }
+        }
         logger("InputManager").info(
             "dispatching entries",
             Some(&fields(
@@ -807,11 +891,13 @@ impl InputManager {
                 }
             }
         }
-        let plan = self.mask_plan.lock().expect("plan").clone();
+        let (plan, config) = {
+            let mask = self.mask.lock().expect("mask");
+            (mask.plan.clone(), mask.config.clone())
+        };
         if plan.rules.is_empty() && plan.pii_types.is_empty() {
             return entries;
         }
-        let config = self.mask_config.lock().expect("mask").clone();
         entries
             .into_iter()
             .map(|entry| {
@@ -849,6 +935,12 @@ impl InputManager {
             .clone()
             .ok_or("Pilot output is not configured")?;
         let codex = matches!(input_id, "codex-transcript" | "codex-aborted-turn");
+        let hook_history = PROFILES.iter().find(|profile| profile.listener == input_id);
+        if let Some(profile) = hook_history {
+            return self
+                .accept_hook_history_activity(input_id, profile.agent, rows)
+                .await;
+        }
         if !codex {
             if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
                 return result;
@@ -869,15 +961,14 @@ impl InputManager {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| "invalid SDK activity JSON")?;
         let encoded = if codex {
-            // Only the full shell is authorized to inspect a Codex workspace
-            // and join its runs to upstream ACP traces.
+            // The full shell owns workspace inspection and upstream correlation for Codex.
             let mut changed = enrich_canonical_entries_with_git(&mut entries).await;
             if let Some(linker) = self.trace_linker() {
                 linker.stamp(&mut entries).await;
                 changed = true;
             }
-            // Journaling already supplied canonical fields. Keep audit rows on
-            // typed delivery because they may depend on the typed defaults.
+            // Canonical Codex rows can use the raw dispatch fast path once
+            // workspace and audit defaults have been accounted for.
             if !changed && entries.iter().all(|row| row.get("event.kind").is_none()) {
                 if let Some(result) = self.forward_sdk_rows(input_id, &*flusher, rows).await {
                     return result;
@@ -891,6 +982,120 @@ impl InputManager {
         } else {
             rows.iter().map(|row| row.to_vec()).collect()
         };
+        self.accept_sdk_batch(input_id, entries, encoded).await
+    }
+
+    async fn accept_hook_history_activity(
+        &self,
+        input_id: &str,
+        agent: &str,
+        rows: &[&[u8]],
+    ) -> Result<(), String> {
+        let mut entries = rows
+            .iter()
+            .map(|row| serde_json::from_slice::<AgentActivityEntry>(row))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| "invalid SDK activity JSON")?;
+        let policy_id = self.hook_history_privacy_id(self.capture_message_policy(agent));
+        {
+            let mut policy = self.workspace_policy.lock().expect("policy");
+            if policy.enabled() {
+                // Exclusion can be learned while rows wait for delivery. Use
+                // native-session keys even after the SDK rewrites identity.
+                let maps = entries
+                    .iter()
+                    .map(|entry| serde_json::to_value(entry).and_then(serde_json::from_value))
+                    .collect::<Result<Vec<serde_json::Map<String, serde_json::Value>>, _>>()
+                    .map_err(|error| error.to_string())?;
+                let allows =
+                    |policy: &mut WorkspacePolicy,
+                     map: &serde_json::Map<String, serde_json::Value>| {
+                        let session = map
+                            .get(NATIVE_SESSION_FIELD)
+                            .and_then(serde_json::Value::as_str);
+                        policy.allows_with_native_session(map, agent, session)
+                    };
+                for map in &maps {
+                    allows(&mut policy, map);
+                }
+                entries = entries
+                    .into_iter()
+                    .zip(maps)
+                    .filter(|(_, map)| allows(&mut policy, map))
+                    .map(|(entry, _)| entry)
+                    .collect();
+            }
+        }
+        if entries.is_empty() {
+            return Ok(());
+        }
+        enrich_canonical_entries_with_git(&mut entries).await;
+        if let Some(linker) = self.trace_linker() {
+            // Older queued rows did not pass the SDK's native-identity trace
+            // association step. Try to recover their context before delivery.
+            let mut slots = entries
+                .iter_mut()
+                .filter(|entry| {
+                    entry
+                        .extra
+                        .get(TRACE_CHECKED_FIELD)
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+                })
+                .collect::<Vec<_>>();
+            let mut pending = slots
+                .iter_mut()
+                .map(|slot| std::mem::take(*slot))
+                .collect::<Vec<_>>();
+            if !pending.is_empty() {
+                let exported_sessions = pending
+                    .iter_mut()
+                    .map(|entry| {
+                        entry
+                            .extra
+                            .get(NATIVE_SESSION_FIELD)
+                            .and_then(serde_json::Value::as_str)
+                            .map(|native| {
+                                std::mem::replace(&mut entry.session_id, native.to_owned())
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                linker.stamp(&mut pending).await;
+                for ((slot, mut entry), exported) in
+                    slots.into_iter().zip(pending).zip(exported_sessions)
+                {
+                    if let Some(session) = exported {
+                        entry.session_id = session;
+                    }
+                    *slot = entry;
+                }
+            }
+        }
+        // Recheck queued rows after a policy change. Rows already prepared by
+        // this policy keep their IDs and avoid applying the same mask twice.
+        let entries = entries
+            .into_iter()
+            .map(|mut entry| {
+                let stamp = entry.extra.remove(PRIVACY_POLICY_FIELD);
+                entry.extra.remove(NATIVE_SESSION_FIELD);
+                entry.extra.remove(TRACE_CHECKED_FIELD);
+                if entry.user_id.is_empty() {
+                    self.apply_identity(std::slice::from_mut(&mut entry));
+                }
+                if stamp.as_ref().and_then(serde_json::Value::as_str) == Some(policy_id.as_str()) {
+                    entry
+                } else {
+                    self.apply_policy_and_mask(vec![entry])
+                        .pop()
+                        .expect("one prepared activity")
+                }
+            })
+            .collect::<Vec<_>>();
+        let encoded = entries
+            .iter()
+            .map(serde_json::to_vec)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
         self.accept_sdk_batch(input_id, entries, encoded).await
     }
 
@@ -2066,6 +2271,187 @@ mod migration_remaining_contracts {
             std::fs::read_to_string(root.path().join(format!("{customer}.jsonl"))).unwrap(),
             decoy
         );
+    }
+
+    #[tokio::test]
+    async fn sdk_hook_history_replays_native_trace_context_after_linking_is_enabled() {
+        use crate::core::{CorrelationStore, TraceLinker};
+        let root = tempfile::tempdir().unwrap();
+        let session = "opencode-fixture-session";
+        let trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+        let span = "00f067aa0ba902b7";
+        let context = json!({
+            "type": "session",
+            "sessionId": session,
+            "traceparent": format!("00-{trace}-{span}-01"),
+        });
+        std::fs::write(
+            root.path().join(format!("{session}.jsonl")),
+            format!("{context}\n"),
+        )
+        .unwrap();
+        let manager = InputManager::new();
+        register(&manager, "opencode-log", "opencode");
+        manager.set_trace_linker(Arc::new(TraceLinker::with_retry(
+            CorrelationStore::new(root.path()),
+            0,
+            0,
+        )));
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut input = entry("opencode-input", AgentEventName::Other);
+        input.agent_type = "opencode".into();
+        input.session_id = "invocation-session".into();
+        input.turn_id = Some(format!("{session}:turn"));
+        input.trace_id = Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        input.input_messages_delta = Some(
+            json!([{"role":"user","parts":[{"type":"text","content":"synthetic OpenCode input"}]}]),
+        );
+        input
+            .extra
+            .insert(NATIVE_SESSION_FIELD.into(), json!(session));
+        input.extra.insert(TRACE_CHECKED_FIELD.into(), json!(false));
+        input.extra.insert(
+            PRIVACY_POLICY_FIELD.into(),
+            json!(manager.hook_history_privacy_id(None)),
+        );
+        let row = serde_json::to_vec(&input).unwrap();
+
+        manager
+            .accept_sdk_activity("opencode-log", &[&row])
+            .await
+            .unwrap();
+
+        let rows = flattened(&sink);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].event_id, "opencode-input");
+        assert_eq!(rows[0].session_id, "invocation-session");
+        assert_eq!(rows[0].trace_id.as_deref(), Some(trace));
+        assert_eq!(rows[0].parent_span_id.as_deref(), Some(span));
+        assert!(!rows[0].extra.contains_key(NATIVE_SESSION_FIELD));
+        assert!(!rows[0].extra.contains_key(TRACE_CHECKED_FIELD));
+    }
+
+    #[tokio::test]
+    async fn sdk_history_handoff_applies_current_privacy_and_preserves_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        let public = directory.path().join("public");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&public).unwrap();
+        let manager = InputManager::new();
+        register(&manager, "opencode-log", "opencode");
+        let excluded_workspaces = [private.to_string_lossy().into_owned()];
+        let state = directory
+            .path()
+            .join("workspace-state")
+            .to_string_lossy()
+            .into_owned();
+        manager.set_workspace_policy(
+            WorkspacePolicy::new(&excluded_workspaces, Some(state.clone())).unwrap(),
+        );
+        // A later source poll learns this exclusion after an earlier batch
+        // has already been committed to a temporarily undeliverable outbox.
+        let mut sdk_policy = WorkspacePolicy::new(&excluded_workspaces, Some(state)).unwrap();
+        let excluded_record = json!({"gen_ai.agent.type":"opencode",
+            "gen_ai.session.id":"native-private", "workspace.path":private});
+        assert!(!sdk_policy.allows(excluded_record.as_object().unwrap(), "opencode"));
+        manager.set_agents_config(
+            &serde_json::from_value(json!({"opencode":{"captureMessageContent":false}})).unwrap(),
+        );
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut retained = entry("retained", AgentEventName::LlmResponse);
+        retained.agent_type = "opencode".into();
+        retained.session_id = "public-session".into();
+        retained.workspace_path = Some(public.to_string_lossy().into_owned());
+        retained.output_messages = Some(json!([{"role":"assistant","content":"retained text"}]));
+        let previous_privacy = manager.hook_history_privacy_id(None);
+        retained.extra.insert(
+            PRIVACY_POLICY_FIELD.into(),
+            serde_json::Value::String(previous_privacy),
+        );
+        let mut excluded = retained.clone();
+        excluded.event_id = "excluded".into();
+        excluded.session_id = "invocation-session".into();
+        excluded.workspace_path = None;
+        excluded
+            .extra
+            .insert(NATIVE_SESSION_FIELD.into(), json!("native-private"));
+        excluded.extra.insert(
+            PRIVACY_POLICY_FIELD.into(),
+            json!(manager.hook_history_privacy_id(Some(false))),
+        );
+        let mut prepared = retained.clone();
+        prepared.event_id = "prepared".into();
+        prepared.session_id = "invocation-session".into();
+        prepared
+            .extra
+            .insert(NATIVE_SESSION_FIELD.into(), json!("native-public"));
+        prepared.output_messages = None;
+        prepared.extra.insert(
+            PRIVACY_POLICY_FIELD.into(),
+            serde_json::Value::String(manager.hook_history_privacy_id(Some(false))),
+        );
+        let retained = serde_json::to_vec(&retained).unwrap();
+        let excluded = serde_json::to_vec(&excluded).unwrap();
+        let prepared = serde_json::to_vec(&prepared).unwrap();
+
+        manager
+            .accept_sdk_activity("opencode-log", &[&retained, &excluded, &prepared])
+            .await
+            .unwrap();
+
+        let rows = flattened(&sink);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].event_id, "retained");
+        assert_eq!(rows[1].event_id, "prepared");
+        assert!(rows.iter().all(|row| row.output_messages.is_none()));
+        assert!(rows
+            .iter()
+            .all(|row| !row.extra.contains_key(PRIVACY_POLICY_FIELD)
+                && !row.extra.contains_key(NATIVE_SESSION_FIELD)));
+    }
+
+    #[tokio::test]
+    async fn sdk_history_rechecks_effective_mask_with_unchanged_config() {
+        let manager = InputManager::new();
+        register(&manager, "opencode-log", "opencode");
+        let config = serde_json::from_value(json!({
+            "mode":"custom","types":["apiKey"],"replacementMode":"placeholder"
+        }))
+        .unwrap();
+        manager.set_mask_config(config);
+        let policy_before = manager.hook_history_privacy_id(None);
+        let config = manager.mask.lock().unwrap().config.clone();
+        manager.set_hosted_mask_manifest(config, &json!({"version":1,"rules":[{
+            "id":"local-only", "type":"apiKey","kind":"regex","replacement":"[LOCAL_MASKED]",
+            "prefilter":["private-fixture-"],"pattern":"private-fixture-[0-9]+"
+        },{
+            "id":"inert", "type":"apiKey","kind":"regex","replacement":"[INERT]",
+            "prefilter":[""],"pattern":"inert-value"
+        }]})).unwrap();
+        let manifest = manager.mask_rule_manifest();
+        assert!(crate::mask::compile_sensitive_rules(&manifest).is_ok());
+        assert_ne!(manager.hook_history_privacy_id(None), policy_before);
+        let sink = Sink::new();
+        manager.set_flusher(sink.clone());
+        let mut row = entry("queued", AgentEventName::LlmResponse);
+        row.agent_type = "opencode".into();
+        row.output_messages =
+            Some(json!([{"role":"assistant","content":"private-fixture-654321"}]));
+        row.extra
+            .insert(PRIVACY_POLICY_FIELD.into(), json!(policy_before));
+        let encoded = serde_json::to_vec(&row).unwrap();
+        manager
+            .accept_sdk_activity("opencode-log", &[&encoded])
+            .await
+            .unwrap();
+        let rows = flattened(&sink);
+        let exported = serde_json::to_string(&rows[0]).unwrap();
+        assert!(exported.contains("[LOCAL_MASKED]"));
+        assert!(!exported.contains("private-fixture-654321"));
+        assert!(!rows[0].extra.contains_key(PRIVACY_POLICY_FIELD));
     }
 
     #[tokio::test]

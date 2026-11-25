@@ -117,6 +117,34 @@ pub struct MaskPlan {
 }
 
 impl MaskPlan {
+    pub(crate) fn rule_manifest(&self) -> serde_json::Value {
+        let rules = self
+            .rules
+            .iter()
+            .map(|rule| {
+                let prefilter = if rule.prefilter.is_empty() {
+                    // The loader accepts an inert rule with a blank prefilter.
+                    serde_json::json!([""])
+                } else {
+                    serde_json::json!(rule.prefilter)
+                };
+                serde_json::json!({
+                    "id": rule.id,
+                    "type": rule.mask_type.as_str(),
+                    "kind": rule.kind.as_str(),
+                    "replacement": rule.replacement,
+                    "prefilter": prefilter,
+                    "pattern": rule.pattern,
+                    "flags": rule.flags,
+                    "beginPattern": rule.begin_pattern,
+                    "endPattern": rule.end_pattern,
+                    "schemes": rule.schemes,
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({"version": 1, "rules": rules})
+    }
+
     pub fn from_rules(rules: &[CompiledMaskRule]) -> Self {
         Self {
             rules: rules.to_vec(),

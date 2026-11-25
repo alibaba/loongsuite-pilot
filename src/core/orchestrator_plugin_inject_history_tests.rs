@@ -534,7 +534,7 @@ async fn source_l309_registered_sdk_keeps_the_actual_shared_pi_discovery_entry_e
     let orch = Arc::new(Orchestrator::new(config));
     *orch.deployment.lock().unwrap() = Some(Arc::clone(&fixture.manager));
     let store = Arc::new(StateStore::new(r.join("state.json")));
-    let entries = orch.register_all_inputs(&store).await;
+    let entries = orch.register_all_inputs(&r.to_string_lossy(), &store).await;
     let pi = entries
         .iter()
         .find(|e| e.id() == "pi-coding-agent-log")

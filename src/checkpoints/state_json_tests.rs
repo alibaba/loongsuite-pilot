@@ -135,3 +135,58 @@ async fn overflow_recovery_accepts_bom_and_does_not_change_normal_finite_state_l
         assert_eq!(store.revision(), 0);
     }
 }
+
+#[tokio::test]
+async fn history_handoff_requires_reloading_a_repaired_shared_checkpoint() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("checkpoint.json");
+    std::fs::write(&path, "not valid JSON").unwrap();
+    let store = StateStore::new(&path);
+    store.load().await;
+    assert!(store.load_for_handoff().await.is_err());
+
+    std::fs::write(&path, r#"{"other-agent:existing":{"lastOffset":48}}"#).unwrap();
+    assert!(store.check_for_handoff(None).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(None).await.unwrap();
+    assert_eq!(store.get_offset("other-agent:existing"), 48.0);
+}
+
+#[tokio::test]
+async fn exported_history_requires_the_authoritative_namespace_when_progress_exists() {
+    let listener = crate::sdk::hook_history::PROFILES[0].listener;
+    let validate: fn(&InputState) -> bool = crate::inputs::rest_support::has_usable_hook_log_cursor;
+    let requirement = Some((listener, validate));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("checkpoint.json");
+    let store = StateStore::new(&path);
+    store.load().await;
+    store.check_for_handoff(None).await.unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
+    let cursor = |offset| json!({"lastFile": "history-2026-10-01.jsonl", "lastOffset": offset});
+    for invalid in [
+        json!({"other-agent": cursor(48)}),
+        json!({(format!("{listener}:existing")): cursor(48)}),
+        json!({(listener): {}}),
+    ] {
+        std::fs::write(&path, invalid.to_string()).unwrap();
+        store.load_for_handoff().await.unwrap();
+        assert!(store.check_for_handoff(requirement).await.is_err());
+    }
+    std::fs::write(&path, json!({(listener): cursor(52)}).to_string()).unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(requirement).await.unwrap();
+    std::fs::write(&path, json!({(listener): cursor(63)}).to_string()).unwrap();
+    assert!(store.check_for_handoff(requirement).await.is_err());
+    store.load_for_handoff().await.unwrap();
+    store.check_for_handoff(requirement).await.unwrap();
+}

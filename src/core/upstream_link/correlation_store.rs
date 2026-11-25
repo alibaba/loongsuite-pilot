@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::utils::content_hash;
+use crate::utils::{content_hash, source_access};
 
 use super::super::{fields, logger};
 
@@ -148,7 +148,8 @@ impl CorrelationStore {
     }
 
     pub fn has_session(&self, session_id: &str) -> bool {
-        self.session_path(session_id).is_file()
+        let path = self.session_path(session_id);
+        check_correlation_path(&path).is_ok() && path.is_file()
     }
 
     pub fn prune_idle(&self, cutoff_ms: u128) -> usize {
@@ -165,6 +166,7 @@ fn load_state<'a>(
     session_id: &str,
 ) -> Option<&'a mut SessionState> {
     let path = dir.join(format!("{}.jsonl", safe_name(session_id)));
+    check_correlation_path(&path).ok()?;
     let meta = std::fs::metadata(&path).ok()?;
     let modified = meta.modified().ok();
     if states.get(session_id).is_some_and(|existing| {
@@ -173,7 +175,7 @@ fn load_state<'a>(
         states.get_mut(session_id).expect("state").last_access_ms = now_ms();
         return states.get_mut(session_id);
     }
-    let raw = match std::fs::read_to_string(&path) {
+    let raw = match read_correlation(&path, dir) {
         Ok(raw) => raw,
         Err(err) => {
             logger("correlation-store").warn(
@@ -258,9 +260,44 @@ fn load_state<'a>(
     states.get_mut(session_id)
 }
 
+fn check_correlation_path(path: &Path) -> io::Result<()> {
+    if source_access::current().is_some() {
+        source_access::private_path(path)?;
+        match source_access::check(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                source_access::check(path.parent().ok_or(error)?)?;
+            }
+            result => result?,
+        }
+    }
+    Ok(())
+}
+
+fn read_correlation(path: &Path, dir: &Path) -> io::Result<String> {
+    if source_access::current().is_none() {
+        return std::fs::read_to_string(path);
+    }
+    const MAX_BYTES: usize = 64 * 1024 * 1024;
+    check_correlation_path(path)?;
+    let file = source_access::open_under(path, dir)?;
+    let mut body = String::new();
+    file.take((MAX_BYTES + 1) as u64)
+        .read_to_string(&mut body)?;
+    if body.len() > MAX_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "correlation file too large",
+        ));
+    }
+    Ok(body)
+}
+
 impl CorrelationStore {
     fn claim_session(&self, session_id: &str) -> bool {
         let path = self.session_done_path(session_id);
+        if check_correlation_path(&path).is_err() {
+            return false;
+        }
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(mut file) => {
                 let _ = file.write_all(serde_json::json!({ "sessionId": session_id, "ts": chrono::Utc::now().to_rfc3339() }).to_string().as_bytes());
@@ -363,6 +400,9 @@ fn claim_turn(
         "{}.turn-context-{index}-{digest}.done",
         safe_name(session_id)
     ));
+    if check_correlation_path(&marker).is_err() {
+        return (false, None);
+    }
     let result = (|| -> std::io::Result<()> {
         let mut temporary = tempfile::NamedTempFile::new_in(dir)?;
         let owner = turn_id
@@ -379,9 +419,9 @@ fn claim_turn(
     match result {
         Ok(()) => (true, turn_id.map(str::to_owned)),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let owner = std::fs::read(&marker)
+            let owner = read_correlation(&marker, dir)
                 .ok()
-                .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
                 .and_then(|value| {
                     value
                         .get("turnId")
