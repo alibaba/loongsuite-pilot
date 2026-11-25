@@ -60,6 +60,25 @@ built-in Agent because both use the same high-level SDK. Direct `pi-agent-core`
 usage, in-memory settings, and custom resource loaders that ignore PI
 extensions are outside this registration contract.
 
+## Strands Harness Python SDK
+
+Explicitly register the bundled Python plugin in a Strands application. It observes the SDK's invocation, model, and tool callbacks and publishes completed turns to the local Pilot data directory. Pilot reads those records through its existing event, privacy, and trace pipeline.
+
+Add `assets/plugins/strands-harness` from the Pilot installation package to the application's Python module path. Pass the application's session identifier and actual model provider.
+
+```python
+from loongsuite_pilot_strands import PilotStrandsPlugin
+from strands_harness import create_harness
+
+session_id = "my-strands-session"
+pilot = PilotStrandsPlugin(session_id=session_id, provider="qwen")
+agent = create_harness(model=model, session={"id": session_id}, plugins=[pilot])
+```
+
+Run the application and collector as the same user and point them at the same data directory. Pilot discovers the plugin's log directory on the first completed turn and starts the input automatically. Use the usual `agents.strands-harness.enabled` setting to control collection. The plugin uses `LOONGSUITE_PILOT_DATA_DIR` or `~/.loongsuite-pilot` by default and supports an explicit `data_dir`. This path works with Strands SDK OTLP export disabled. Use `capture_content=False` to omit messages, instructions, and tool payloads from the source files.
+
+This version was tested with the Strands Python SDK 1.66.0 and Harness 0.5.0 for a single Agent and tools completed within its invocation. Register a separate plugin instance for each Agent. Completed turns are published at the invocation callback, so a process exit before that callback leaves the active turn in memory. TypeScript, automatic CLI setup, subagents, and background tools require additional integration.
+
 ## Required Pieces
 
 Every new agent integration should provide:

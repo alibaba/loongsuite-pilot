@@ -18,6 +18,8 @@ const MEBIBYTE = 1024 * 1024;
 
 export const OUTPUT_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
 export const RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES = 2 * 1024 * MEBIBYTE;
+const STRANDS_CONSUMED_SEGMENT_TARGET = 1536;
+const STRANDS_SEGMENT = /^strands-harness-\d{4}-\d{2}-\d{2}\.segment-\d{12}-[a-f0-9]{32}\.jsonl$/;
 export const OUTPUT_RETENTION_LARGE_FILE_THRESHOLD_BYTES = 512 * MEBIBYTE;
 export const OUTPUT_RETENTION_LARGE_FILE_DAYS = 2;
 export const OUTPUT_RETENTION_PRESSURE_MIN_KEEP_DAYS = 1;
@@ -215,12 +217,17 @@ export class LogRetentionService {
         if (await fs.realpath(dir) !== path.resolve(dir)) continue;
         const files = (await fs.readdir(dir)).filter(file =>
           file.startsWith(prefix + '-') && /\.jsonl$/.test(file));
+        const strandsSource = id === 'strands-harness' && prefix === id
+          && path.resolve(dir) === path.resolve(this.logsDir, id);
+        let strandsSegments = strandsSource ? files.filter(file => STRANDS_SEGMENT.test(file)).length : 0;
         let totalBytes = 0;
         for (const file of files) totalBytes += (await safeLstat(path.join(dir, file)))?.size ?? 0;
         for (const file of files.sort()) {
           const date = /-(\d{4}-\d{2}-\d{2})(?:-uid\d+)?(?:\.segment-\d{12}-[a-f0-9]{32})?\.jsonl$/.exec(file)?.[1];
           const expired = date !== undefined && date < dateCutoff(this.config.hookHistoryDays);
-          if ((pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
+          const immutableStrandsSegment = strandsSource && STRANDS_SEGMENT.test(file);
+          const strandsPressure = immutableStrandsSegment && strandsSegments > STRANDS_CONSUMED_SEGMENT_TARGET;
+          if (!strandsPressure && (pressureOnly || !expired) && totalBytes <= RAW_SOURCE_RETENTION_MAX_TOTAL_BYTES) continue;
           const base = file.replace(/\.segment-\d{12}-[a-f0-9]{32}(?=\.jsonl$)/, '');
           const fullPath = path.join(dir, file);
           // The same OS transaction gate as Node/Python raw writers.
@@ -237,7 +244,7 @@ export class LogRetentionService {
             const stat = await safeLstat(fullPath);
             if (!stat?.isFile() || offsets?.[file] !== stat.size
               || !matchesFileIdentity(identities?.[file], stat)) continue;
-            const active = await fs.readFile(path.join(dir, base + '.active'), 'utf8').catch(error => {
+            const active = immutableStrandsSegment ? undefined : await fs.readFile(path.join(dir, base + '.active'), 'utf8').catch(error => {
               if (error.code === 'ENOENT') return undefined;
               throw error;
             });
@@ -248,9 +255,10 @@ export class LogRetentionService {
             const dailyClosed = date !== undefined
               && ((!active && file === base) || (active === file && file !== base))
               && date < dateCutoff(2) && localDateString(new Date(stat.mtimeMs)) < dateCutoff(2);
-            if (!dailyClosed && !isPublishedSuccessor(file, base, active)) continue;
+            if (!immutableStrandsSegment && !dailyClosed && !isPublishedSuccessor(file, base, active)) continue;
             await fs.unlink(fullPath);
             deleted++;
+            if (immutableStrandsSegment) strandsSegments--;
             totalBytes -= stat.size;
             this.deletedBytes += stat.size;
           } finally {

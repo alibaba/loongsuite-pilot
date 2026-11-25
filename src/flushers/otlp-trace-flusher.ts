@@ -15,6 +15,7 @@ import {
   type EventLogRecord,
 } from '@loongsuite/otel-util-genai';
 import { planTurnStream } from './turn-stream.js';
+import { prepareStrandsSpanTiming } from './strands-harness-timing.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn, prepareIndependentTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
@@ -1617,6 +1618,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
     let grokMetadata: GrokConversionMetadata = { systemInstructions: [] };
     let openClawIdentity: OpenClawIdentityMetadata = {};
     let streamedExportSucceeded: boolean | undefined;
+    let applyStrandsTiming: ReturnType<typeof prepareStrandsSpanTiming> | undefined;
 
     try {
       try {
@@ -1645,6 +1647,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
           : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
+          : agentType === 'strands-harness' ? ['gen_ai.step.id', 'gen_ai.framework']
           : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
@@ -1702,6 +1705,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // tree construction. User-input "other" events (with
         // gen_ai.input.messages) keep their parent_span_id.
         const withCleanParents = stripIntraTraceParentSpanIds(sanitized);
+        if (agentType === 'strands-harness') applyStrandsTiming = prepareStrandsSpanTiming(withCleanParents);
         toolSpanIds.prepare(withCleanParents);
         llmSpanIds.prepare(withCleanParents);
         let result;
@@ -1714,7 +1718,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
           const prepared: PreparedConversion = agentType === 'codex' ? prepareCodexTurn(withCleanParents, { handler, idGenerator })
             : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? prepareQoderTurn(withCleanParents, { handler, idGenerator })
             : (agentType === 'hermes' || agentType === 'openclaw') ? prepareDelegatedTurn(withCleanParents, handler, idGenerator)
-            : agentType === 'trae-cn' ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
+            : (agentType === 'trae-cn' || agentType === 'strands-harness') ? prepareIndependentTurn(withCleanParents, handler, idGenerator)
               : { records: withCleanParents, handler, removedEntryCount: 0 };
           cleanup = prepared.cleanup;
           // Existing process-wide OTel env vars may still request content on
@@ -1739,6 +1743,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
               pending = [];
               pendingBytes = 0;
               const metadata = grokInstructionsApplied ? { ...grokMetadata, systemInstructions: [] } : grokMetadata;
+              applyStrandsTiming?.(batch);
               const exported = await this.exportConvertedSpans(agentType, serviceName, records, batch,
                 metadata, openClawIdentity, reasoning);
               if (batch.some(span => span.attributes['gen_ai.span.kind'] === 'LLM')) grokInstructionsApplied = true;
@@ -1808,6 +1813,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
       await provider.forceFlush();
       const spans = inMem.getFinishedSpans();
       inMem.reset();
+      applyStrandsTiming?.(spans);
       return await this.exportConvertedSpans(agentType, serviceName, records, spans, grokMetadata, openClawIdentity);
     } catch (err) {
       logger.error(`convert and export failed for ${agentType}`, { err: String(err) });

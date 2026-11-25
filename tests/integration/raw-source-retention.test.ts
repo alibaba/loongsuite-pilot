@@ -434,6 +434,27 @@ describe('raw source disk retention', () => {
     expect(await service.runCleanup()).toMatchObject({ deleted: 0, errors: 0 });
   });
 
+  it('reclaims a consumed immutable Strands segment and preserves an unread segment', async () => {
+    const sourceDir = path.join(root, 'logs', 'strands-harness');
+    await fs.mkdir(sourceDir);
+    const consumed = `strands-harness-${oldDate()}.segment-000000000001-${'a'.repeat(32)}.jsonl`;
+    const unread = `strands-harness-${oldDate()}.segment-000000000002-${'b'.repeat(32)}.jsonl`;
+    for (const name of [consumed, unread]) await fs.writeFile(path.join(sourceDir, name), '{}\n');
+    const stat = await fs.stat(path.join(sourceDir, consumed));
+    store.set('strands-harness', { extra: {
+      hookLogDir: sourceDir,
+      hookLogPrefix: 'strands-harness',
+      hookLogOffsets: { [consumed]: stat.size, [unread]: 0 },
+      hookLogIdentities: { [consumed]: `${stat.dev}:${stat.ino}:${stat.birthtimeMs}` },
+    } });
+    const service = new LogRetentionService(root, config, store);
+    expect(await service.runCleanup()).toMatchObject({ deleted: 0, errors: 0 });
+    await store.save();
+    expect(await service.runCleanup()).toMatchObject({ deleted: 1, errors: 0 });
+    expect(await fs.readdir(sourceDir)).toContain(unread);
+    await expect(fs.stat(path.join(sourceDir, consumed))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it.each(['cursor', 'qwen-work-cn'])('protects nested %s history before registration and until its cursor is durable', async family => {
     dir = path.join(root, 'logs', family, 'history');
     await fs.mkdir(dir, { recursive: true });

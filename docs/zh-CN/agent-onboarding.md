@@ -63,6 +63,30 @@ loongsuite-pilot agent unregister acme-code
 高层 SDK，该值与内置 Pi Agent 保持一致。直接使用 `pi-agent-core`、内存
 settings 或不会加载 PI extensions 的自定义 ResourceLoader 不在该注册能力的覆盖范围内。
 
+## Strands Harness Python SDK
+
+在现有 Strands 应用中显式注册 Pilot 的 Python 插件。插件通过 SDK 的调用、模型和工具生命周期回调观察进程内事件，将完成的轮次原子发布到 Pilot 数据目录。Pilot 使用同一套事件、内容策略和 Trace 输出管道。
+
+将安装包中的 `assets/plugins/strands-harness` 加入应用的 Python 模块路径，再传入应用实际使用的会话标识和模型提供商。下面的示例沿用应用已配置的百炼模型。
+
+```python
+from loongsuite_pilot_strands import PilotStrandsPlugin
+from strands_harness import create_harness
+
+session_id = "my-strands-session"
+pilot = PilotStrandsPlugin(session_id=session_id, provider="qwen")
+agent = create_harness(model=model, session={"id": session_id}, plugins=[pilot])
+```
+
+插件与 collector 在同一用户下运行并使用同一数据目录。首轮结束后，Pilot 会发现插件创建的
+`$LOONGSUITE_PILOT_DATA_DIR/logs/strands-harness/`，并自动启动采集。通过常规的
+`agents.strands-harness.enabled` 设置管理采集。安装在默认位置时，数据目录为
+`~/.loongsuite-pilot`。应用可通过 `data_dir` 显式指定共享数据目录。
+
+模型用量来自每次结束回调的原生消息元数据，工具按 SDK 的调用 ID 配对。采集依赖应用加载插件，本地日志路径无需配置 Strands OTLP exporter。通过插件参数 `capture_content=False` 可在源文件写入前省略消息、系统指令和工具正文。Pilot 的输出侧脱敏与内容配置继续生效。
+
+当前支持 Python SDK 1.66.0 / Harness 0.5.0 的单 Agent 调用和同步收口的并行工具。应用按 Agent 实例注册插件。完成回调前进程退出时，内存中的活动轮次随进程关闭。TypeScript、官方 CLI 的自动接入、子 Agent 和后台工具另需适配。
+
 ## 必要组成
 
 一个新的 Agent 集成通常需要：

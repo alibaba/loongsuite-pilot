@@ -53,6 +53,7 @@ export enum ClientType {
   OpenClaw = 'openclaw',
   Dsh = 'dsh',
   TraeCn = 'trae-cn',
+  StrandsHarness = 'strands-harness',
 
 }
 

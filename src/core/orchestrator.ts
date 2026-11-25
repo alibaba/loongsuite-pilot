@@ -73,6 +73,7 @@ import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-l
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
 import { TraeCnLogInput } from '../inputs/trae-cn-log/trae-cn-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
+import { StrandsHarnessInput } from '../inputs/strands-harness/strands-harness-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
@@ -1983,6 +1984,24 @@ export class Orchestrator extends EventEmitter {
         unavailableThreshold: 3,
       }),
     );
+
+    // --- Strands Harness (Python plugin JSONL) ---
+    const strandsLogDir = path.join(this.dataDir, 'logs', ClientType.StrandsHarness);
+    const strandsPollInterval = listenerCfg[ClientType.StrandsHarness]?.pollInterval;
+    const strandsInput = new StrandsHarnessInput({
+      stateStore: this.stateStore,
+      logDir: strandsLogDir,
+      pollIntervalMs: strandsPollInterval,
+    });
+    this.inputManager.registerInput(strandsInput);
+    entries.push(this.inputManager.buildDetectionEntry(strandsInput, {
+      // The producer creates its private log directory on the first completed turn.
+      watchPaths: [strandsLogDir, path.dirname(strandsLogDir)],
+      isAvailable: () => directoryExists(strandsLogDir),
+      enabled: () => this.isAgentGatedEnabled(strandsInput.agentType) &&
+        this.agentControlManager.resolveEnabled(strandsInput.id, listenerCfg[strandsInput.id]?.enabled ?? true),
+      pollIntervalMs: strandsPollInterval,
+    }));
 
     // --- WorkBuddy (Hook/file wakeups + local transcript polling fallback) ---
     const workBuddyInput = new WorkBuddyInput({

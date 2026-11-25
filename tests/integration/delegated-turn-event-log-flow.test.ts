@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
+import { SpanStatusCode } from '@opentelemetry/api';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { OtlpTraceFlusher, type TraceExporterLike } from '../../src/flushers/otlp-trace-flusher.js';
 import { transformHookRecord } from '../../src/inputs/base/hook-record-transform.js';
+import { buildCanonicalHookEntry } from '../../src/inputs/base/canonical-hook-record.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -34,6 +36,102 @@ function turn(agent: string, id: string, offset: number, child = false) {
     event('other', 5, { 'gen_ai.turn.end': true, 'agent.openclaw.hook': 'llm_output' }),
   ];
 }
+
+describe('Strands Harness trace identity', () => {
+  it.each([undefined, '0000000000000001'])('retains only a supplied upstream parent (%s)', async parent => {
+    const spans: ReadableSpan[] = [];
+    const exporter: TraceExporterLike = {
+      export(batch, callback) {
+        spans.push(...batch);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'strands-test',
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }],
+    }, undefined, () => exporter);
+    try {
+      const records = turn(ClientType.StrandsHarness, 'strands-turn', 0).map(record => ({
+        ...record,
+        ...(record['event.name'] === 'other' && parent ? { parent_span_id: parent } : {}),
+      }));
+      const entries = records.map(record => buildCanonicalHookEntry(record, ClientType.StrandsHarness));
+      await flusher.sendBatch(entries.filter(entry => entry !== null));
+      await flusher.flush();
+
+      const span = spans.find(item => item.attributes['gen_ai.span.kind'] === 'ENTRY');
+      expect(span?.spanContext().traceId).toBe(traceId);
+      expect(span?.parentSpanId).toBe(parent);
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+
+  it('exports each step identity and preserves sub-millisecond tool timing', async () => {
+    const spans: ReadableSpan[] = [];
+    const exporter: TraceExporterLike = {
+      export(batch, callback) {
+        spans.push(...batch);
+        callback({ code: 0 });
+      },
+      shutdown: async () => {},
+    };
+    const flusher = new OtlpTraceFlusher({
+      enabled: true,
+      protocol: 'http/protobuf',
+      serviceName: 'strands-timing-test',
+      endpoints: [{ name: 'test', endpoint: 'http://localhost:4318', headers: {} }],
+    }, undefined, () => exporter);
+    try {
+      const records = turn(ClientType.StrandsHarness, 'strands-timing', 0);
+      const firstRound = records.slice(0, -1);
+      const secondStepId = 'strands-timing:second';
+      const secondRound = records.slice(1, 3).map((record, index) => ({
+        ...record,
+        'event.id': `strands-timing-second-${index}`,
+        'gen_ai.step.id': secondStepId,
+        'gen_ai.response.id': 'second-llm',
+        time_unix_nano: String(1700000000006000000n + BigInt(index) * 1000000n),
+        ...(index === 1 ? { 'gen_ai.response.finish_reasons': ['stop'] } : {}),
+      }));
+      const turnEnd = { ...records[records.length - 1], time_unix_nano: '1700000000008000000' };
+      const entries = [...firstRound, ...secondRound, turnEnd].map(record => {
+        const event = record['event.name'];
+        return buildCanonicalHookEntry({
+          ...record,
+          'gen_ai.react.round': record['gen_ai.step.id'] === secondStepId ? 2 : 1,
+          ...(event === 'tool.call' ? { time_unix_nano: '1700000000003100000' } : {}),
+          ...(event === 'tool.result' ? {
+            time_unix_nano: '1700000000003450000',
+            'tool.result.status': 'error',
+            'error.type': 'SyntheticToolError',
+          } : {}),
+        }, ClientType.StrandsHarness);
+      });
+      await flusher.sendBatch(entries.filter(entry => entry !== null));
+      await flusher.flush();
+
+      const tool = spans.find(span => span.attributes['gen_ai.tool.call.id'] === 'spawn');
+      const steps = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+      expect(tool?.startTime).toEqual([1700000000, 3100000]);
+      expect(tool?.endTime).toEqual([1700000000, 3450000]);
+      expect(tool?.duration).toEqual([0, 350000]);
+      expect(tool?.status.code).toBe(SpanStatusCode.ERROR);
+      expect(tool?.attributes['error.type']).toBe('SyntheticToolError');
+      expect(steps.find(span => span.attributes['gen_ai.react.round'] === 1)?.endTime).toEqual(tool?.endTime);
+      expect(steps.map(span => span.attributes['gen_ai.step.id'])).toEqual(['strands-timing:step', secondStepId]);
+      for (const span of spans.filter(item => ['LLM', 'TOOL'].includes(String(item.attributes['gen_ai.span.kind'])))) {
+        const step = steps.find(item => item.spanContext().spanId === span.parentSpanId);
+        expect(step?.attributes['gen_ai.step.id']).toBe(span.attributes['gen_ai.step.id']);
+      }
+    } finally {
+      await flusher.shutdown();
+    }
+  });
+});
 
 describe.each(['hermes', 'openclaw'])('%s independently flushed child turns', agent => {
   it('retains a running child across collector restart and acknowledges its complete trace once', async () => {
