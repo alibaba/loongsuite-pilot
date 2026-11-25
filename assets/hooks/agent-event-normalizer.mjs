@@ -225,23 +225,31 @@ export function hashJson(value) {
   }
 }
 
-export function loadHookRuntimeConfig(dataDir) {
-  let configPath = process.env.AGENT_DATA_COLLECTION_CONFIG?.trim()
-    || path.join(dataDir || path.join(os.homedir(), '.loongsuite-pilot'), 'config.json');
+export function loadHookRuntimeConfig(dataDir, { fallbackToHome = false, configPath: resolvedConfigPath, implicitDefault = false } = {}) {
+  const explicitConfig = resolvedConfigPath ?? process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+  const homeConfigPath = path.join(os.homedir(), '.loongsuite-pilot', 'config.json');
+  let configPath = explicitConfig || (dataDir ? path.join(dataDir, 'config.json') : homeConfigPath);
   if (configPath === '~') configPath = os.homedir();
   else if (configPath.startsWith('~/') || (process.platform === 'win32' && configPath.startsWith('~\\'))) {
     configPath = path.join(os.homedir(), configPath.slice(2));
   }
+  const configPaths = [configPath];
+  if (!explicitConfig && fallbackToHome && path.resolve(configPath) !== path.resolve(homeConfigPath)) {
+    configPaths.push(homeConfigPath);
+  }
   let file = {};
   let policyAvailable = true;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, ''));
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed;
-    else policyAvailable = false;
-  } catch (error) {
-    // An absent default config uses the documented defaults. A failed read
-    // of a configured policy must not enable content for privacy-aware hooks.
-    policyAvailable = error.code === 'ENOENT' && !process.env.AGENT_DATA_COLLECTION_CONFIG?.trim();
+  for (const candidate of configPaths) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidate, 'utf-8').replace(/^\uFEFF/, ''));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) file = parsed;
+      else policyAvailable = false;
+    } catch (error) {
+      // Only an absent implicit config permits a fallback or the defaults.
+      if (error.code === 'ENOENT' && (!explicitConfig || implicitDefault)) continue;
+      policyAvailable = false;
+    }
+    break;
   }
 
   const envBool = (name, fallback) => {

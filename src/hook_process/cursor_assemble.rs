@@ -5406,7 +5406,7 @@ mod skill_config_history_contracts {
     use super::super::super::common::{Env, HookRequest};
     use super::*;
     #[test]
-    fn legacy_capture_setting_preserves_injected_skill_and_prompt_through_real_hook_pipeline() {
+    fn capture_setting_controls_skill_and_prompt_through_real_hook_pipeline() {
         for setting in [None, Some(false), Some(true)] {
             let dir = tempfile::tempdir().unwrap();
             let root = dir.path();
@@ -5499,6 +5499,21 @@ mod skill_config_history_contracts {
                 })
                 .collect();
             let serialized = serde_json::to_string(&records).unwrap();
+            if setting == Some(false) {
+                assert!(!serialized.contains(path));
+                assert!(!serialized.contains("private prompt"));
+                assert!(records
+                    .iter()
+                    .all(|r| r.get("gen_ai.input.messages").is_none()
+                        && r.get("gen_ai.tool.call.arguments").is_none()
+                        && r.get("gen_ai.output.messages").is_none()));
+                assert!(records
+                    .iter()
+                    .any(|r| r["gen_ai.tool.call.id"] == "ordinary-call"));
+                assert!(records.iter().any(|r| r["gen_ai.usage.input_tokens"] == 5));
+                assert_eq!(fs::read(&config_file).unwrap(), original_config);
+                continue;
+            }
             assert!(serialized.contains(path));
             assert!(serialized.contains("private prompt"));
             let call = records

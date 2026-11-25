@@ -10,6 +10,8 @@ pub(crate) mod codex;
 mod common;
 mod copilot;
 mod cursor;
+mod cursor_policy;
+pub(crate) use cursor_policy::{cursor_config_record, CONFIG_MARKER as CURSOR_CONFIG_MARKER};
 mod grok_build;
 mod kiro_cli;
 mod payload_decoder;
