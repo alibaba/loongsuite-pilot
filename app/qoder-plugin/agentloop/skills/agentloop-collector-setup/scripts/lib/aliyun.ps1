@@ -339,6 +339,27 @@ function Get-PilotLogs([string]$Profile, $Context, [string]$Query, [long]$Start,
     return (ConvertTo-JsonObject $res.Data "data" $logs 100)
 }
 
+function Get-DatasetSchema([string]$Profile, [string]$Space, [string]$Region, [string]$Dataset) {
+    # Return the CLI text so the schema object keeps its field names.
+    $res = Invoke-AliyunApi $Profile $Region @(
+        "agentloop", "get-dataset",
+        "--agent-space", $Space,
+        "--dataset-name", $Dataset
+    )
+    if ($null -eq $res.Data) {
+        if ($res.Err) { Fail $res.Err }
+        Fail "dataset schema is unavailable. Do not use the audit event schema or guess fields."
+    }
+    $names = @(Get-JsonPropertyNames $res.Data)
+    $schema = $res.Data.schema
+    $fieldNames = @()
+    if ($null -ne $schema) { $fieldNames = @(Get-JsonPropertyNames $schema) }
+    if (($names -notcontains "schema") -or ($fieldNames.Count -eq 0) -or -not $res.Text) {
+        Fail "dataset schema is missing. Do not use the audit event schema or guess fields."
+    }
+    return [string]$res.Text
+}
+
 function Invoke-DatasetQuery([string]$Profile, [string]$Space, [string]$Region, [string]$Dataset, [string]$Query, [long]$Start, [long]$End, [long]$Line, [long]$Offset) {
     # Return the CLI text. ConvertFrom-Json drops brackets on a one-item array.
     $res = Invoke-AliyunApi $Profile $Region @(

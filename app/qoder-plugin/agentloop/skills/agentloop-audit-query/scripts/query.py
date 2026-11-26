@@ -11,7 +11,7 @@ SETUP_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "agentloop-collector-s
 if str(SETUP_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
 
-from util.aliyun import execute_dataset_query, get_logs, get_space, list_spaces
+from util.aliyun import execute_dataset_query, get_dataset, get_logs, get_space, list_spaces
 from util.config_record import (
     DEFAULT_LOGSTORE,
     append_history,
@@ -156,6 +156,13 @@ def dataset_target(values):
     return values["agent_space"], values["region"], values["dataset"]
 
 
+def require_dataset_schema(profile, space, region, dataset):
+    data, err = get_dataset(profile, region, space, dataset)
+    if data is None:
+        fail(err or "dataset schema is missing. Do not use the audit event schema or guess fields.")
+    return data
+
+
 def query_dataset(profile, space, region, dataset, sql, start, end, line, offset):
     data, err = execute_dataset_query(profile, region, space, dataset, sql, start, end, line, offset)
     if data is None:
@@ -168,8 +175,10 @@ def run(argv):
     profile = require_profile()
     if values["dataset"]:
         space, region, dataset = dataset_target(values)
+        schema_doc = require_dataset_schema(profile, space, region, dataset)
         if not values["query"]:
-            fail("Missing --query. Search example: * . Stats example: * | SELECT count(*)")
+            print(json.dumps(schema_doc, ensure_ascii=False, indent=2))
+            return
         start, end = query_window(values)
         line, offset = parse_page(values)
         data = query_dataset(profile, space, region, dataset, values["query"], start, end, line, offset)

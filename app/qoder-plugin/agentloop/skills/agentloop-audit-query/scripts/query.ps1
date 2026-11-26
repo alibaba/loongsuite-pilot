@@ -124,7 +124,11 @@ $values = @{
 $profile = Require-Profile
 if ($values.dataset) {
     $target = Resolve-DatasetTarget $values
-    if (-not $values.query) { Fail "Missing --query. Search example: * . Stats example: * | SELECT count(*)" }
+    $schemaText = Get-DatasetSchema $profile $target[0] $target[1] $target[2]
+    if (-not $values.query) {
+        Write-Output $schemaText
+        exit 0
+    }
     $window = Get-QueryWindow $values
     $page = Get-QueryPage $values
     $data = Invoke-DatasetQuery $profile $target[0] $target[1] $target[2] $values.query $window[0] $window[1] $page[0] $page[1]

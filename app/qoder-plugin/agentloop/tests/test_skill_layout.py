@@ -581,6 +581,13 @@ function Invoke-AliyunApi { throw 'No real cloud calls' }
 
                     def fake_cli(profile, region, argv):
                         calls.append((profile, region, argv))
+                        if argv[:2] == ["agentloop", "get-dataset"]:
+                            return {
+                                "agentSpace": "demo-space",
+                                "datasetName": "demo_dataset",
+                                "regionId": "cn-test",
+                                "schema": {"model": {"type": "text"}},
+                            }, ""
                         return deepcopy(payload), ""
 
                     stdout = io.StringIO()
@@ -596,8 +603,9 @@ function Invoke-AliyunApi { throw 'No real cloud calls' }
                             "--from", "100", "--to", "200", "--line", "20", "--offset", "5", "--query", sql,
                         ])
                     self.assertEqual(state, before)
-                    self.assertEqual(len(calls), 1)
-                    profile, region, argv = calls[0]
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(calls[0][2][:2], ["agentloop", "get-dataset"])
+                    profile, region, argv = calls[1]
                     self.assertEqual((profile, region), ("alpha", "cn-test"))
                     self.assertEqual(argv[argv.index("--agent-space") + 1], "demo-space")
                     self.assertEqual(argv[argv.index("--dataset-name") + 1], "demo_dataset")
@@ -614,6 +622,72 @@ function Invoke-AliyunApi { throw 'No real cloud calls' }
                     self.assertEqual(history[0]["regionId"], "cn-test")
                     self.assertEqual(history[0]["slsProject"], "")
                     self.assertEqual(history[0]["slsLogstore"], "")
+
+    def test_dataset_schema_is_read_before_query_and_without_rebinding(self):
+        schema_doc = {
+            "agentSpace": "demo-space",
+            "datasetName": "demo_dataset",
+            "regionId": "cn-test",
+            "schema": {"model": {"type": "text"}, "total_tokens": {"type": "long"}},
+        }
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with self.subTest(layout=label), import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                with self.synthetic_profile_state(module) as (path, state):
+                    before = deepcopy(state)
+                    calls = []
+
+                    def fake_cli(profile, region, argv):
+                        calls.append(list(argv))
+                        if argv[:2] == ["agentloop", "get-dataset"]:
+                            return deepcopy(schema_doc), ""
+                        raise AssertionError("schema read must not query")
+
+                    stdout = io.StringIO()
+                    with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                            mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                            mock.patch.object(module, "append_history", side_effect=AssertionError("No history")), \
+                            mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                            contextlib.redirect_stdout(stdout):
+                        module.run(["--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset"])
+                    self.assertEqual(state, before)
+                    self.assertEqual(calls, [["agentloop", "get-dataset", "--agent-space", "demo-space", "--dataset-name", "demo_dataset"]])
+                    self.assertEqual(json.loads(stdout.getvalue())["schema"], schema_doc["schema"])
+
+    def test_dataset_query_stops_when_schema_cannot_be_read(self):
+        cases = [
+            (None, "Forbidden. No permission for get-dataset"),
+            ({"datasetName": "demo_dataset"}, ""),
+        ]
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                for data, err in cases:
+                    with self.subTest(layout=label, err=err or "missing"), self.synthetic_profile_state(module) as (path, state):
+                        before = deepcopy(state)
+                        calls = []
+
+                        def fake_cli(profile, region, argv, data=data, err=err):
+                            calls.append(argv[:2])
+                            if argv[:2] == ["agentloop", "get-dataset"]:
+                                return data, err
+                            raise AssertionError("query must not run without schema")
+
+                        stderr = io.StringIO()
+                        with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                                mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                                mock.patch.object(module, "append_history", side_effect=AssertionError("No history")), \
+                                mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                                contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as failure:
+                                module.run([
+                                    "--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset",
+                                    "--query", "SELECT model FROM demo_dataset",
+                                ])
+                        self.assertEqual(failure.exception.code, 1)
+                        self.assertEqual(state, before)
+                        self.assertEqual(calls, [["agentloop", "get-dataset"]])
+                        self.assertIn("schema" if not err else "Forbidden", stderr.getvalue())
 
     def test_incomplete_dataset_query_does_not_fall_back_to_logstore(self):
         cases = [
@@ -663,8 +737,12 @@ function Get-AgentSpace { throw 'No AgentSpace binding' }
                 f.write("""
 function Invoke-AliyunApi([string]$Profile, [string]$Region, [string[]]$CliArgs) {
     if ($Profile -cne 'alpha' -or $Region -cne 'cn-test') { throw 'Wrong dataset scope' }
-    Set-Content -LiteralPath $env:SKILL_LAYOUT_DATASET_TRACE -Value ($CliArgs -join "`n") -Encoding UTF8
-    $json = '{"requestId":"req-dataset","meta":{"progress":"Complete","count":1},"columns":["model"],"columnTypes":["text"],"rows":[["demo-model"]]}'
+    Add-Content -LiteralPath $env:SKILL_LAYOUT_DATASET_TRACE -Value (($CliArgs -join "`n") + "`n---`n") -Encoding UTF8
+    if ($CliArgs[1] -eq 'get-dataset') {
+        $json = '{"agentSpace":"demo-space","datasetName":"demo_dataset","regionId":"cn-test","schema":{"model":{"type":"text"}}}'
+    } else {
+        $json = '{"requestId":"req-dataset","meta":{"progress":"Complete","count":1},"columns":["model"],"columnTypes":["text"],"rows":[["demo-model"]]}'
+    }
     return @{ Data = ($json | ConvertFrom-Json); Err = ''; Text = $json }
 }
 function Get-PilotLogs { throw 'No GetLogs' }
