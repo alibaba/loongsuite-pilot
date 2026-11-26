@@ -612,6 +612,7 @@ export function transformDshRecord(
         'event.name': 'tool.result',
         'gen_ai.tool.name': name,
         'gen_ai.tool.call.id': callId,
+        'gen_ai.tool.success': typeof message.isError === 'boolean' ? !message.isError : undefined,
         'gen_ai.tool.call.result': toJsonValue([{
           role: 'tool',
           parts: toolParts,
