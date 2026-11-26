@@ -144,19 +144,53 @@ impl AgentPlan {
 
     pub fn namespace(&self) -> String {
         use sha2::{Digest, Sha256};
-        let mut bytes = serde_json::to_vec(&(
-            &self.agent,
-            &self.profile,
-            &self.sources,
-            &self.allowed_roots,
-        ))
-        .expect("source plan JSON");
+        // Standalone Qwen still checkpoints the same shared Hook history.
+        // Authorizing the canonical Flash Stop source only adds a way to
+        // produce rows in that history, not another independently read cursor.
+        // Keep the preceding package's namespace and any unacknowledged rows.
+        let flash_stop = self.standalone_qwen_flash_stop();
+        let sources: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|source| Some(*source) != flash_stop)
+            .collect();
+        let roots: Vec<_> = self
+            .allowed_roots
+            .iter()
+            .filter(|root| flash_stop.is_none_or(|source| source.path != **root))
+            .collect();
+        let mut bytes = serde_json::to_vec(&(&self.agent, &self.profile, sources, roots))
+            .expect("source plan JSON");
         if let Some(state) = &self.pilot_host {
             bytes.extend_from_slice(b"standalone-");
             bytes.extend_from_slice(self.agent.as_bytes());
             bytes.extend(serde_json::to_vec(&state.data_dir).expect("Pilot state directory"));
         }
         hex::encode(Sha256::digest(bytes))
+    }
+
+    fn standalone_qwen_flash_stop(&self) -> Option<&Source> {
+        if self.agent != "qwen-work-cn" || self.profile != "qwen_work_cn_trace_v1" {
+            return None;
+        }
+        let host = self.pilot_host.as_ref()?;
+        let shared_history = host.data_dir.join("logs/qwen-work-cn/history");
+        if !self
+            .sources
+            .iter()
+            .any(|s| s.kind == "hook_jsonl" && s.path == shared_history)
+        {
+            return None;
+        }
+        let projects = self.sources.iter().find(|s| {
+            s.kind == "transcript"
+                && s.id == "transcript"
+                && s.path.ends_with(".qwenworkcn/projects")
+        })?;
+        let flash = projects.path.parent()?.join("logs/hooks");
+        self.sources
+            .iter()
+            .find(|s| s.kind == "transcript" && s.id == "flash-transcript" && s.path == flash)
     }
 }
 #[derive(Clone)]
