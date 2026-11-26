@@ -1632,16 +1632,18 @@ export class Orchestrator extends EventEmitter {
 
     // --- Claude Code Log (OTel plugin JSONL) ---
     const claudeCodeLogDir = this.resolveClaudeCodeLogDir();
+    const claudeCodePendingStopsDir = ClaudeCodeLogInput.pendingStopsDir(this.dataDir);
     const claudeCodeLogInput = new ClaudeCodeLogInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: claudeCodeLogDir,
       pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(claudeCodeLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(claudeCodeLogInput, {
-        watchPaths: [claudeCodeLogDir],
-        isAvailable: async () => directoryExists(claudeCodeLogDir),
+        watchPaths: [claudeCodeLogDir, claudeCodePendingStopsDir],
+        isAvailable: async () => (await directoryExists(claudeCodeLogDir)) || directoryExists(claudeCodePendingStopsDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['claude-code-log']) &&
           this.agentControlManager.resolveEnabled(
             'claude-code-log',

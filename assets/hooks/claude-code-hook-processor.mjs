@@ -40,6 +40,7 @@ import {
   loadHookRuntimeConfig,
   resolveUserId,
   applyHookContentPolicy,
+  parseCaptureMessageContent,
 } from './agent-event-normalizer.mjs';
 
 import {
@@ -47,6 +48,11 @@ import {
   saveState,
   readAndDeleteChildState,
   withStateLock,
+  enqueueStop,
+  hashStopText,
+  hasPendingStop,
+  listPendingStops,
+  readPendingStop,
 } from './claude-code/state.mjs';
 import {
   buildBashUpdatedInput,
@@ -93,6 +99,14 @@ const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
   agentId: AGENT_ID,
   allowInvocationIdentity: true,
 });
+const RECORD_CONTEXT = {
+  resourceBaseFields: RESOURCE_BASE_FIELD_PATCH,
+  resourceFields: RESOURCE_ATTRIBUTE_FIELDS,
+  spanAttributes: SPAN_ATTRIBUTES,
+};
+const STOP_TRANSCRIPT_GRACE_MS = 60_000;
+const MAX_STOPS_PER_DRAIN = 12;
+const DRAIN_BUDGET_MS = 2500;
 // Retain recent completion tombstones to ignore delayed duplicate SubagentStop
 // events while keeping the persisted session state bounded.
 const FINALIZED_SUBAGENT_LIMIT = 128;
@@ -652,22 +666,66 @@ async function cmdTerminal(eventKind) {
     markToolPropagationConsumed(pilotDataDir(), sessionId);
   }
 
+  const stop = {
+    observedAt: Date.now(),
+    sessionId,
+    transcriptPath: typeof event.transcript_path === 'string' ? event.transcript_path : '',
+    cwd: typeof event.cwd === 'string' ? event.cwd : '',
+    promptId: typeof event.prompt_id === 'string' ? event.prompt_id : '',
+    stopReason: isFailure ? 'error' : (typeof event.stop_reason === 'string' && event.stop_reason || 'end_turn'),
+    replyHash: !isFailure && typeof event.last_assistant_message === 'string' && event.last_assistant_message.trim()
+      ? hashStopText(event.last_assistant_message)
+      : null,
+    context: {
+      ...RECORD_CONTEXT,
+      userId: resolveUserId({}, runtimeConfig),
+      contentOff: !parseCaptureMessageContent(runtimeConfig.agents[AGENT_ID]?.captureMessageContent),
+    },
+  };
+
   await withStateLock(sessionId, async () => {
     const state = loadState(sessionId);
-    if (!state.transcript_path && event.transcript_path) {
-      state.transcript_path = event.transcript_path;
-    }
-    if (event.cwd && typeof event.cwd === 'string') {
-      state.cwd = event.cwd;
-    }
-    state.stop_time = nowSec();
-    saveState(sessionId, state);
-
+    stop.transcriptPath ||= state.transcript_path || '';
+    const pending = hasPendingStop(pilotDataDir(), sessionId);
+    const hasReplyWitness = !event.stop_hook_active && stop.promptId && stop.replyHash
+      && path.isAbsolute(stop.transcriptPath);
+    let parsed;
     try {
+      if (!pending && hasReplyWitness && (!state.transcript_path || state.transcript_path === stop.transcriptPath)) {
+        await waitForTranscriptStable(stop.transcriptPath, state.transcript_offset || 0);
+        const receipt = readStopTranscript(state, stop);
+        if (matchesStopReply(receipt.turn?.llmCalls.at(-1), stop)) {
+          parsed = receipt.parsed;
+        } else if (!receipt.turn && wasCompletedStop(state, stop, receipt.parsed.sourceIdentity)) {
+          return;
+        }
+      }
+
+      if (pending || (hasReplyWitness && !parsed)) {
+        try {
+          enqueueStop(pilotDataDir(), stop);
+          return;
+        } catch (error) {
+          logHookError({
+            agentId: AGENT_ID, stage: 'enqueue_stop', errorType: 'enqueue_failed',
+            errorMessage: error?.code || error?.message || 'pending Stop write failed',
+          });
+          // A following Stop cannot step over a pending turn's cursor.
+          if (pending) return;
+        }
+      }
+
+      // An on-time transcript still produces its daily hook JSONL here. The
+      // collector's deferred reader is only needed when the snapshot is short.
+      state.transcript_path ||= stop.transcriptPath;
+      if (stop.cwd) state.cwd = stop.cwd;
+      state.stop_time = nowSec();
+      saveState(sessionId, state);
       await exportSession(
         state,
-        isFailure ? 'error' : (event.stop_reason || 'end_turn'),
-        typeof event.prompt_id === 'string' ? event.prompt_id : '',
+        stop.stopReason,
+        stop.promptId,
+        { parsed },
       );
       if (typeof state._next_transcript_offset === 'number') {
         state.transcript_offset = state._next_transcript_offset;
@@ -675,6 +733,11 @@ async function cmdTerminal(eventKind) {
       }
       state.events = [];
       state.stop_time = null;
+      if (parsed) {
+        state.transcript_identity = parsed.sourceIdentity;
+        state.last_completed_prompt_id = stop.promptId;
+        state.last_completed_reply_hash = stop.replyHash;
+      }
       saveState(sessionId, state);
     } catch (err) {
       logHookError({
@@ -693,6 +756,136 @@ async function cmdStop() {
 
 async function cmdStopFailure() {
   return cmdTerminal('stop-failure');
+}
+
+function matchesStopReply(call, stop) {
+  if (stop.stopReason === 'error') return Boolean(call?.api_error);
+  if (!call || call.api_error || call.stop_reason === 'tool_use' || call.declaredToolIds.length > 0) return false;
+  if (!stop.replyHash) return true;
+  const text = call.output_content.filter((part) => part.type === 'text')
+    .map((part) => part.text || '').join('');
+  return hashStopText(text) === stop.replyHash;
+}
+
+function wasCompletedStop(state, stop, sourceIdentity) {
+  return sourceIdentity && sourceIdentity === state.transcript_identity
+    && stop.promptId && stop.promptId === state.last_completed_prompt_id
+    && stop.replyHash && stop.replyHash === state.last_completed_reply_hash;
+}
+
+function readStopTranscript(state, stop) {
+  const samePath = !state.transcript_path || state.transcript_path === stop.transcriptPath;
+  const offset = samePath ? state.transcript_offset || 0 : 0;
+  const sourceIdentity = samePath ? state.transcript_identity : undefined;
+  const anonymousError = !stop.promptId && stop.stopReason === 'error';
+  const boundary = {
+    promptId: stop.promptId,
+    sourceIdentity,
+    firstPrompt: !stop.promptId && offset > 0 && Boolean(sourceIdentity),
+  };
+  let parsed = parseClaudeTranscript(stop.transcriptPath, offset, boundary);
+  const onlyTurn = parsed.turns.length === 1 ? parsed.turns[0] : undefined;
+  let turn = stop.promptId && parsed.sawStopPrompt
+    ? parsed.turns.find((candidate) => candidate.promptId === stop.promptId)
+    : (!stop.promptId || (parsed.unkeyedPromptCount === 1 && !onlyTurn?.promptId) ? onlyTurn : undefined);
+  // Preserve the next prompt's bytes even when it has no response yet.
+  // Only widen the legacy fallback at a committed cursor on the same
+  // source, and never search later prompts for matching reply text.
+  const verifiedCursor = offset > 0 && parsed.sourceIdentity === boundary.sourceIdentity;
+  const singleLegacyAtStart = offset === 0 && turn && !turn.promptId;
+  if (stop.promptId && stop.replyHash && !parsed.sawStopPrompt && parsed.unkeyedPromptCount &&
+    parsed.sourceIdentity && (verifiedCursor || singleLegacyAtStart)) {
+    const prefix = parseClaudeTranscript(stop.transcriptPath, offset, {
+      ...boundary, sourceIdentity: parsed.sourceIdentity, leadingUnkeyedOnly: true,
+    });
+    const first = prefix.turns[0];
+    if (prefix.turns.length === 1 && !first.promptId && (turn || matchesStopReply(first.llmCalls.at(-1), stop))) {
+      parsed = prefix;
+      turn = first;
+    }
+  }
+  if (anonymousError && !matchesStopReply(turn?.llmCalls.at(-1), stop)) turn = undefined;
+
+  // The synchronous reader has always recovered intervening turns on an
+  // established transcript. Keep that behavior up to the confirmed Stop.
+  const resumed = offset > 0 && parsed.nextOffset >= offset
+    && (!sourceIdentity || sourceIdentity === parsed.sourceIdentity);
+  if (turn && !(resumed && parsed.sawStopPrompt)) parsed = { ...parsed, turns: [turn] };
+  return { parsed, turn, samePath };
+}
+
+async function cmdDrainStops() {
+  const deadline = performance.now() + DRAIN_BUDGET_MS;
+  const blockedSessions = new Set();
+  let attempted = 0;
+  for (const item of listPendingStops(pilotDataDir())) {
+    if (attempted >= MAX_STOPS_PER_DRAIN || performance.now() >= deadline) break;
+    if (blockedSessions.has(item.key)) continue;
+    attempted++;
+    try {
+      const stop = readPendingStop(item);
+      if (!stop) {
+        logHookError({ agentId: AGENT_ID, stage: 'drain_stop', errorType: 'invalid_stop', errorMessage: item.name });
+        fs.rmSync(item.file, { force: true });
+        continue;
+      }
+      await withStateLock(stop.sessionId, async () => {
+        if (!fs.existsSync(item.file)) return;
+        const state = loadState(stop.sessionId);
+        if (state.last_completed_stop === item.name) {
+          fs.rmSync(item.file, { force: true });
+          return;
+        }
+
+        const { parsed, turn, samePath } = readStopTranscript(state, stop);
+        if (!turn && samePath && wasCompletedStop(state, stop, parsed.sourceIdentity)) {
+          fs.rmSync(item.file, { force: true });
+          return;
+        }
+        const ready = matchesStopReply(turn?.llmCalls.at(-1), stop);
+        if (!ready && Date.now() - stop.observedAt < STOP_TRANSCRIPT_GRACE_MS) {
+          // Yield this slot so a slow session cannot starve other sessions.
+          blockedSessions.add(item.key);
+          fs.utimesSync(item.file, new Date(), new Date());
+          return;
+        }
+
+        if (!ready) {
+          logHookError({
+            agentId: AGENT_ID, stage: 'drain_stop', errorType: 'transcript_incomplete',
+            errorMessage: turn ? 'exporting observed model calls' : 'no attributable model call',
+          });
+        }
+        let output;
+        if (turn) {
+          state.transcript_path = stop.transcriptPath;
+          state.cwd = stop.cwd || state.cwd;
+          state.transcript_identity = parsed.sourceIdentity;
+          output = await exportSession(state, stop.stopReason, stop.promptId, {
+            parsed,
+            context: stop.context,
+          });
+          state.transcript_offset = state._next_transcript_offset;
+          delete state._next_transcript_offset;
+        }
+        state.last_completed_stop = item.name;
+        state.last_completed_prompt_id = stop.promptId;
+        state.last_completed_reply_hash = stop.replyHash;
+        state.stop_time = null;
+        state.events = [];
+        saveState(stop.sessionId, state, { publish: output?.publish });
+        output?.reap();
+        fs.rmSync(item.file, { force: true });
+      });
+    } catch (error) {
+      blockedSessions.add(item.key);
+      logHookError({
+        agentId: AGENT_ID, stage: 'drain_stop', errorType: 'export_failed',
+        errorMessage: error?.code || error?.message || 'pending Stop processing failed',
+      });
+      try { fs.utimesSync(item.file, new Date(), new Date()); } catch {}
+    }
+  }
 }
 
 // ─── transcript 稳定性等待 ───
@@ -738,6 +931,14 @@ function cleanRecords(records, runtimeConfig) {
     applyHookContentPolicy(sanitizeObject(record) || record, runtimeConfig));
 }
 
+function withStopContentPolicy(runtimeConfig, recordContext) {
+  if (!recordContext?.contentOff) return runtimeConfig;
+  return {
+    ...runtimeConfig,
+    agents: { ...runtimeConfig.agents, [AGENT_ID]: { captureMessageContent: false } },
+  };
+}
+
 function extendBackgroundAgentResult(records, link, childRecords) {
   let childEnd = 0n;
   for (const record of childRecords) {
@@ -765,6 +966,7 @@ function buildSubagentRecords({
   cwd,
   intercept,
   attemptContext,
+  recordContext,
 }) {
   const childTranscriptPath = resolveSubagentTranscriptPath(parentTranscriptPath, link.agentId);
   if (!childTranscriptPath || !fs.existsSync(childTranscriptPath)) {
@@ -800,6 +1002,7 @@ function buildSubagentRecords({
       intercept,
       '',
       attemptContext,
+      recordContext,
     );
     childHash = childBuild.hash;
     for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
@@ -848,6 +1051,8 @@ async function finalizePendingSubagentTurns(state) {
   const remainingTurns = [];
 
   for (const pending of pendingTurns) {
+    const recordContext = pending.record_context;
+    const transcriptPath = pending.transcript_path || state.transcript_path;
     const records = Array.isArray(pending.records) ? [...pending.records] : [];
     const backgroundLinks = Array.isArray(pending.background_links)
       ? pending.background_links
@@ -860,25 +1065,26 @@ async function finalizePendingSubagentTurns(state) {
       }
       if (!completedSubagents[link.agentId]) continue;
       const childTranscriptPath = resolveSubagentTranscriptPath(
-        state.transcript_path,
+        transcriptPath,
         link.agentId,
       );
       if (childTranscriptPath) {
         await waitForTranscriptStable(childTranscriptPath, 0);
       }
       const childBuild = buildSubagentRecords({
-        parentTranscriptPath: state.transcript_path,
+        parentTranscriptPath: transcriptPath,
         parentSessionId: sessionId,
         parentTraceId: pending.trace_id,
         parentTurnId: pending.turn_id,
         link,
-        userId,
-        cwd,
+        userId: recordContext?.userId || userId,
+        cwd: pending.cwd || cwd,
         intercept,
         attemptContext,
+        recordContext,
       });
       extendBackgroundAgentResult(records, link, childBuild.records);
-      records.push(...cleanRecords(childBuild.records, runtimeConfig));
+      records.push(...cleanRecords(childBuild.records, withStopContentPolicy(runtimeConfig, recordContext)));
       for (const rid of childBuild.mergedResponseIds) mergedResponseIds.add(rid);
       for (const file of childBuild.consumedAttemptFiles) consumedAttemptFiles.add(file);
       link.completed = true;
@@ -913,23 +1119,7 @@ async function finalizePendingSubagentTurns(state) {
 
 // ─── Stop 主导出流程 ───
 
-async function exportSession(state, stopReason, stopPromptId = '') {
-  const runtimeConfig = loadHookRuntimeConfig(pilotDataDir());
-  const sessionId = state.session_id || 'unknown';
-
-  if (!state.transcript_path) {
-    logHookError({
-      agentId: AGENT_ID,
-      stage: 'export',
-      errorType: 'missing_transcript_path',
-      errorMessage: 'no transcript_path in state; cannot export',
-    });
-    return;
-  }
-
-  const transcriptPath = state.transcript_path;
-  const baseOffset = state.transcript_offset || 0;
-
+async function parseLegacyStop(transcriptPath, baseOffset) {
   // 先等 transcript 写入稳定，再判 EOF。StopFailure 常与 transcript 落盘竞态：
   // hook 先于 Claude Code flush 合成错误记录时 size 尚未越过 baseOffset，若在等待
   // 之前就按 size<=offset 短路 return，会丢掉终态的 retry/error span。
@@ -941,9 +1131,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   // otherwise consume the hook's entire execution budget).
   try {
     if (fs.statSync(transcriptPath).size <= baseOffset) {
-      state._next_transcript_offset = baseOffset;
-      reapStaleIntercept(sessionId);
-      return;
+      return { turns: [], nextOffset: baseOffset };
     }
   } catch (_) {
     // Keep the existing parser/error path for missing or transient files.
@@ -967,6 +1155,27 @@ async function exportSession(state, stopReason, stopPromptId = '') {
     await new Promise((r) => setTimeout(r, 200));
     await waitForTranscriptStable(transcriptPath, baseOffset);
   }
+  return parseResult;
+}
+
+async function exportSession(state, stopReason, stopPromptId = '', options) {
+  const deferredContext = options?.context;
+  const runtimeConfig = withStopContentPolicy(loadHookRuntimeConfig(pilotDataDir()), deferredContext);
+  const sessionId = state.session_id || 'unknown';
+
+  if (!state.transcript_path) {
+    logHookError({
+      agentId: AGENT_ID,
+      stage: 'export',
+      errorType: 'missing_transcript_path',
+      errorMessage: 'no transcript_path in state; cannot export',
+    });
+    return;
+  }
+
+  const transcriptPath = state.transcript_path;
+  const baseOffset = state.transcript_offset || 0;
+  const parseResult = options?.parsed ?? await parseLegacyStop(transcriptPath, baseOffset);
 
   if (!parseResult) {
     reapStaleIntercept(sessionId);
@@ -978,7 +1187,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
     return;
   }
 
-  const userId = resolveUserId({}, runtimeConfig);
+  const userId = deferredContext?.userId || resolveUserId({}, runtimeConfig);
   const allRecords = [];
   let logHash = INITIAL_HASH;
 
@@ -1034,7 +1243,12 @@ async function exportSession(state, stopReason, stopPromptId = '') {
       intercept,
       promptIdFallback,
       attemptContext,
+      deferredContext,
     );
+    if (deferredContext) {
+      const terminal = records.findLast((record) => record['event.name'] === 'llm.response');
+      if (terminal) terminal['gen_ai.turn.end'] = true;
+    }
     logHash = hash;
     if (turnMerged) {
       for (const rid of turnMerged) mergedResponseIds.add(rid);
@@ -1065,6 +1279,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
           cwd,
           intercept,
           attemptContext,
+          recordContext: deferredContext,
         });
         if (link.isBackground) {
           extendBackgroundAgentResult(turnRecords, link, childBuild.records);
@@ -1081,6 +1296,7 @@ async function exportSession(state, stopReason, stopPromptId = '') {
       state.pending_subagent_turns = state.pending_subagent_turns || [];
       state.pending_subagent_turns.push({
         created_at: nowSec(),
+        ...(deferredContext ? { transcript_path: transcriptPath, cwd, record_context: deferredContext } : {}),
         trace_id: parentRecord.trace_id,
         turn_id: parentRecord['gen_ai.turn.id'],
         records: cleanRecords(turnRecords, runtimeConfig),
@@ -1095,13 +1311,18 @@ async function exportSession(state, stopReason, stopPromptId = '') {
   state.turn_count = baseTurnCount + parseResult.turns.length;
 
   const cleaned = cleanRecords(allRecords, runtimeConfig);
-  writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
+  const publish = () => writeJsonlRecords(defaultLogDir(), AGENT_ID, cleaned);
 
   // Cleanup intercept files: delete what we merged + drop stragglers from
-  // earlier turns. Failure is silent — host process must not be impacted.
-  reapInterceptFiles(intercept, mergedResponseIds);
-  reapAttemptFiles(consumedAttemptFiles);
-  reapStaleIntercept(sessionId);
+  // earlier turns. A queued Stop retains this evidence until its cursor is saved.
+  const reap = () => {
+    reapInterceptFiles(intercept, mergedResponseIds);
+    reapAttemptFiles(consumedAttemptFiles);
+    reapStaleIntercept(sessionId);
+  };
+  if (deferredContext) return { publish, reap };
+  publish();
+  reap();
 }
 
 // ─── buildTurnRecords — 单 turn 的 JSONL 记录构造 (v2: tool_use_id 归属) ───
@@ -1235,6 +1456,7 @@ function buildTurnRecords(
   intercept,
   promptIdFallback = '',
   attemptContext = null,
+  recordContext = RECORD_CONTEXT,
 ) {
   const records = [];
   const turnId = `${sessionId}:t${turnIndex + 1}`;
@@ -1262,13 +1484,13 @@ function buildTurnRecords(
     'gen_ai.turn.id': turnId,
     'gen_ai.agent.type': AGENT_ID,
     'gen_ai.agent.id': sessionId,
-    ...RESOURCE_BASE_FIELD_PATCH,
+    ...recordContext.resourceBaseFields,
     'user.id': userId,
     ...(cwd ? { 'agent.claude-code.cwd': cwd } : {}),
     // SPAN_ATTRIBUTES first so structural/pipeline fields (e.g. resourceAttributes)
     // win over caller-supplied attributes; aligns with qoder's Object.assign order.
-    ...SPAN_ATTRIBUTES,
-    ...RESOURCE_ATTRIBUTE_FIELDS,
+    ...recordContext.spanAttributes,
+    ...recordContext.resourceFields,
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -1626,6 +1848,7 @@ const DISPATCH = {
   'stop-failure': cmdStopFailure,
   'subagent-start': cmdSubagentStart,
   'subagent-stop': cmdSubagentStop,
+  'drain-stops': cmdDrainStops,
 };
 
 const sub = process.argv[2] || 'unknown';

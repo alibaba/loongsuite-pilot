@@ -420,7 +420,7 @@ function addSourceAttributes(record, source, raw, mappedKeys) {
   }
 }
 
-function parseCaptureMessageContent(value) {
+export function parseCaptureMessageContent(value) {
   if (typeof value === 'boolean') return value;
   if (typeof value !== 'string') return true;
   const normalized = value.trim().toLowerCase();
