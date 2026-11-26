@@ -91,7 +91,7 @@ describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession (qoder-cn)', () =>
     });
   });
 
-  it('falls back to chat_record.extra.modelConfig.key when model_info missing model_key', async () => {
+  it('reads the configured model only as request evidence when the assistant model is absent', async () => {
     await insertRecord(dbPath, {
       request_id: 'req-2',
       session_id: 'sess-2',
@@ -104,8 +104,30 @@ describe.skipIf(!hasNodeSqlite())('readSqliteTokensForSession (qoder-cn)', () =>
       gmt_create: 1_780_000_001_000,
     });
 
-    const { rows } = await readSqliteTokensForSession('sess-2');
-    expect(rows[0].model).toBe('auto');
+    const { rows, requestModels } = await readSqliteTokensForSession('sess-2');
+    expect(rows[0].model).toBeUndefined();
+    expect(rows[0].inputTokens).toBe(1);
+    expect(requestModels).toEqual([
+      { messageId: 'msg-2', requestId: 'req-2', gmtCreate: 1_780_000_001_000, model: 'auto' },
+    ]);
+  });
+
+  it('reads the request model even without token usage', async () => {
+    await insertRecord(dbPath, {
+      request_id: 'req-model-only', session_id: 'sess-model-only',
+      extra: JSON.stringify({ modelConfig: { key: 'qfmodel' } }),
+    });
+    await insertRow(dbPath, {
+      id: 'msg-model-only', session_id: 'sess-model-only', request_id: 'req-model-only', role: 'assistant',
+      token_info: '', gmt_create: 1_780_000_001_001,
+    });
+
+    const result = await readSqliteTokensForSession('sess-model-only');
+    expect(result.rows).toEqual([]);
+    expect(result.requestModels).toEqual([
+      { messageId: 'msg-model-only', requestId: 'req-model-only', gmtCreate: 1_780_000_001_001, model: 'qfmodel' },
+    ]);
+    expect(result.matchedDbPath).toBe(dbPath);
   });
 
   it('filters out rows with both token counts zero', async () => {

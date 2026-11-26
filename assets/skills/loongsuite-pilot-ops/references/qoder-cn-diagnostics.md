@@ -156,6 +156,12 @@ sqlite3 "$DB" "
 
 预期 > 0。为 0 但用户确实用过 Qoder CN → 升级 Qoder CN 到最新版本（老版本 `token_info` 可能未写入）。
 
+模型维度要分别核对同一请求的 `chat_record.extra.modelConfig.key`（用户选择，
+包括 `auto`）和 assistant 行的 `chat_message.model_info.model_key`（客户端报告的模型）。
+即使该响应没有 Token，用得上的请求模型仍可采集；请求档位不等于响应模型。
+只有 `auto` 或 `custom_model` 等占位值时，不把它们当作已知的响应模型；
+`custom_model` 本身也不是具体的请求模型 ID。
+
 ### 3.3 游标状态
 
 ```bash

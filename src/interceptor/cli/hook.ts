@@ -10,6 +10,7 @@ import { parseOpenClawHookRequest, renderOpenClawBlock } from '../adapters/openc
 import { parseHookRequest, renderQoderBlock } from '../adapters/qoder.js';
 import { parseQwenWorkHookRequest, renderQwenWorkBlock } from '../adapters/qwenwork.js';
 import { wrapHostReason } from '../adapters/reason.js';
+import { parseWorkBuddyHookRequest, renderWorkBuddyBlock } from '../adapters/workbuddy.js';
 import { hostBlockDetail } from '../guardrail.js';
 import { interceptorRuntimePath } from '../paths.js';
 import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
@@ -44,7 +45,7 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
       recordFailOpen(deps, 'unknown', { rawText: raw }, 'failed to parse host stdin');
       return 0;
     }
-    payload = JSON.parse(raw) as Record<string, unknown>;
+    payload = JSON.parse(raw.replace(/^\uFEFF/, '')) as Record<string, unknown>;
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
       deps.log('failed to parse host stdin');
       recordFailOpen(deps, 'unknown', { rawText: raw }, 'failed to parse host stdin');
@@ -83,11 +84,7 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
     return 0;
   }
 
-  const request = surface === 'openclaw'
-    ? parseOpenClawHookRequest(payload, eventHint)
-    : surface === 'qwen-work-cn'
-      ? parseQwenWorkHookRequest(payload, eventHint)
-      : parseHookRequest(payload, surface, eventHint);
+  const request = parseHostRequest(surface, payload, eventHint);
   if (!request) {
     deps.log('skipping unsupported hook event');
     recordFailOpen(deps, eventName, input, 'unsupported hook event', surface);
@@ -167,6 +164,19 @@ function recordFailOpen(
 
 export { wrapHostReason } from '../adapters/reason.js';
 
+function parseHostRequest(
+  agent: HookRequest['agent'],
+  payload: Record<string, unknown>,
+  eventHint?: string,
+): HookRequest | null {
+  switch (agent) {
+    case 'openclaw': return parseOpenClawHookRequest(payload, eventHint);
+    case 'qwen-work-cn': return parseQwenWorkHookRequest(payload, eventHint);
+    case 'workbuddy': return parseWorkBuddyHookRequest(payload, eventHint);
+    default: return parseHookRequest(payload, agent, eventHint);
+  }
+}
+
 export function emitVerdict(
   request: HookRequest,
   action: string,
@@ -176,13 +186,12 @@ export function emitVerdict(
 ): void {
   if (action !== 'block') return;
   const detail = hostBlockDetail(message, reason);
-  writeStdout(
-    request.agent === 'openclaw'
-      ? renderOpenClawBlock(request, detail)
-      : request.agent === 'qwen-work-cn'
-        ? renderQwenWorkBlock(request, detail)
-        : renderQoderBlock(request, wrapHostReason(request.event, detail)),
-  );
+  switch (request.agent) {
+    case 'openclaw': return writeStdout(renderOpenClawBlock(request, detail));
+    case 'qwen-work-cn': return writeStdout(renderQwenWorkBlock(request, detail));
+    case 'workbuddy': return writeStdout(renderWorkBuddyBlock(request, detail));
+    default: return writeStdout(renderQoderBlock(request, wrapHostReason(request.event, detail)));
+  }
 }
 
 function flagValue(args: string[], name: string): string | undefined {

@@ -1,6 +1,8 @@
 export const SUPPORTED_HOOK_EVENTS = ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'] as const;
 export type HookEventName = (typeof SUPPORTED_HOOK_EVENTS)[number];
-export const INTERCEPTOR_AGENTS = ['qoder', 'qodercli', 'qoder-cn', 'qoderclicn', 'openclaw', 'qwen-work-cn'] as const;
+export const INTERCEPTOR_AGENTS = [
+  'qoder', 'qodercli', 'qoder-cn', 'qoderclicn', 'openclaw', 'qwen-work-cn', 'workbuddy',
+] as const;
 export type InterceptorAgent = (typeof INTERCEPTOR_AGENTS)[number];
 export type QoderSurface = 'qoder' | 'qodercli' | 'qoder-cn' | 'qoderclicn';
 export type VerdictAction = 'allow' | 'block';
@@ -19,12 +21,7 @@ export interface ManagedRuleMatch {
 }
 
 export function isInterceptorAgent(value: unknown): value is InterceptorAgent {
-  return value === 'qoder'
-    || value === 'qodercli'
-    || value === 'qoder-cn'
-    || value === 'qoderclicn'
-    || value === 'openclaw'
-    || value === 'qwen-work-cn';
+  return (INTERCEPTOR_AGENTS as readonly unknown[]).includes(value);
 }
 
 export interface HookRequest {

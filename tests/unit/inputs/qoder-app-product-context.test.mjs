@@ -7,13 +7,14 @@ import { publishQoderWakeup } from '../../../assets/hooks/qoder/hook-wakeup.mjs'
 
 let dataDir, transcript, collector, state;
 const epoch = Date.UTC(2026, 10, 1);
-function appendTurn(index, file = transcript, product) {
+function appendTurn(index, file = transcript, product, { selection, responseModel = 'synthetic-model' } = {}) {
   const rows = [
     { type: 'user', uuid: `prompt-${index}`, promptId: `prompt-${index}`, entrypoint: 'cli',
       ...(product === undefined ? {} : { businessIdentity: { product } }),
+      ...(selection === undefined ? {} : { businessModelKey: selection }),
       timestamp: new Date(epoch + index * 10000).toISOString(), message: { role: 'user', content: `prompt ${index}` } },
     { type: 'assistant', timestamp: new Date(epoch + index * 10000 + 1000).toISOString(),
-      message: { id: `response-${index}`, model: 'synthetic-model', role: 'assistant', stop_reason: 'end_turn',
+      message: { id: `response-${index}`, model: responseModel, role: 'assistant', stop_reason: 'end_turn',
         usage: { input_tokens: 10, output_tokens: 3 }, content: [{ type: 'text', text: `answer ${index}` }] } },
     { type: 'last-prompt', lastPrompt: `prompt ${index}` },
   ];
@@ -51,6 +52,18 @@ describe('Qoder product identity follows the owning native Turn', () => {
     appendTurn(0); wake('cli'); await collect();
     appendTurn(1, transcript, 'app');
     expect(types(await collect())).toEqual(['qoder-app']);
+  });
+
+  it('uses the current App prompt selection when assistant models are placeholders', async () => {
+    appendTurn(0, transcript, 'app', { selection: 'qmodel_latest', responseModel: 'auto' });
+    wake('app');
+    const first = await collect();
+    appendTurn(1, transcript, 'app', { selection: 'fast', responseModel: 'auto' });
+    wake('app');
+    const second = await collect();
+    const responses = [...first, ...second].filter(record => record['event.name'] === 'llm.response');
+    expect(responses.map(record => record['gen_ai.request.model'])).toEqual(['qmodel_latest', 'fast']);
+    expect(responses.every(record => record['gen_ai.response.model'] === undefined)).toBe(true);
   });
 
   it('uses the App Stop after native desktop metadata following last-prompt', async () => {

@@ -36,6 +36,30 @@ function responses(records) {
   return records.filter(record => record['event.name'] === 'llm.response');
 }
 
+describe('Qoder model selection in native prompts', () => {
+  it.each([
+    [{ businessModelKey: 'efficient' }, 'auto', 'efficient', undefined],
+    [{ businessIdentity: { product: 'app', model_key: 'qmodel_latest' } }, undefined, 'qmodel_latest', undefined],
+    [{ businessModelKey: 'auto' }, 'routed-model', 'auto', 'routed-model'],
+    [{}, 'auto', undefined, undefined],
+    [{ businessModelKey: 'dfmodel' }, 'custom_model', 'dfmodel', undefined],
+    [{ businessModelKey: 'custom_model' }, ' CUSTOM_MODEL ', undefined, undefined],
+  ])('keeps requested and reported models separate (%j)', (promptFields, reported, requested, responseModel) => {
+    const records = buildFrom([
+      { ...userRow('explain spans'), ...promptFields },
+      assistantRow('2026-08-03T09:22:26.000000Z', {
+        model: reported,
+        content: [{ type: 'text', text: 'done' }],
+        stop_reason: 'end_turn',
+      }),
+    ]);
+    const request = records.find(record => record['event.name'] === 'llm.request');
+    expect(request['gen_ai.request.model']).toBe(requested);
+    expect(responses(records)[0]['gen_ai.request.model']).toBe(requested);
+    expect(responses(records)[0]['gen_ai.response.model']).toBe(responseModel);
+  });
+});
+
 describe('qoder hook agent.client_request_id', () => {
   it('lifts usage.request_id off the row that closes the response', () => {
     const records = buildFrom([

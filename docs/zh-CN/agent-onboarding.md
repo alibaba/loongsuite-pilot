@@ -392,6 +392,16 @@ worker 退出前推迟接管，避免并发重放。保留旧 history JSONL 的�
 不要求删除已有 checkpoint 或会话文件。回滚不复用新字节游标，需按目标版本的
 原有历史恢复策略核对数据边界。
 
+### Claude Code 的 Stop 与 transcript 写入
+
+Stop 能在 transcript 中确认本轮的最终回复时，Hook 直接生成 JSONL。带
+`prompt_id` 和最终回复文本、但原生记录晚到时，Hook 保存轮次通知并保留读取
+位置。collector 确认回复后再导出并推进读取位置，会话退出后仍会处理已保存的
+通知。通知保存回复的哈希用于匹配，模型、Token 和工具明细仍取自原生记录。
+
+等待超时后，collector 会记录 `drain_stop / transcript_incomplete`，并导出
+能够归属到该轮的模型记录。诊断时可在 Claude Code Hook 的错误日志查询这个状态。
+
 ### Claude Agent SDK 的容器预加载
 
 SDK 直接启动 Claude Code 时不会经过交互式 shell 的 `claude` 函数。容器集成可以在

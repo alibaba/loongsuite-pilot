@@ -18,7 +18,7 @@ import { planTurnStream } from './turn-stream.js';
 import { prepareCodexTurn } from './codex-turn-converter.js';
 import { prepareDelegatedTurn, prepareIndependentTurn } from './delegated-turn-converter.js';
 import { DrainingInMemorySpanExporter } from './draining-in-memory-span-exporter.js';
-import { prepareQoderTurn, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
+import { prepareQoderTurn, QODER_RESPONSE_MODEL_RECORDED, QODER_TRANSCRIPT_AGENT_TYPES } from './qoder-turn-converter.js';
 import { expandTraeHistory, omitEmptyTraeModelSpans } from './trae-cn-history-spans.js';
 import { isAgentAuditEvent, prepareTraceEvents } from './trace-event-compat.js';
 import { convertDoubaoWorkTurn, enrichDoubaoClientRequest } from './doubao-work-converter.js';
@@ -1645,7 +1645,7 @@ export class OtlpTraceFlusher extends BaseFlusher {
         const agentSpecificKeys = agentType === 'grok-build' ? GROK_PASSTHROUGH_KEYS
           : agentType === 'openclaw' ? OPENCLAW_COMPAT_PASSTHROUGH_KEYS
           : agentType === 'copilot' ? ['gen_ai.copilot.telemetry.source']
-          : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete'] : [];
+          : QODER_TRANSCRIPT_AGENT_TYPES.has(agentType) ? ['agent.transcript_incomplete', QODER_RESPONSE_MODEL_RECORDED] : [];
         const passthroughKeys = [...new Set([
           ...DEFAULT_GIT_PASSTHROUGH_KEYS,
           ...USER_IDENTITY_PASSTHROUGH_KEYS,
