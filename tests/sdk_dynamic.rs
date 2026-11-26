@@ -1622,6 +1622,21 @@ fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
     host.ready();
     until(|| host.ctx.rows.lock().unwrap().len() >= 3);
     assert_eq!(std::fs::read_dir(&late).unwrap().count(), 0);
+    let recovered = host.ctx.rows.lock().unwrap().clone();
+    let recovered_ids: std::collections::HashSet<_> = recovered
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        recovered_ids.len(),
+        "late Qwen activity must be delivered once"
+    );
     assert!(host
         .ctx
         .rows

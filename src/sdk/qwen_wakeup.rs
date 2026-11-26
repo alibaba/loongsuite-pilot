@@ -101,7 +101,10 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
         super::hook_ingress::WriterLease::Active { .. } => {
             (data.join("wakeups").join("qwen-work-cn"), false)
         }
-        super::hook_ingress::WriterLease::Switching(dir) => (dir.clone(), true),
+        super::hook_ingress::WriterLease::Switching(slot) => (
+            slot.path().parent().expect("reserved inbox").to_owned(),
+            true,
+        ),
     };
     if !private_path(&directory)
         || (!switching && fs::create_dir_all(&directory).is_err())
@@ -137,13 +140,13 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return false;
     };
-    if switching {
+    if let super::hook_ingress::WriterLease::Switching(slot) = lease {
         let name = format!(
             "qwen-{:020}-{:010}.json",
             now.as_nanos(),
             std::process::id()
         );
-        return super::hook_ingress::publish_transition(&directory, &name, &bytes).is_ok();
+        return super::hook_ingress::publish_transition(slot, &name, &bytes).is_ok();
     }
     for attempt in 0..8u8 {
         let name = format!(

@@ -134,7 +134,10 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
             }
             (directory, false)
         }
-        super::hook_ingress::WriterLease::Switching(dir) => (dir.clone(), true),
+        super::hook_ingress::WriterLease::Switching(slot) => (
+            slot.path().parent().expect("reserved inbox").to_owned(),
+            true,
+        ),
     };
     regular_directory(&directory)?;
     if fs::read_dir(&directory)?.take(MAX_PENDING).count() >= MAX_PENDING {
@@ -172,8 +175,8 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         std::process::id(),
         uuid::Uuid::new_v4()
     );
-    if switching {
-        return super::hook_ingress::publish_transition(&directory, &name, &data);
+    if let super::hook_ingress::WriterLease::Switching(slot) = lease {
+        return super::hook_ingress::publish_transition(slot, &name, &data);
     }
     let mut pending = tempfile::NamedTempFile::new_in(&directory)?;
     pending.write_all(&data)?;

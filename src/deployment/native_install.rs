@@ -414,8 +414,10 @@ fn lock_hook_ingress_for_rollback(data: &Path, cache: &Path) -> Result<Vec<fs::F
             "Qwen Work Stop notifications are still pending. Start the current release and let delivery finish before retrying the rollback"
         );
     }
+    let gate = cache.join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+    crate::sdk::hook_ingress::prune_dead_reservations(&gate, crate::utils::is_process_alive)?;
     ensure!(
-        !has_hook_notifications(&cache.join(crate::sdk::hook_ingress::ROLLBACK_INBOX))?,
+        !has_hook_notifications(&gate)?,
         "Hook notifications from a previous rollback are still pending. Start the current release and let delivery finish before retrying"
     );
     ensure!(

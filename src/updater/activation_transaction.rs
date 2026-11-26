@@ -515,6 +515,38 @@ fn node_rollback_recovery_respects_the_atomic_hook_cutover() {
     }
 }
 
+#[cfg(test)]
+#[test]
+fn node_rollback_cannot_commit_while_an_accepted_hook_is_paused_before_publish() {
+    use crate::sdk::hook_ingress::{
+        lock_for_rollback, lock_writer, publish_transition, WriterLease, ROLLBACK_INBOX,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().canonicalize().unwrap();
+    let current = cache.join("current");
+    let sdk = cache.join("sdk");
+    fs::create_dir(&sdk).unwrap();
+    fs::write(&current, b"rust\n").unwrap();
+    let installer = lock_for_rollback(&sdk, &cache).unwrap();
+    let WriterLease::Switching(slot) = lock_writer(&sdk).unwrap() else {
+        panic!("publisher must reserve during the cutover")
+    };
+    let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+    let mut txn = ActivationTransaction::begin(&cache, targets.clone()).unwrap();
+    txn.write("current", b"node\n", 0o600).unwrap();
+    // The old Hook is deliberately paused before any bytes are written.
+    assert!(txn.commit_node_rollback().is_err());
+    txn.rollback().unwrap();
+    drop(installer);
+    assert_eq!(fs::read(&current).unwrap(), b"rust\n");
+    let gate = cache.join(ROLLBACK_INBOX);
+    let record = br#"{"session_id":"capture-once"}"#;
+    publish_transition(slot, "qwen-restored.json", record).unwrap();
+    assert_eq!(fs::read_dir(&gate).unwrap().count(), 1);
+    assert_eq!(fs::read(gate.join("qwen-restored.json")).unwrap(), record);
+}
+
 fn comparable_mode(mode: u32) -> u32 {
     if cfg!(unix) {
         mode

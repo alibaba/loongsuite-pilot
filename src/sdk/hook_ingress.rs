@@ -9,10 +9,16 @@ use std::path::{Component, Path, PathBuf};
 const LEASE: &str = ".sdk-hook-ingress.lock";
 const INSTALL: &str = ".sdk-hook-ingress-install.json";
 pub(crate) const ROLLBACK_INBOX: &str = ".sdk-hook-rollback-inbox";
+const RESERVATION_PREFIX: &str = ".pilot-hook-reservation-";
 
 pub(crate) enum WriterLease {
-    Active { _guard: File },
-    Switching(#[allow(dead_code, reason = "payload directory is used in the thin Hook")] PathBuf),
+    Active {
+        _guard: File,
+    },
+    Switching(
+        #[allow(dead_code, reason = "reserved slot is used in the thin Hook")]
+        tempfile::NamedTempFile,
+    ),
 }
 
 fn open_file(path: &Path, create_lock: bool) -> io::Result<File> {
@@ -127,24 +133,52 @@ pub(crate) fn transition_inbox(root: &Path) -> io::Result<Option<PathBuf>> {
     Ok(bound_cache(root)?.map(|cache| cache.join(ROLLBACK_INBOX)))
 }
 
-/// Create and sync the body outside the gate, then atomically insert it.
-/// The installer closes the gate with rmdir: either this insert wins and the
-/// switch aborts, or the committed Node installation already owns future Hooks.
+#[allow(
+    dead_code,
+    reason = "installer cleanup; shared source is also compiled into the Hook"
+)]
+pub(crate) fn prune_dead_reservations(
+    directory: &Path,
+    is_alive: impl Fn(u32) -> bool,
+) -> io::Result<()> {
+    check_directory(directory)?;
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let pid = name
+            .to_str()
+            .and_then(|name| name.strip_prefix(RESERVATION_PREFIX))
+            .and_then(|name| name.split_once('-'))
+            .and_then(|(pid, nonce)| nonce.ends_with(".tmp").then_some(pid))
+            .and_then(|pid| pid.parse::<u32>().ok())
+            .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32);
+        if pid.is_some_and(|pid| !is_alive(pid)) && entry.file_type()?.is_file() {
+            match fs::remove_file(entry.path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Switching already owns a reservation inside the gate; rmdir cannot win
+/// against either this unfinished slot or the completed JSON record.
 #[allow(
     dead_code,
     reason = "shared source is also compiled into the installer"
 )]
-pub(crate) fn publish_transition(directory: &Path, name: &str, body: &[u8]) -> io::Result<()> {
-    check_directory(directory)?;
-    let mut pending = tempfile::NamedTempFile::new_in(
-        directory
-            .parent()
-            .ok_or_else(|| io::Error::other("Hook ingress directory has no parent"))?,
-    )?;
+pub(crate) fn publish_transition(
+    mut pending: tempfile::NamedTempFile,
+    name: &str,
+    body: &[u8],
+) -> io::Result<()> {
+    let destination = pending.path().with_file_name(name);
     pending.write_all(body)?;
     pending.as_file().sync_all()?;
     pending
-        .persist_noclobber(directory.join(name))
+        .persist_noclobber(destination)
         .map_err(|error| error.error)?;
     Ok(())
 }
@@ -166,7 +200,12 @@ pub(crate) fn lock_writer(root: &Path) -> io::Result<WriterLease> {
                 || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
         {
             if let Some(inbox) = transition_inbox(&root)? {
-                return Ok(WriterLease::Switching(inbox));
+                check_directory(&inbox)?;
+                let pending = tempfile::Builder::new()
+                    .prefix(&format!("{RESERVATION_PREFIX}{}-", std::process::id()))
+                    .suffix(".tmp")
+                    .tempfile_in(inbox)?;
+                return Ok(WriterLease::Switching(pending));
             }
             return Err(error);
         }
@@ -233,19 +272,24 @@ mod tests {
         assert!(lock_for_rollback(&sdk, &cache).is_err());
         drop(writer);
         let rollback = lock_for_rollback(&sdk, &cache).unwrap();
-        let WriterLease::Switching(inbox) = lock_writer(&sdk).unwrap() else {
+        let WriterLease::Switching(slot) = lock_writer(&sdk).unwrap() else {
             panic!("contended publisher needs a durable owner");
         };
-        publish_transition(&inbox, "qwen-pending.json", b"{}").unwrap();
+        let inbox = slot.path().parent().unwrap().to_owned();
+        // Pause immediately after Switching, before there are any JSON bytes.
+        prune_dead_reservations(&inbox, |pid| pid == std::process::id()).unwrap();
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 1);
         assert!(fs::remove_dir(&inbox).is_err());
         drop(rollback); // Failed handoff, native is still the active version.
+        publish_transition(slot, "qwen-pending.json", b"{}").unwrap();
         assert!(lock_writer(&sdk).is_ok());
         assert_eq!(fs::read(inbox.join("qwen-pending.json")).unwrap(), b"{}");
+        assert_eq!(fs::read_dir(&inbox).unwrap().count(), 1);
         fs::remove_file(inbox.join("qwen-pending.json")).unwrap();
         let rollback = lock_for_rollback(&sdk, &cache).unwrap();
         fs::write(cache.join("current"), "legacy\n").unwrap();
         fs::remove_dir(&inbox).unwrap();
-        assert!(publish_transition(&inbox, "qwen-late.json", b"{}").is_err());
+        assert!(lock_writer(&sdk).is_err());
         drop(rollback);
         assert!(lock_writer(&sdk).is_err());
         fs::write(cache.join("current"), "native\n").unwrap();
