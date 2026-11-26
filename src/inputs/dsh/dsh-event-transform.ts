@@ -20,6 +20,10 @@ import { buildAgentActivityEntry, toJsonValue } from '../../normalization/entry-
 const NS_PER_MS = 1_000_000n;
 const MAX_TURN_CORRELATIONS = 1_024;
 const MAX_INPUT_MESSAGES = 2_048;
+/** UTF-8 byte budget for the accumulated conversation. A single large tool
+ * result (e.g. a 100 KB file dump) repeated across hundreds of steps would
+ * otherwise exceed any sane export batch on its own. */
+const MAX_INPUT_MESSAGES_BYTES = 262_144;
 const MAX_RESOURCE_FIELD_VALUE_LENGTH = 512;
 const AGENTTEAMS_RESOURCE_KEYS = [
   'agentteams.worker.name',
@@ -57,19 +61,28 @@ export interface DshEventAggregatorState {
   firstOutputTimes: Map<string, number>;
   /** Native tool call id → tool name, used to complete tool.result events. */
   toolNames: Map<string, string>;
-  /** Accumulated conversation messages for the next llm.request's
-   * `gen_ai.input.messages`. Reset on `turn/start`. Pushed by
-   * `user/message`, `assistant/message` (post-emit), and `tool/result`
-   * (post-emit). Snapshot is taken when the first `assistant/chunk`
-   * of a step arrives — at that point all input for the step has
-   * landed (user prompt + any prior step's assistant msg + tool result). */
+  /** Accumulated conversation messages for the current turn's request
+   * correlation. Reset on `turn/start`. Pushed by `user/message`,
+   * `assistant/message` (post-emit), and `tool/result` (post-emit).
+   * Emitted as `gen_ai.input.messages_delta` on every llm.request — the
+   * full snapshot is NOT re-sent per step: within a turn the delta
+   * slices already carry each request's new messages, so a per-step
+   * snapshot would duplicate the whole history (quadratic payload
+   * growth that can push a single export batch past downstream gRPC
+   * message limits and silently drop entire traces). */
   inputMessages: unknown[];
+  /** UTF-8 byte size of everything accumulated in `inputMessages`. */
+  inputMessagesBytes: number;
   /** Number of accumulated messages already represented by the previous
    * llm.request. The accumulator only appends within one turn, so slicing from
    * this position yields the exact request-level messages_delta. */
   lastRequestInputMessageCount: number;
   /** Once true, omit input.messages instead of presenting a truncated history. */
   inputMessagesOverflowed: boolean;
+  /** Whether the current turn's first llm.request already carried the
+   * `gen_ai.input.messages` anchor snapshot. Later requests in the same
+   * turn send deltas only. */
+  inputSnapshotEmitted: boolean;
 }
 
 export function newState(): DshEventAggregatorState {
@@ -84,8 +97,10 @@ export function newState(): DshEventAggregatorState {
     firstOutputTimes: new Map(),
     toolNames: new Map(),
     inputMessages: [],
+    inputMessagesBytes: 0,
     lastRequestInputMessageCount: 0,
     inputMessagesOverflowed: false,
+    inputSnapshotEmitted: false,
   };
 }
 
@@ -99,8 +114,10 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.firstOutputTimes.clear();
   state.toolNames.clear();
   state.inputMessages = [];
+  state.inputMessagesBytes = 0;
   state.lastRequestInputMessageCount = 0;
   state.inputMessagesOverflowed = false;
+  state.inputSnapshotEmitted = false;
 }
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -112,9 +129,23 @@ function addInputMessage(state: DshEventAggregatorState, message: unknown): void
   if (state.inputMessagesOverflowed) return;
   if (state.inputMessages.length >= MAX_INPUT_MESSAGES) {
     state.inputMessages = [];
+    state.inputMessagesBytes = 0;
     state.inputMessagesOverflowed = true;
     return;
   }
+  let size = 0;
+  try {
+    size = Buffer.byteLength(JSON.stringify(message) ?? '', 'utf8');
+  } catch {
+    size = 0;
+  }
+  if (state.inputMessagesBytes + size > MAX_INPUT_MESSAGES_BYTES) {
+    state.inputMessages = [];
+    state.inputMessagesBytes = 0;
+    state.inputMessagesOverflowed = true;
+    return;
+  }
+  state.inputMessagesBytes += size;
   state.inputMessages.push(message);
 }
 
@@ -352,6 +383,15 @@ function emitRequest(
   state.emittedRequest.add(key);
   const inputSnapshot = state.inputMessages.slice();
   const inputDelta = inputSnapshot.slice(state.lastRequestInputMessageCount);
+  // Full-snapshot anchor only on the FIRST correlated request of a turn. The
+  // accumulator is turn-scoped, so a per-step snapshot would duplicate the
+  // entire conversation history on every llm.request — quadratic payload
+  // growth (measured: 94.5% of a 147 MB trace) that blows past downstream
+  // gRPC message limits (Tempo default 4 MiB) and silently drops whole
+  // export batches. Later requests carry messages_delta only.
+  const emitInputSnapshot = !state.inputSnapshotEmitted
+    && !state.inputMessagesOverflowed
+    && inputSnapshot.length > 0;
   const header = state.currentTurnHeader ?? state.lastKnownHeader;
   const tools = header?.tools;
   const requestTime = state.requestStartTimes.get(key) ?? fallbackTime;
@@ -363,11 +403,11 @@ function emitRequest(
     'gen_ai.request.model': header?.model,
     'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
     'gen_ai.tool.definitions': tools && tools.length > 0 ? toJsonValue(tools) : undefined,
-    'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
-      ? toJsonValue(inputSnapshot) : undefined,
+    'gen_ai.input.messages': emitInputSnapshot ? toJsonValue(inputSnapshot) : undefined,
     'gen_ai.input.messages_delta': !state.inputMessagesOverflowed && inputSnapshot.length > 0
       ? toJsonValue(inputDelta) : undefined,
   });
+  if (emitInputSnapshot) state.inputSnapshotEmitted = true;
   state.lastRequestInputMessageCount = inputSnapshot.length;
   return entry;
 }

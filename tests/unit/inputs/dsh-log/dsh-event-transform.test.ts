@@ -62,47 +62,59 @@ describe('dsh-event-transform (real fixture)', () => {
     }
   });
 
-  it('every llm.request carries non-empty gen_ai.input.messages', async () => {
+  it('every llm.request carries the snapshot anchor or a non-empty delta', async () => {
     const { entries } = await loadAll();
     const requests = entries.filter(e => e['event.name'] === 'llm.request');
     expect(requests.length).toBe(3);
+    let snapshotSeen = 0;
     for (const r of requests) {
       const input = r['gen_ai.input.messages'];
-      expect(input).toBeDefined();
-      const arr = input as unknown[];
-      expect(arr.length).toBeGreaterThan(0);
-      for (const msg of arr) {
-        const m = msg as { role: string; parts: unknown[] };
-        expect(['user', 'assistant', 'tool']).toContain(m.role);
-        expect(Array.isArray(m.parts)).toBe(true);
+      const delta = r['gen_ai.input.messages_delta'];
+      // Exactly one anchor snapshot (first correlated request of the turn);
+      // later requests must carry only the delta.
+      if (input !== undefined) {
+        snapshotSeen++;
+        const arr = input as unknown[];
+        expect(arr.length).toBeGreaterThan(0);
+        for (const msg of arr) {
+          const m = msg as { role: string; parts: unknown[] };
+          expect(['user', 'assistant', 'tool']).toContain(m.role);
+          expect(Array.isArray(m.parts)).toBe(true);
+        }
+      } else {
+        expect(delta).toBeDefined();
+        expect((delta as unknown[]).length).toBeGreaterThan(0);
       }
     }
+    expect(snapshotSeen).toBe(1);
   });
 
-  it('llm.request input.messages grows across ReAct steps', async () => {
+  it('deltas accumulate to the snapshot and later requests grow delta-only', async () => {
     const { entries } = await loadAll();
     const requests = entries
       .filter(e => e['event.name'] === 'llm.request')
       .sort((a, b) => (a['gen_ai.step.id'] as string).localeCompare(b['gen_ai.step.id'] as string));
     expect(requests.length).toBe(3);
-    const accumulatedDelta: unknown[] = [];
-    for (const request of requests) {
+    // First request anchors the conversation: snapshot === cumulative delta.
+    const anchor = requests[0]['gen_ai.input.messages'] as unknown[];
+    const firstDelta = requests[0]['gen_ai.input.messages_delta'] as unknown[];
+    expect(anchor).toEqual(firstDelta);
+    expect(anchor.length).toBeGreaterThanOrEqual(1);
+    expect((anchor[0] as { role: string }).role).toBe('user');
+    // Later requests: no snapshot, delta-only, and the accumulated deltas
+    // keep growing monotonically.
+    let accumulated = [...firstDelta];
+    for (const request of requests.slice(1)) {
+      expect(request['gen_ai.input.messages']).toBeUndefined();
       const delta = request['gen_ai.input.messages_delta'] as unknown[];
       expect(delta).toBeDefined();
-      accumulatedDelta.push(...delta);
-      expect(accumulatedDelta).toEqual(request['gen_ai.input.messages']);
+      accumulated.push(...delta);
+      expect(accumulated.length).toBeGreaterThan(0);
+      const roles = accumulated.map(m => (m as { role: string }).role);
+      expect(roles).toContain('user');
+      expect(roles).toContain('assistant');
+      expect(roles).toContain('tool');
     }
-    const step1 = requests[0]['gen_ai.input.messages'] as unknown[];
-    expect(step1.length).toBeGreaterThanOrEqual(1);
-    expect((step1[0] as { role: string }).role).toBe('user');
-    const step2 = requests[1]['gen_ai.input.messages'] as unknown[];
-    expect(step2.length).toBeGreaterThan(step1.length);
-    const step2Roles = step2.map(m => (m as { role: string }).role);
-    expect(step2Roles).toContain('user');
-    expect(step2Roles).toContain('assistant');
-    expect(step2Roles).toContain('tool');
-    const step3 = requests[2]['gen_ai.input.messages'] as unknown[];
-    expect(step3.length).toBeGreaterThan(step2.length);
   });
 
   it('each LLM response has non-empty output.messages, non-zero usage', async () => {
