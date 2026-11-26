@@ -2,7 +2,7 @@
 
 English | [简体中文](zh-CN/interceptor.md)
 
-Pilot evaluates supported agent hooks on the local machine. Qoder Desktop/CLI and Qwen Work use a separate interception hook alongside the collection hook; OpenClaw uses its plugin adapter. Supported phases are `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`. PostToolUse can replace a result returned to the model, but cannot undo a tool's completed side effects.
+Pilot evaluates supported agent hooks on the local machine. Qoder Desktop and CLI, Qwen Work, and WorkBuddy install separate interception and collection hooks. OpenClaw uses its plugin adapter. Supported phases are `UserPromptSubmit`, `PreToolUse`, and `PostToolUse`. PostToolUse can replace the result returned to the model after the tool has run.
 
 ## Enable interception
 
@@ -55,7 +55,7 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 
 | Field | Values |
 |-------|--------|
-| `agents` | `qoder`, `qodercli`, `qoder-cn`, `qoderclicn`, `openclaw`, `qwen-work-cn` |
+| `agents` | `qoder`, `qodercli`, `qoder-cn`, `qoderclicn`, `openclaw`, `qwen-work-cn`, `workbuddy` |
 | `events` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
 | `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
@@ -89,6 +89,8 @@ The local document also accepts optional `interceptor.scriptCache`, a 64-charact
 Files are checked every three seconds. Invalid documents or scripts not yet ready preserve the previous executable generation. In-flight requests retain their original generation and executor; executors are retired after their last request, including when rules are cleared or become pattern-only. Loading validates real paths and regular files; execution rechecks the file to reject symlinks.
 
 ## Decisions and telemetry
+
+WorkBuddy installs its interception hooks in `~/.workbuddy/settings.json`. Set `"agents": ["workbuddy"]` in rules for this client. Prompt blocks stop the current submission, pre-tool blocks deny the call, and post-tool blocks replace the result sent to the model. Tool verdicts are linked to collected events by session and call ID. [Tencent Cloud Hook configuration reference](https://cloud.tencent.com/document/product/1831/137030)
 
 Qoder CN installs a separate interceptor hook in `~/.qoder-cn/settings.json` while preserving its collection hooks. The `qoder-cn-auto` target prefers the host's `parent_business_info.product=cli/app`, then detects the CN CLI flavor or ancestor process: Desktop uses the `qoder-cn` surface and prompt `decision=block`, while CLI uses `qoderclicn` and `decision=deny`. Unidentified CN hosts default to Desktop. Configure rule `agents: ["qoder-cn", "qoderclicn"]` to cover both. Both surfaces retain `gen_ai.agent.type=qoder-cn` for collected events, blocked prompts and prompt verdict correlation. Disabling interception removes only interceptor hooks.
 

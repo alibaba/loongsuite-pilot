@@ -59,7 +59,7 @@ function wrapLegacyPs1Command(cmd: string): string {
 }
 
 function wrapPs1Command(cmd: string, agentId: string): string {
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) {
+  if (process.platform !== 'win32' || !['codex', 'grok-build', 'trae-cn', 'workbuddy'].includes(agentId)) {
     return wrapLegacyPs1Command(cmd);
   }
 
@@ -95,6 +95,13 @@ function formatHookCommand(
   style: AgentHookConfig['eventSubcommand'],
   agentId: string,
 ): string {
+  if (process.platform !== 'win32' && agentId === 'workbuddy') {
+    const match = hookCommand.match(/^(.*?\.sh)(?:\s+(.*))?$/);
+    if (match) {
+      const script = quoteClaudeHookPath(match[1]);
+      return appendEventSubcommand(match[2] ? `${script} ${match[2]}` : script, event, style);
+    }
+  }
   if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return appendEventSubcommand(quoteClaudeHookPath(hookCommand), event, style);
   }
@@ -110,7 +117,12 @@ function legacyHookCommands(
   if (process.platform !== 'win32' && (agentId === 'claude-code' || agentId === 'trae-cn')) {
     return legacyClaudeHookPaths(hookCommand).map(command => appendEventSubcommand(command, event, style));
   }
-  if (process.platform !== 'win32' || (agentId !== 'codex' && agentId !== 'grok-build' && agentId !== 'trae-cn')) return [];
+  if (process.platform !== 'win32') {
+    if (agentId !== 'workbuddy') return [];
+    const legacy = appendEventSubcommand(hookCommand, event, style);
+    return legacy === formatHookCommand(hookCommand, event, style, agentId) ? [] : [legacy];
+  }
+  if (!['codex', 'grok-build', 'trae-cn', 'workbuddy'].includes(agentId)) return [];
 
   const current = formatHookCommand(hookCommand, event, style, agentId);
   return [...new Set([

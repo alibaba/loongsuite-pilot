@@ -17,8 +17,8 @@ const EVENT_ALIASES: Record<string, HookEventName> = {
 };
 
 export function canonicalizeHookEvent(raw: unknown): HookEventName | null {
-  if (typeof raw !== 'string') return null;
-  return EVENT_ALIASES[raw] ?? null;
+  if (typeof raw !== 'string' || !Object.hasOwn(EVENT_ALIASES, raw)) return null;
+  return EVENT_ALIASES[raw];
 }
 
 export function parseHookRequest(

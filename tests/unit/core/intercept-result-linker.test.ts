@@ -49,7 +49,7 @@ describe('InterceptResultLinker', () => {
     expect(barrier).toHaveBeenCalledOnce();
     expect(entries[0]['gen_ai.guardrail.action']).toBe('block');
   });
-  it.each(['qoder', 'qoder-app', 'qoder-cn'])('maps %s tool.call to PreToolUse and tool.result to PostToolUse', agentType => {
+  it.each(['qoder', 'qoder-app', 'qoder-cn', 'workbuddy'])('maps %s tool.call to PreToolUse and tool.result to PostToolUse', agentType => {
     const store = storeWith([
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PreToolUse', action: 'allow' },
       { sessionId: 's1', toolUseId: 'call-1', phase: 'PostToolUse', action: 'block' },

@@ -58,6 +58,20 @@ describe('prompt verdict correlation', () => {
     expect(cn['gen_ai.guardrail.rule_id']).toBe('cn-rule');
     expect(international).not.toHaveProperty('gen_ai.guardrail.action');
   });
+
+  it('links a WorkBuddy prompt verdict to its native request by session, text and time', () => {
+    const store = new ToolVerdictStore('/tmp/unused-workbuddy-prompt-verdicts.json');
+    const now = Date.now();
+    const key = promptKeyFromRequest({ agent: 'workbuddy', event: 'UserPromptSubmit', sessionId: 'session',
+      prompt: text, raw: {} })!;
+    store.put(key, { action: 'log', ruleId: 'workbuddy-rule' }, new Date(now));
+    const workbuddy = entry(undefined, now, 'workbuddy');
+    const qwenWork = entry(undefined, now, 'qwen-work-cn');
+    new InterceptResultLinker(store, true).enrich([workbuddy, qwenWork]);
+    expect(workbuddy['gen_ai.guardrail.rule_id']).toBe('workbuddy-rule');
+    expect(qwenWork).not.toHaveProperty('gen_ai.guardrail.action');
+  });
+
   function anonymous(product?: string) {
     return promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 'session', prompt: text,
       raw: product ? { parent_business_info: { product } } : {} })!;

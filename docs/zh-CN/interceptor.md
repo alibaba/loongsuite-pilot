@@ -4,7 +4,7 @@
 
 Interceptor 的 HTTP 服务跑在 collector 进程内的独立 Worker 线程里，仅在启动配置 `interceptor.mode` 为 `all` 时随 collector 启动和退出。Worker 直接监听 loopback HTTP，collector 主线程里的同步 SQLite、进程查询或批量采集不会占住它的事件循环。Hook CLI 仍是 IDE 拉起的短进程，不依赖第一次 hook 触发来启动服务。
 
-现有 Qoder / 千问办公 transcript 采集 hook 保持独立，拦截判定走第二条 hook。
+Qoder、千问办公和 WorkBuddy 分别部署采集 hook 与同步拦截 hook。
 
 ## 架构
 
@@ -191,6 +191,18 @@ fail-open：
 
 Hook timeout 与 Qoder 相同：`UserPromptSubmit` 15 秒，工具事件 10 秒。
 
+## WorkBuddy 协议
+
+启用拦截后，Pilot 在 `~/.workbuddy/settings.json` 部署独立的 command hook，通过 `interceptor-hook.sh` / `.ps1` 调用 `--agent workbuddy`。工具事件沿用 WorkBuddy 的正则 matcher `.*`。规则配置使用 `"agents": ["workbuddy"]`。
+
+- `UserPromptSubmit` 命中时返回 `continue: false` 与 `stopReason`，终止当前提示词请求。
+- `PreToolUse` 命中时返回 `hookSpecificOutput.permissionDecision: "deny"` 与 `permissionDecisionReason`，阻止本次工具调用。
+- `PostToolUse` 命中时返回 `hookSpecificOutput.updatedToolOutput`，替换发给模型的工具结果。此时工具已经执行。
+
+放行、规则执行失败或 Worker 不可用时，hook 以状态码 0 退出且 stdout 为空。关闭拦截后，部署流程会移除这三条拦截 hook。匹配到 session 与调用 ID 的工具采集事件会附带 `gen_ai.guardrail.*` 裁决。
+
+[腾讯云 Hook 配置参考](https://cloud.tencent.com/document/product/1831/137030)
+
 ## OpenClaw 协议
 
 OpenClaw 是 `plugin-inject`，不能安装第二条 `interceptor-hook.sh`。拦截判定复用采集插件，只覆盖现代 adapter（OpenClaw ≥ 2026.5.12）。3.8 legacy 路径保持 sync/void，不拦截。
@@ -290,7 +302,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 
 | 字段 | 取值 |
 |------|------|
-| `agents` | `qoder`、`qodercli`、`qoder-cn`、`qoderclicn`、`openclaw`、`qwen-work-cn` |
+| `agents` | `qoder`、`qodercli`、`qoder-cn`、`qoderclicn`、`openclaw`、`qwen-work-cn`、`workbuddy` |
 | `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
 | `action` | 默认 `block`，命中后拦截并停止；`log` 记录命中后放行，继续检查后续规则，不提示宿主 |
 | `severity` | 可选风险等级字符串，仅用于本地诊断，不上报到采集事件 |
