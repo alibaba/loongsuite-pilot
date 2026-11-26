@@ -68,5 +68,5 @@ const QODER_INTERCEPTOR_AGENT_TYPES = new Set([
 function isInterceptorAgent(agentType: unknown): boolean {
   if (typeof agentType !== 'string') return false;
   if (QODER_INTERCEPTOR_AGENT_TYPES.has(agentType.toLowerCase())) return true;
-  return agentType === ClientType.OpenClaw || agentType === ClientType.QwenWorkCN;
+  return agentType === ClientType.OpenClaw || agentType === ClientType.QwenWorkCN || agentType === ClientType.WorkBuddy;
 }

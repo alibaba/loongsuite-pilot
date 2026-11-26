@@ -13,7 +13,7 @@ export function promptAgentType(value: unknown): string | null {
   if (value === 'qodercli' || value === 'qoder-cli') return 'qoder-cli';
   if (value === 'qoder-app') return value;
   if (['qoder', 'qoder-idea', 'qoder-jetbrains'].includes(String(value))) return 'qoder';
-  return value === 'openclaw' || value === 'qwen-work-cn' ? value : null;
+  return value === 'openclaw' || value === 'qwen-work-cn' || value === 'workbuddy' ? value : null;
 }
 
 export function promptHash(text: string): string {
