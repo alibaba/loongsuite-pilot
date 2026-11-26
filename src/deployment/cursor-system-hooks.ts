@@ -13,7 +13,8 @@ function isObject(value: unknown): value is JsonObject {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function hookCommand(script: string): string {
+function hookCommand(def: AgentDefinition): string {
+  const script = def.hook!.hookCommand;
   if (!path.isAbsolute(script) || /[\r\n\0]/.test(script)) {
     throw new Error('Cursor system hooks require an absolute shell script path');
   }
@@ -26,7 +27,7 @@ function hasDuplicateProperties(node: JsonNode | undefined): boolean {
   return keys.length !== new Set(keys).size;
 }
 
-function withPilotHooks(def: AgentDefinition, raw: string, install: boolean, alternateManagedScript?: string): string {
+function withPilotHooks(def: AgentDefinition, raw: string, install: boolean): string {
   if (!install && !raw.trim()) return raw;
   const text = raw.trim() ? raw : '{}\n';
   const parsed = parseJsonDocument<JsonObject>(text);
@@ -43,8 +44,7 @@ function withPilotHooks(def: AgentDefinition, raw: string, install: boolean, alt
     throw new Error('Invalid JSON hooks object; original preserved');
   }
   const hooks = document.hooks ?? {};
-  const command = hookCommand(def.hook!.hookCommand);
-  const owned = new Set([command, ...(alternateManagedScript ? [hookCommand(alternateManagedScript)] : [])]);
+  const command = hookCommand(def);
   const scriptName = path.basename(def.hook!.hookCommand);
   const events = new Set(install ? def.hook!.events : []);
   let next = install && document.version === undefined ? editJsonc(text, ['version'], 1) : text;
@@ -54,10 +54,10 @@ function withPilotHooks(def: AgentDefinition, raw: string, install: boolean, alt
       throw new Error('Invalid JSON hook event list; original preserved');
     }
     if (install && rows.some(row =>
-      typeof row.command === 'string' && !owned.has(row.command) && row.command.includes(scriptName))) {
+      typeof row.command === 'string' && row.command !== command && row.command.includes(scriptName))) {
       throw new Error('Cursor system config already references another Pilot command; original preserved');
     }
-    const kept = rows.filter(row => typeof row.command !== 'string' || !owned.has(row.command));
+    const kept = rows.filter(row => row.command !== command);
     if (events.has(event)) kept.push({ command, failClosed: false });
     if (JSON.stringify(kept) !== JSON.stringify(rows)) {
       next = editJsonc(next, ['hooks', event], kept.length ? kept : undefined);
@@ -81,14 +81,14 @@ async function read(file: string): Promise<{ raw: string; mode: number; uid: num
   return { raw: await fs.readFile(file, 'utf8'), mode: info.mode & 0o777, uid, gid };
 }
 
-export async function cursorSystemHooksInstalled(def: AgentDefinition, alternateManagedScript?: string): Promise<boolean> {
+export async function cursorSystemHooksInstalled(def: AgentDefinition): Promise<boolean> {
   const file = def.hook!.settingsPath;
   await assertTrustedCursorSystemDirectory(path.dirname(file));
   const current = await read(file);
-  return Boolean(current && withPilotHooks(def, current.raw, true, alternateManagedScript) === current.raw);
+  return Boolean(current && withPilotHooks(def, current.raw, true) === current.raw);
 }
 
-export async function updateCursorSystemHooks(def: AgentDefinition, install: boolean, alternateManagedScript?: string): Promise<void> {
+export async function updateCursorSystemHooks(def: AgentDefinition, install: boolean): Promise<void> {
   const file = def.hook!.settingsPath;
   const directory = path.dirname(file);
   await assertTrustedCursorSystemDirectory(directory);
@@ -98,7 +98,7 @@ export async function updateCursorSystemHooks(def: AgentDefinition, install: boo
   await withDeployedStateLock(`${file}.pilot-lock`, async () => {
     const current = await read(file);
     if (!install && !current) return;
-    const next = withPilotHooks(def, current?.raw ?? '', install, alternateManagedScript);
+    const next = withPilotHooks(def, current?.raw ?? '', install);
     if (next === current?.raw) return;
     if (current && !(current.mode & 0o222)) {
       throw new Error('Cursor system config is read-only; update its deployment source');

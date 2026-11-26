@@ -21,7 +21,6 @@ import { hookInstallAlarmKey, shouldRelayHookInstallAlarm } from '../deployment/
 import { hookInstallResultPath, hookInstallSignalPath, markHookInstallAlarmSent, type HookInstallReport } from '../deployment/hook-install-service.js';
 import { readContainerIdentity } from '../utils/container-identity.js';
 import { areSystemHookAssetsHealthy, restoreSystemHookAssets } from '../deployment/system-hook-assets.js';
-import { cursorSystemRuntimeDir } from '../deployment/cursor-system-paths.js';
 import { supportsSystemHooks } from '../deployment/system-hook-config.js';
 import {
   isAgentGatedEnabled as isAgentGatedEnabledIn,
@@ -1617,11 +1616,7 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Cursor Hook (Hook JSONL) ---
-    const cursorDefinition = this.deploymentManager?.getDefinitions().find(def => def.id === 'cursor');
-    const cursorDataRoot = cursorDefinition
-      && this.deploymentManager.effectiveDefinition(cursorDefinition).hook?.scope === 'system'
-      ? cursorSystemRuntimeDir(this.dataDir) : this.dataDir;
-    const cursorHookLogDir = path.join(cursorDataRoot, 'logs', 'cursor', 'history');
+    const cursorHookLogDir = path.join(this.dataDir, 'logs', 'cursor', 'history');
     const cursorHookInput = new CursorHookInput({
       stateStore: this.stateStore,
       logDir: cursorHookLogDir,
