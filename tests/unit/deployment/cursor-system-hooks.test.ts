@@ -438,6 +438,10 @@ describe('Cursor enterprise system registration', () => {
       await expect(fs.stat(journal)).rejects.toMatchObject({ code: 'ENOENT' });
       await expect(fs.stat(usedFallback)).rejects.toMatchObject({ code: 'ENOENT' });
     };
+    await fs.chmod(dataDir, 0o777);
+    await expectFailOpen();
+    await expect(manager.deployHookScope(target)).rejects.toThrow('Untrusted Cursor system directory permissions');
+    await fs.chmod(dataDir, 0o755);
     await fs.chmod(processor, 0o666);
     await expectFailOpen();
     expect((await manager.repairHookSettings(def)).success).toBe(true);

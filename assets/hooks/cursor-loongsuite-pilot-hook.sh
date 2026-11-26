@@ -127,13 +127,14 @@ trusted_system_directory() {
   metadata="$(system_stat "$1")" || return 1
   read -r owner mode <<< "$metadata"
   trusted_system_mode "$owner" "$mode" || return 1
-  (( (8#$mode & 022) == 0 || (${2:-0} == 1 && (8#$mode & 01000) != 0) ))
+  (( (8#$mode & 022) == 0 || (${2:-0} == 1 && (8#$mode & 01000) != 0) )) \
+    || [[ "${3:-0}" == 1 && "$1" == /mnt/pilot ]]
 }
 
 trusted_system_ancestors() {
   local dir="$1" sticky=0
   while true; do
-    trusted_system_directory "$dir" "$sticky" || return 1
+    trusted_system_directory "$dir" "$sticky" "${2:-0}" || return 1
     [[ "$dir" == / ]] && return 0
     dir="${dir%/*}"
     dir="${dir:-/}"
@@ -155,8 +156,13 @@ trusted_system_files() {
 run_system_processor() {
   local data_dir="${SCRIPT_DIR%/*}" list="$SCRIPT_DIR/cursor-system-assets.list"
   local config_pin="$SCRIPT_DIR/cursor-system-config-path" config_file rel pinned resolved metadata owner mode
+  local allow_writable_mount=0
   local -a assets=()
-  trusted_system_ancestors "$SCRIPT_DIR" || return 1
+  # Mirror the installer: exempt only the Linux container mount's mode.
+  if [[ "$OSTYPE" == linux* && "$data_dir" == /mnt/pilot ]]; then
+    allow_writable_mount=1
+  fi
+  trusted_system_ancestors "$SCRIPT_DIR" "$allow_writable_mount" || return 1
   trusted_system_directory "$SCRIPT_DIR/cursor" && trusted_system_directory "$SCRIPT_DIR/shared" || return 1
   [[ -s "$list" ]] && trusted_system_files "$list" "$data_dir/node-bin" || return 1
   while IFS= read -r rel; do
@@ -170,13 +176,13 @@ run_system_processor() {
   pinned="${pinned%$'\r'}"
   [[ "$pinned" == /* && "$pinned" != *$'\n'* && "$pinned" != *$'\r'* ]] || return 1
   resolved="$(realpath "$pinned" 2>/dev/null || readlink -f "$pinned" 2>/dev/null)" || return 1
-  trusted_system_ancestors "$(dirname "$resolved")" || return 1
+  trusted_system_ancestors "$(dirname "$resolved")" "$allow_writable_mount" || return 1
   trusted_system_files "$resolved" && node_is_suitable "$resolved" || return 1
 
   trusted_system_files "$config_pin" || return 1
   config_file="$(cat "$config_pin")" || return 1
   [[ "$config_file" == /* && "$config_file" != *$'\n'* && "$config_file" != *$'\r'* ]] || return 1
-  trusted_system_ancestors "$(dirname "$config_file")" || return 1
+  trusted_system_ancestors "$(dirname "$config_file")" "$allow_writable_mount" || return 1
   if [[ -e "$config_file" || -L "$config_file" ]]; then
     # An owned policy may be temporarily unreadable. Let the processor retain
     # metadata with content capture disabled while that policy is unavailable.
