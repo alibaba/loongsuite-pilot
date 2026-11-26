@@ -360,7 +360,9 @@ impl ActivationTransaction {
 
     fn rollback_ingress(&self) -> Result<PathBuf> {
         let root = self.path.parent().context("更新恢复记录缺少安装根目录")?;
-        let path = root.join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+        let path = root
+            .canonicalize()?
+            .join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
         crate::utils::source_access::private_path(&path)?;
         Ok(path)
     }

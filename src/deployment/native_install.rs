@@ -396,13 +396,16 @@ async fn lock_legacy_history_for_rollback(
 
 fn lock_hook_ingress_for_rollback(data: &Path, cache: &Path) -> Result<Vec<fs::File>> {
     use crate::sdk::hook_ingress::lock_for_rollback;
-    let mut leases = vec![lock_for_rollback(data, cache)
+    // Match the writers' physical cache path (macOS /var uses a system
+    // alias). The created inbox itself still rejects symlinks.
+    let cache = cache.canonicalize()?;
+    let mut leases = vec![lock_for_rollback(data, &cache)
         .context("Cursor Hook ingress is busy or inaccessible; current version retained")?];
     let qwen = data.join("state/standalone-qwen-work-cn-sdk");
     crate::utils::source_access::private_path(&qwen)?;
     if qwen.try_exists()? {
         leases.push(
-            lock_for_rollback(&qwen, cache).context(
+            lock_for_rollback(&qwen, &cache).context(
                 "Qwen Work Hook ingress is busy or inaccessible; current version retained",
             )?,
         );
