@@ -2419,10 +2419,20 @@ export class OtlpTraceFlusher extends BaseFlusher {
   private enrichRequestContext(records: AgentActivityEntry[], spans: ReadableSpan[]): void {
     const requests = new Map<string, AgentActivityEntry>();
     const responses = new Map<string, string>();
+    const byStart = new Map<string, AgentActivityEntry | null>();
+    const needsStartFallback = spans.some(span => span.attributes['gen_ai.span.kind'] === 'LLM'
+      && !span.attributes['gen_ai.response.id']);
+    const startKey = (traceId: unknown, turnId: unknown, time: string): string | undefined =>
+      typeof traceId === 'string' && traceId && typeof turnId === 'string' && turnId && time
+        ? JSON.stringify([traceId, turnId, time]) : undefined;
     for (const record of records) {
       const step = record['gen_ai.step.id'];
       if (!step) continue;
-      if (record['event.name'] === 'llm.request') requests.set(step, record);
+      if (record['event.name'] === 'llm.request') {
+        requests.set(step, record);
+        const key = needsStartFallback ? startKey(record.trace_id, record['gen_ai.turn.id'], record.time_unix_nano) : undefined;
+        if (key) byStart.set(key, byStart.has(key) ? null : record);
+      }
       if (record['event.name'] === 'llm.response' && record['gen_ai.response.id']) responses.set(step, record['gen_ai.response.id']);
     }
     const byResponse = new Map<string, AgentActivityEntry>();
@@ -2430,9 +2440,30 @@ export class OtlpTraceFlusher extends BaseFlusher {
       const request = requests.get(step);
       if (request) byResponse.set(response, request);
     }
+    // Some providers (including Pi backends) don't expose a response ID. In
+    // that case require one request and one LLM span at the exact start within
+    // the same trace and turn, rather than inventing an ID or guessing by order.
+    const starts = new Map<ReadableSpan, string>();
+    const startCounts = new Map<string, number>();
+    if (byStart.size > 0) {
+      for (const span of spans) {
+        if (span.attributes['gen_ai.span.kind'] !== 'LLM' || span.attributes['gen_ai.response.id']) continue;
+        const key = startKey(span.spanContext().traceId, span.attributes['gen_ai.turn.id'], String(hrTimeToNano(span.startTime)));
+        if (!key || !byStart.get(key)) continue;
+        starts.set(span, key);
+        startCounts.set(key, (startCounts.get(key) ?? 0) + 1);
+      }
+    }
     for (const span of spans) {
       if (span.attributes['gen_ai.span.kind'] !== 'LLM') continue;
-      const record = byResponse.get(String(span.attributes['gen_ai.response.id']));
+      const responseId = span.attributes['gen_ai.response.id'];
+      let record = typeof responseId === 'string' ? byResponse.get(responseId) : undefined;
+      if (!responseId) {
+        const key = starts.get(span);
+        const candidate = key && startCounts.get(key) === 1 ? byStart.get(key) : undefined;
+        const step = candidate?.['gen_ai.step.id'];
+        if (candidate && step && !candidate['gen_ai.response.id'] && !responses.has(step)) record = candidate;
+      }
       if (!record) continue;
       // The SDK's turn-wide delta fold cannot cross a native replacement.
       // Preserve an unavailable snapshot without backfilling old history.

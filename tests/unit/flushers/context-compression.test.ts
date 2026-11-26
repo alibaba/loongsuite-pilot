@@ -115,6 +115,29 @@ describe('context compression through the real flusher and SDK', () => {
     expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(0);
   });
 
+  it.each([false, true])('keeps response-ID-free Pi request context only when the start is unambiguous (overlap=%s)', async overlap => {
+    const request = (index: number, offset: number) => event('llm.request', offset, {
+      'event.id': `request-${index}`, 'gen_ai.step.id': `step-${index}`, 'gen_ai.request.model': 'fixture-model',
+      'gen_ai.context.version': `window-${index}`, 'gen_ai.conversation.compacted': true,
+    });
+    const response = (index: number, offset: number) => event('llm.response', offset, {
+      'gen_ai.step.id': `step-${index}`, 'gen_ai.response.model': 'fixture-model',
+      'gen_ai.response.finish_reasons': [index === 1 ? 'tool_call' : 'stop'],
+      'gen_ai.usage.input_tokens': 100, 'gen_ai.usage.output_tokens': 10,
+    });
+    const spans = await flush([
+      event('other', 0, { 'gen_ai.turn.start': true }),
+      request(1, 100), response(1, 200), request(2, overlap ? 100 : 300), response(2, 400),
+    ]);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms.every(span => span.attributes['gen_ai.response.id'] === undefined)).toBe(true);
+    expect(llms.map(span => span.attributes['gen_ai.context.version']))
+      .toEqual(overlap ? [undefined, undefined] : ['window-1', 'window-2']);
+    expect(llms.map(span => span.attributes['gen_ai.conversation.compacted']))
+      .toEqual(overlap ? [undefined, undefined] : [true, true]);
+  });
+
   it('retains completion-only evidence in logs without fabricating a timed trace', async () => {
     const spans = await flush([event('gen_ai.context.compress', 1000)]);
     expect(spans).toHaveLength(0);
