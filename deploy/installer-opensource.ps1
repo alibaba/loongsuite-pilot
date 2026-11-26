@@ -65,6 +65,8 @@ param(
     [string]$MaskTypes,
     [string]$MaskReplacementMode,
     [string]$InterceptorMode,
+    [ValidateSet("true", "false")]
+    [string]$HookTamperProtection,
     [switch]$Purge,
     [switch]$PreferSystemNode
 )
@@ -121,6 +123,10 @@ if (-not $PackageUrl -and $env:LOONGSUITE_PILOT_PACKAGE_URL) {
 # ============================================================
 if ($PSBoundParameters.Keys -contains 'EnableStatusBarApp' -and $Command -ne 'install') {
     Write-Error "-EnableStatusBarApp is only supported with install"
+    exit 1
+}
+if ($PSBoundParameters.Keys -contains 'HookTamperProtection' -and $Command -ne 'install') {
+    Write-Error "-HookTamperProtection is only supported with install"
     exit 1
 }
 if ($PSBoundParameters.Keys -contains 'DashboardPort') {
@@ -1491,6 +1497,7 @@ function Write-Config {
         maskTypes         = "$MaskTypes"
         maskReplacementMode = "$MaskReplacementMode"
         interceptorMode   = "$InterceptorMode"
+        hookTamperProtection = "$HookTamperProtection"
         probeResult       = "$($script:PROBE_RESULT)"
         hostSn            = "$hostSn"
     }
@@ -1590,6 +1597,15 @@ if (opts.maskMode) {
 if (opts.maskReplacementMode) {
   config.mask = config.mask || {};
   config.mask.replacementMode = opts.maskReplacementMode;
+}
+if (opts.hookTamperProtection) {
+  if (!config.hookWatchdog || typeof config.hookWatchdog !== 'object' || Array.isArray(config.hookWatchdog)) {
+    config.hookWatchdog = {};
+  }
+  if (!config.hookWatchdog.tamperProtection || typeof config.hookWatchdog.tamperProtection !== 'object' || Array.isArray(config.hookWatchdog.tamperProtection)) {
+    config.hookWatchdog.tamperProtection = {};
+  }
+  config.hookWatchdog.tamperProtection.enabled = opts.hookTamperProtection.toLowerCase() === 'true';
 }
 if (opts.interceptorMode) {
   config.interceptor = config.interceptor || {};
@@ -2147,6 +2163,7 @@ function Remove-HookConfigs {
         (Join-Path $env:USERPROFILE ".claude\settings.json"),
         (Join-Path $env:USERPROFILE ".kiro\agents\pilot-kiro.json"),
         (Join-Path $env:USERPROFILE ".qwen\settings.json"),
+        (Join-Path $env:USERPROFILE ".trae-cn\hooks.json"),
         (Join-Path $env:USERPROFILE ".workbuddy\settings.json")
     )
 

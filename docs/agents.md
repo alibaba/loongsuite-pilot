@@ -131,6 +131,9 @@ type differences are called out in the notes.
 | Qoder Work CN | `qoder-work-cn` | Hook and local data sources. |
 | Qwen Code CLI | `qwen-code-cli` | Hook integration; parses qwen-code transcript JSONL on Stop. |
 | Qwen Work CN | `qwen-work-cn` | Hook and local data sources. |
+| Antigravity App / new IDE | `antigravity` | Both use the same read-only SQLite and transcript source under `~/.gemini/antigravity`. File changes trigger incremental collection with a 30-second fallback scan by default. Requires `node:sqlite` (Node.js >= 22.13 / >= 23.4). |
+| Antigravity CLI (`agy`) | `antigravity-cli` | Uses the separate SQLite and transcript source under `~/.gemini/antigravity-cli` with the same file notifications and fallback scan. |
+| TRAE CN | `trae-cn` | Pilot registers user-level IDE Hooks in `~/.trae-cn/hooks.json`. Pilot reports token usage when it can match local Hub records to model responses. Set `agents.trae-cn.captureMessageContent=false` to disable message content capture. |
 | Wukong | `wukong` | Runtime auto-discovery and CLI API polling via local `wukong-cli`; it is not an `agents.d` installer selection. |
 | WorkBuddy | `workbuddy` | Structural Hook/file wakeups with a 30-second local transcript polling fallback. Verified on WorkBuddy Desktop 5.2.6 for macOS and 5.3.5.0 for Windows 11. |
 | Doubao Work | `doubao-work` | Experimental macOS/Windows client-message metadata and task traces; paired local TOOL spans and selected-skill context. Native execution and first-output coverage depend on client evidence; model identities, tokens and full cloud inference remain unavailable. See [scope and configuration](doubao-work.md). |
@@ -138,6 +141,17 @@ type differences are called out in the notes.
 The Windows verification used an installed Pilot package, resolved Node from the
 installer-pinned `node-bin` with Node absent from `PATH`, and passed strict JSONL
 validation against a real WorkBuddy transcript.
+
+Antigravity tool timing prefers the native SQLite execution start. When the next
+model call in the same turn consumes a matched tool result, its request start can
+bound the tool span end if the recorded completion is missing or inconsistent.
+Pilot omits `gen_ai.tool.call.duration` when it uses that bound.
+
+An Antigravity model stop does not close the trace if the same native turn
+continues with another model request. Pilot briefly waits for a recent stop to
+settle so a subsequent planner step can join the original trace. Turns
+triggered by a native `SYSTEM_MESSAGE` still report `role: system`, not
+`role: user`.
 
 Codex collection is transcript-backed. Pilot uses the lightweight
 `SessionStart` and `UserPromptSubmit` hooks to discover the effective
@@ -493,7 +507,7 @@ Use `config.json` when you need to enable or disable individual agents:
 | `multimodal.uploadMode` | **Experimental.** Multimodal upload policy. `none` (default) disables; `input` / `output` / `all` select conversion surfaces. See [Multimodal Collection](multimodal.md). |
 | `multimodal.allowedRootPaths` | Extra local roots merged with agent defaults for `pathToUri`. `~` is expanded. Workspace images need the project directory listed here. See [Multimodal Collection](multimodal.md#allowedrootpaths). |
 
-Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, and `qwen-work-cn`).
+Enable [Data Masking](masking.md) in sensitive environments. To collect multimodal data, see [Multimodal Collection](multimodal.md) (images and local video; `codex`, Qoder IDE/CLI, `qwen-work-cn`, `antigravity`, and `antigravity-cli`).
 
 Existing config files are not rewritten. Restart resident OpenClaw, Pi, and Hermes hosts after upgrading so they load the updated plugin. Agent enable/disable settings, workspace exclusions, masking, and multimodal upload settings remain independent.
 

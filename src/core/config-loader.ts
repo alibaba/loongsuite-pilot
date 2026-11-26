@@ -1,6 +1,10 @@
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
-import { globalPollIntervalMs, DEFAULT_POLL_INTERVAL_MS } from '../utils/poll-interval.js';
+import {
+  DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS,
+  DEFAULT_POLL_INTERVAL_MS,
+  globalPollIntervalMs,
+} from '../utils/poll-interval.js';
 import * as path from 'node:path';
 import type {
   AgentsConfig,
@@ -43,7 +47,7 @@ import { configJsonPath, pickDataDir } from '../utils/data-dir.js';
 import { createLogger } from '../utils/logger.js';
 import { parseKeyValueAttributes, sanitizeAttributes } from '../normalization/global-attributes.js';
 import { buildInterceptorConfig, ensureMaskCoversInterceptor } from '../interceptor/config.js';
-import { resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
+import { resolveDoubaoAppEnabled, resolveDoubaoWorkSource } from '../utils/doubao-work-paths.js';
 
 const logger = createLogger('ConfigLoader');
 
@@ -141,6 +145,9 @@ export interface ConfigFile {
     enabled?: boolean;
     intervalMs?: number;
     repairCooldownMs?: number;
+    tamperProtection?: {
+      enabled?: boolean;
+    };
   };
 
   privacy?: { excludeWorkspaces?: string[] };
@@ -826,7 +833,10 @@ function buildListenersConfig(
     'pi-coding-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     workbuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'doubao-work': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
+    'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
   };
 
   const result = { ...defaults };
@@ -837,7 +847,7 @@ function buildListenersConfig(
       result[key] = {
         enabled: val.enabled ?? result[key]?.enabled ?? true,
         pollInterval: val.pollInterval ?? result[key]?.pollInterval ?? DEFAULT_POLL_INTERVAL_MS,
-        ...(key === 'doubao-work' ? resolveDoubaoWorkSource(val) : {}),
+        ...(key === 'doubao-work' || key === 'doubao' ? resolveDoubaoWorkSource(val) : {}),
       };
       if (key === 'qwen-work-cn-collaboration' && Object.hasOwn(val, 'includeConversationIds')) {
         const ids: unknown = val.includeConversationIds;
@@ -854,6 +864,12 @@ function buildListenersConfig(
         logger.warn('Invalid Doubao client; disabling this listener', {
           valueType: typeof val.client,
           allowedValues: ['doubao-work', 'doubao'],
+        });
+        result[key].enabled = false;
+      }
+      if (key === 'doubao' && val.client !== undefined && val.client !== 'doubao') {
+        logger.warn('Invalid Doubao App client; disabling this listener', {
+          valueType: typeof val.client, allowedValues: ['doubao'],
         });
         result[key].enabled = false;
       }
@@ -913,8 +929,11 @@ function buildRetentionConfig(file: ConfigFile | null): LogRetentionConfig {
 }
 
 function buildHookWatchdogConfig(file: ConfigFile | null): HookWatchdogConfig {
+  const enabled = envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true);
+  const requested = envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false);
   return {
-    enabled: envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true),
+    enabled,
+    tamperProtection: enabled && requested,
     intervalMs: envInt(
       'LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS',
       file?.hookWatchdog?.intervalMs ?? 5 * 60_000, // 5 minutes
@@ -1488,9 +1507,12 @@ export function buildAutoUpdateConfig(
   }
 
   const hasPackageConfig = !!packageUrl;
+  const enabled = envBool('LOONGSUITE_PILOT_HOOK_WATCHDOG_ENABLED', file?.hookWatchdog?.enabled ?? true);
+  const requested = envBool('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', file?.hookWatchdog?.tamperProtection?.enabled ?? false);
 
   return {
     enabled: hasPackageConfig && envBool('LOONGSUITE_PILOT_AUTO_UPDATE_ENABLED', file?.autoUpdate?.enabled ?? true),
+    tamperProtection: enabled && requested,
     checkIntervalMs: envInt(
       'LOONGSUITE_PILOT_AUTO_UPDATE_INTERVAL_MS',
       file?.autoUpdate?.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS,

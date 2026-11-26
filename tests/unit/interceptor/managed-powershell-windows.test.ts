@@ -1,12 +1,13 @@
 import { execFile, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import { createServer, type Socket } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
+import { waitForPidMarker } from '../../helpers/wait-for-pid-marker.js';
 import { PowerShellPool } from '../../../src/interceptor/managed/powershell-pool.js';
 import { spawnPowerShellGuardian, windowsJobBootstrap, windowsPowerShellEnv } from '../../../src/interceptor/managed/windows-job-guardian.js';
 
@@ -74,12 +75,6 @@ async function poolFile(body: string): Promise<{ pool: PowerShellPool; file: str
   const pool = new PowerShellPool({ scriptsDir: dir, size: 1 });
   pools.push(pool);
   return { pool, file, dir };
-}
-
-async function waitFile(file: string, diagnostic = () => ''): Promise<string> {
-  for (let i = 0; i < 1500 && !existsSync(file); i++) await new Promise(resolve => setTimeout(resolve, 10));
-  if (!existsSync(file)) throw new Error(`missing native test marker ${file}; ${diagnostic()}`);
-  return (await readFile(file, 'utf8')).replace(/^\uFEFF/, '').trim();
 }
 
 async function waitExit(pid: number): Promise<void> {
@@ -225,14 +220,14 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const dir = await directory();
     const pidFile = join(dir, 'descendant.pid');
     const file = join(dir, 'tree@1.ps1');
-    const spawnChild = `$p = Start-Process -FilePath ${quote(process.execPath)} -ArgumentList '-e', '"setInterval(()=>{},1000)"' -PassThru; Set-Content -LiteralPath ${quote(pidFile)} -Value ([string]$p.Id) -Encoding UTF8;`;
+    const spawnChild = `$p = Start-Process -FilePath ${quote(process.execPath)} -ArgumentList '-e', '"setInterval(()=>{},1000)"' -PassThru; Set-Content -LiteralPath ${quote(pidFile + '.tmp')} -Value ([string]$p.Id) -Encoding UTF8; [System.IO.File]::Move(${quote(pidFile + '.tmp')}, ${quote(pidFile)});`;
     const tail = scenario === 'success' ? `'{"matched":false}'`
       : scenario === 'executor-crash' ? 'Stop-Process -Id $PID -Force' : 'Start-Sleep -Seconds 60';
     await writeFile(file, `\uFEFF${spawnChild} ${tail}`);
     const pool = new PowerShellPool({ scriptsDir: dir, size: 1 });
     pools.push(pool);
     const result = pool.run(file, '{}', scenario === 'timeout' ? 8_000 : 20_000);
-    const pid = Number(await waitFile(pidFile));
+    const pid = await waitForPidMarker(pidFile);
     if (scenario === 'stop') pool.stop();
     expect((await result).ok).toBe(scenario === 'success');
     await waitExit(pid);
@@ -242,7 +237,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const dir = await directory();
     const pidFile = join(dir, 'native-child.pid');
     const executor = join(dir, 'executor.cjs');
-    await writeFile(executor, `const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});require('node:fs').writeFileSync(process.argv[2],String(c.pid));process.stdin.resume();`);
+    await writeFile(executor, `const c=require('node:child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:true});const fs=require('node:fs');fs.writeFileSync(process.argv[2]+'.tmp',String(c.pid));fs.renameSync(process.argv[2]+'.tmp',process.argv[2]);process.stdin.resume();`);
     const guardian = spawnPowerShellGuardian(process.execPath, [executor, pidFile], dir);
     guardian.stdout?.resume();
     let stderr = '';
@@ -250,7 +245,7 @@ describe.skipIf(process.platform !== 'win32')('Windows PowerShell 5.1 native Job
     const lease = guardian.stdio[3] as Duplex;
     lease.on('error', () => {});
     try {
-      const pid = Number(await waitFile(pidFile, () => stderr));
+      const pid = await waitForPidMarker(pidFile, () => stderr);
       if (scenario === 'deadline') lease.write('{"timeout":100}\n');
       else if (scenario === 'lease') lease.end();
       else guardian.kill('SIGKILL');

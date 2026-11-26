@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { QwenWorkCNTraceInput } from '../../../src/inputs/qwen-work-cn/qwen-work-cn-trace-input.js';
 import { ClientType, CollectionMethod, type AgentActivityEntry } from '../../../src/types/index.js';
 import { MockStateStore } from '../../helpers/mock-state-store.js';
+import { execSql, hasNodeSqlite } from '../../helpers/sqlite-fixture.mjs';
 
 describe('QwenWorkCNTraceInput', () => {
   let root: string;
@@ -40,6 +41,7 @@ describe('QwenWorkCNTraceInput', () => {
       stateStore: stateStore as never,
       logDir: historyDir,
       segmentsRoot,
+      flashSource: { desktopDb: path.join(root, 'agents.db'), flashDb: path.join(root, 'qwenwork.db') },
       pollIntervalMs: 60_000,
     });
   }
@@ -184,6 +186,70 @@ describe('QwenWorkCNTraceInput', () => {
     expect(response['gen_ai.usage.cache_creation.input_tokens']).toBe(10);
     expect(response['gen_ai.usage.reasoning_tokens']).toBeUndefined();
     expect(interceptReader.readInterceptFile).not.toHaveBeenCalled();
+  });
+
+  it.skipIf(!hasNodeSqlite()).each([
+    { caseName: 'matching calls', secondPrompt: false, toolId: 'call-1', expected: true },
+    { caseName: 'another tool invocation', secondPrompt: false, toolId: 'call-other', expected: false },
+    { caseName: 'an ambiguous prompt owner', secondPrompt: true, toolId: 'call-1', expected: false },
+  ])('enriches only the bound Flash calls with $caseName', async ({ secondPrompt, toolId, expected }) => {
+    const prompt = 'read a synthetic fixture';
+    const at = Date.parse('2026-08-06T06:00:05.000Z');
+    const observed = nano('2026-08-06T06:00:12.000Z');
+    const s2 = 'turn-1:s2';
+    await writeHistory([
+      entry({ 'event.id': 'request-1', 'event.name': 'llm.request', observed_time_unix_nano: observed,
+        'gen_ai.request.model': 'unknown',
+        'gen_ai.input.messages_delta': [{ role: 'user', parts: [{ type: 'text', content: prompt }] }] }),
+      entry({ 'event.id': 'response-1', 'gen_ai.response.id': 'response-1', 'gen_ai.response.model': 'unknown' }),
+      entry({ 'event.id': 'tool-1', 'event.name': 'tool.call', 'gen_ai.tool.call.id': 'call-1' }),
+      entry({ 'event.id': 'request-2', 'event.name': 'llm.request', 'gen_ai.step.id': s2 }),
+      entry({ 'event.id': 'response-2', 'gen_ai.step.id': s2, 'gen_ai.response.id': 'response-2',
+        'gen_ai.response.model': 'resolved-model' }),
+    ]);
+
+    const flashDb = path.join(root, 'qwenwork.db');
+    const sqlJson = (value: object) => `'${JSON.stringify(value).replaceAll("'", "''")}'`;
+    const binding = sqlJson({ engineSessionBindingV1: { hostSessionId: 'session-1', subChatId: 'sub-1',
+      nativeSessionId: 'native-1', storageNamespace: flashDb, engineId: 'opencode' } });
+    await execSql(path.join(root, 'agents.db'), `
+      CREATE TABLE sub_chats(id TEXT PRIMARY KEY, session_id TEXT, ext TEXT);
+      INSERT INTO sub_chats VALUES ('sub-1','session-1',${binding});
+    `);
+    const user = sqlJson({ role: 'user' });
+    const text = sqlJson({ type: 'text', text: prompt });
+    const assistant = sqlJson({ role: 'assistant', parentID: 'native-user', modelID: 'mode-test-route' });
+    await execSql(flashDb, `
+      CREATE TABLE message(id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+      CREATE TABLE part(id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);
+      INSERT INTO message VALUES
+        ('native-user','native-1',${at + 5},${user}),
+        ('native-one','native-1',${at + 10},${assistant}),
+        ('native-two','native-1',${at + 1000},${assistant});
+      INSERT INTO part VALUES
+        ('p-user','native-user','native-1',${text}),
+        ('p-01','native-one','native-1',${sqlJson({ type: 'tool', callID: toolId })}),
+        ('p-02','native-one','native-1',${sqlJson({ type: 'step-finish',
+          tokens: { input: 70, output: 9, reasoning: 2, cache: { read: 21, write: 3 } } })}),
+        ('p-03','native-two','native-1',${sqlJson({ type: 'step-finish',
+          tokens: { input: 12, output: 20, reasoning: 0, cache: { read: 90, write: 0 } } })});
+      ${secondPrompt ? `INSERT INTO message VALUES ('other-user','native-1',${at + 20},${user});
+        INSERT INTO part VALUES ('p-other','other-user','native-1',${text});` : ''}
+    `);
+
+    const output = await collectOnce(makeInput());
+    const responses = output.filter(value => value['event.name'] === 'llm.response');
+    expect(responses).toHaveLength(2);
+    expect(responses.map(value => value['gen_ai.usage.total_tokens'])).toEqual(expected ? [105, 122] : [undefined, undefined]);
+    expect(responses[0]!['gen_ai.request.model']).toBe(expected ? 'mode-test-route' : undefined);
+    expect(responses[0]!['gen_ai.response.model']).toBe(expected ? undefined : 'unknown');
+    expect(responses[1]!['gen_ai.response.model']).toBe('resolved-model');
+    if (expected) {
+      expect(responses[0]).toMatchObject({ 'gen_ai.usage.input_tokens': 94, 'gen_ai.usage.output_tokens': 11,
+        'gen_ai.usage.cache_read.input_tokens': 21, 'gen_ai.usage.cache_creation.input_tokens': 3 });
+      expect(responses[1]).toMatchObject({ 'gen_ai.usage.input_tokens': 102, 'gen_ai.usage.output_tokens': 20,
+        'gen_ai.usage.cache_read.input_tokens': 90 });
+    }
   });
 
   it('does not read the QoderWork intercept file', async () => {

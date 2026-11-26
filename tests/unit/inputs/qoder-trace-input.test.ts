@@ -463,6 +463,24 @@ describe('QoderTraceInput token-enricher', () => {
   // segment records, so pairing no longer depends on the two clocks agreeing.
   // The timestamp pass above stays for JSONL written before the hook had it.
   describe('enrichCliTurn (segment paired by agent.client_request_id)', () => {
+    it('keeps an explicit Auto request when the segment reports a routed model', () => {
+      const request = makeEntry({
+        'event.name': 'llm.request',
+        'gen_ai.step.id': 'turn-1:s1',
+        'gen_ai.request.model': 'auto',
+      });
+      const response = makeEntry({
+        'gen_ai.step.id': 'turn-1:s1',
+        'gen_ai.request.model': 'auto',
+        'agent.qoder.selected_request_model': true,
+        'agent.client_request_id': 'cli-req',
+      });
+      enrichCliTurn([request, response], [makeSegment({ requestId: 'cli-req', model: 'routed-model' })]);
+      expect(request['gen_ai.request.model']).toBe('auto');
+      expect(response['gen_ai.request.model']).toBe('auto');
+      expect(response['gen_ai.response.model']).toBe('routed-model');
+    });
+
     it('pairs on the client request id even when the clocks are far apart', () => {
       const entries: AgentActivityEntry[] = [
         makeEntry({

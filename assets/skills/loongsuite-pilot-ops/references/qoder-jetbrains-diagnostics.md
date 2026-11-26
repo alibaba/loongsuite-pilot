@@ -23,7 +23,7 @@ Qoder for JetBrains 插件（IntelliJ 系列）
                  └─ ~/.loongsuite-pilot/logs/qoder/history/qoder-YYYY-MM-DD.jsonl
                       └─ QoderTraceInput (id=qoder-trace)
                            ├─ 按 turn 分组，推断 variant（qoder-cli / qoder / qoder-idea）
-                           ├─ IDE/JetBrains 类 turn → 按 session 匹配 SQLite token
+                           ├─ IDE/JetBrains 类 turn → 按 session 匹配 SQLite 用量和请求模型
                            │    └─ ~/.qoder/shared_client/cache/db/local.db（IntelliJ 专属 DB）
                            │         或 ~/Library/Application Support/Qoder/.../local.db（桌面版 DB，可能共存）
                            └─ relabel：若匹配到的 DB 是 shared_client（IntelliJ）路径，
@@ -36,8 +36,8 @@ Qoder for JetBrains 插件（IntelliJ 系列）
 - **没有专属 hook 脚本，没有专属 settings.json 路径**——检测和采集完全借用 Qoder CLI/IDE 的共享链路
 - **有专属 SQLite DB**：`~/.qoder/shared_client/cache/db/local.db`（IntelliJ 插件写入，与桌面版的
   `SharedClientCache/cache/db/local.db` 是两个不同文件，可能同时存在）
-- agentType 的最终判定发生在 `QoderTraceInput` 内部：若一个 turn 的 SQLite token 匹配到了
-  `shared_client` 路径的 DB，该 turn 会被重新标记为 `qoder-idea`；否则保持 `qoder`
+- `QoderTraceInput` 在 `shared_client` 数据库中找到该会话的用量或模型记录后，可将其标记为 `qoder-idea`。
+- 请求模型来自 `chat_record.extra.modelConfig.key`，可独立于 `chat_message.token_info` 读取。Pilot 优先用原生请求或消息 ID 关联，缺失时仅在助手时间附近的请求唯一时补齐。
 
 | 关键组件 | 路径 | 谁负责写 |
 |---|---|---|
@@ -151,8 +151,7 @@ sqlite3 "$DB" "
 | `~/.qoder/shared_client/cache/db/local.db` | Qoder for JetBrains（IntelliJ 系列插件） |
 | `~/Library/Application Support/Qoder/SharedClientCache/cache/db/local.db`（macOS）/ `${XDG_CONFIG_HOME:-~/.config}/Qoder/SharedClientCache/cache/db/local.db`（Linux） | Qoder 桌面版（Electron） |
 
-`QoderTraceInput` 会读取**全部存在的 DB 路径**并按 `session_id` 匹配对应的 token 行，
-两者可以共存，互不影响。
+`QoderTraceInput` 按 `session_id` 在候选数据库中查找用量和请求模型。
 
 ---
 
@@ -162,7 +161,7 @@ sqlite3 "$DB" "
 
 1. 按 `gen_ai.turn.id` 对 hook 记录分组
 2. 对每个 turn，若所有 entry 的 `gen_ai.agent.type` 都是 `qoder`（未被 hook 阶段标记为 `qoder-idea`），
-   且该 turn 的 `session.id` 匹配到的 SQLite token 来自 `shared_client` 路径的 DB，
+   且该会话的 SQLite 用量或请求模型来自 `shared_client` 路径的 DB，
    则整批 entry 的 `gen_ai.agent.type` 会被重写为 `qoder-idea`
 
 ```bash

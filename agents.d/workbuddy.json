@@ -21,6 +21,15 @@
     "eventMatchers": {
       "PreToolUse": ".*",
       "PostToolUse": ".*"
+    },
+    "interceptor": {
+      "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
+      "hookCommand": "$PILOT_DATA/hooks/interceptor-hook.sh --agent workbuddy --event",
+      "eventMatchers": {
+        "PreToolUse": ".*",
+        "PostToolUse": ".*"
+      },
+      "insert": "head"
     }
   },
   "input": {

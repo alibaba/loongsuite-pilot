@@ -21,6 +21,7 @@ import {
   collectCliExpectedRequestIds,
   enrichCliFromSegments,
   enrichCliPrimary,
+  enrichIdeRequestModels,
   enrichIdeTurn,
   injectTraceId,
   needsCliSegmentFallback,
@@ -278,6 +279,7 @@ export class QoderTraceInput extends BaseInput {
       // retry does not reuse modified timestamps or partially written usage.
       const probeEntries = sessionEntries.map(entry => ({ ...entry }));
       enrichIdeTurn(probeEntries, result.rows);
+      enrichIdeRequestModels(probeEntries, result.requestModels);
       ideSqliteSnapshots.set(sessionId, { result, enrichedEntries: probeEntries });
       if (needsIdeSqliteRetry(probeEntries)) ideRetrySessions.push(sessionId);
     }
@@ -290,9 +292,13 @@ export class QoderTraceInput extends BaseInput {
         const retryResult = await this.readIdeSqliteTokens(sessionId);
         // A transient failure or disappearing DB must not discard rows already
         // available on the first read. Session snapshots normally only grow.
-        if (retryResult.rows.length >= ideSqliteSnapshots.get(sessionId)!.result.rows.length) {
+        const previous = ideSqliteSnapshots.get(sessionId)!.result;
+        if (retryResult.rows.length > previous.rows.length ||
+          (retryResult.rows.length === previous.rows.length &&
+            (retryResult.requestModels?.length ?? 0) >= (previous.requestModels?.length ?? 0))) {
           const enrichedEntries = ideSessionGroups.get(sessionId)!.map(entry => ({ ...entry }));
           enrichIdeTurn(enrichedEntries, retryResult.rows);
+          enrichIdeRequestModels(enrichedEntries, retryResult.requestModels);
           ideSqliteSnapshots.set(sessionId, { result: retryResult, enrichedEntries });
         }
       }
@@ -301,7 +307,14 @@ export class QoderTraceInput extends BaseInput {
     for (const [sessionId, sessionEntries] of ideSessionGroups) {
       const { result: { matchedDbPath }, enrichedEntries } = ideSqliteSnapshots.get(sessionId)!;
       for (let i = 0; i < sessionEntries.length; i++) {
-        Object.assign(sessionEntries[i], enrichedEntries[i]);
+        const entry = sessionEntries[i];
+        const enriched = enrichedEntries[i];
+        Object.assign(entry, enriched);
+        // Model-only enrichment can remove a placeholder from the snapshot.
+        // Object.assign cannot carry that deletion back to the original event.
+        if (Object.hasOwn(entry, 'gen_ai.response.model') && !Object.hasOwn(enriched, 'gen_ai.response.model')) {
+          delete entry['gen_ai.response.model'];
+        }
       }
 
       // Fix agent type when hook processor couldn't detect qoder-idea (Node < 22 fallback).
@@ -494,7 +507,7 @@ export class QoderTraceInput extends BaseInput {
       record,
       ClientType.QoderCli,
       undefined,
-      { preserveSafeCustomTopLevelFields: true },
+      { preserveSafeCustomTopLevelFields: true, preserveMissingModels: true },
     );
     if (canonicalEntry) {
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder');

@@ -12,6 +12,7 @@ import { prepareDelegatedTurn } from './delegated-turn-converter.js';
 
 const SYNTHETIC_PARENT = '0000000000000001';
 export const QODER_TRANSCRIPT_AGENT_TYPES = new Set(['qoder', 'qoder-cli', 'qoder-app', 'qoder-cn', 'qoder-idea']);
+export const QODER_RESPONSE_MODEL_RECORDED = 'agent.qoder.response_model_recorded';
 const WORK_KEYS = ['gen_ai.agent.id', 'gen_ai.agent.name', 'gen_ai.agent.scope',
   'gen_ai.agent.parent.id', 'gen_ai.agent.parent.invocation.id', 'gen_ai.subagent.parent_tool_call.id'] as const;
 const OUTGOING_KEYS = ['gen_ai.agent.invocation.id', 'gen_ai.agent.peer.id', 'gen_ai.agent.peer.name'] as const;
@@ -69,7 +70,8 @@ export function convertQoderTurn(
 ) {
   const prepared = prepareQoderTurn(records, options);
   try {
-    const result = convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler });
+    const result = convertEventLogToTrace(prepared.records, { ...options, handler: prepared.handler,
+      passthroughKeys: [...(options.passthroughKeys ?? []), QODER_RESPONSE_MODEL_RECORDED] });
     return { ...result, spanCount: result.spanCount - prepared.removedEntryCount };
   } finally {
     prepared.cleanup?.();
@@ -123,6 +125,7 @@ export function prepareQoderTurn(
   function attributes(inv: { passthroughAttributes?: Record<string, unknown> }, own: Record<string, unknown>) {
     const fields = { ...inv.passthroughAttributes };
     for (const key of [...WORK_KEYS, ...OUTGOING_KEYS, CREDIT_AMOUNT, CREDIT_BILLABLE, 'gen_ai.step.id']) delete fields[key];
+    delete fields[QODER_RESPONSE_MODEL_RECORDED];
     inv.passthroughAttributes = { ...fields, ...own };
   }
   const overrides: Partial<ExtendedTelemetryHandler> = {
@@ -148,6 +151,12 @@ export function prepareQoderTurn(
       return reserved(stableId('step', currentStep), () => handler.startReactStep(invocation, context, start));
     },
     startLlm(invocation, context, start) {
+      // The util fills response.model from request.model when the response
+      // has none. Preserve the distinction between a selected tier and a
+      // model reported by Qoder for the paired response.
+      if (invocation.passthroughAttributes?.[QODER_RESPONSE_MODEL_RECORDED] === false) {
+        invocation.responseModelName = null;
+      }
       attributes(invocation, { ...consensus(byStep.get(currentStep) ?? [], WORK_KEYS),
         ...(currentStep ? { 'gen_ai.step.id': currentStep } : {}) });
       return reserved(stableId('llm', currentStep), () => handler.startLlm(invocation, context, start));
@@ -168,7 +177,28 @@ export function prepareQoderTurn(
       return typeof value === 'function' ? value.bind(target) : value;
     },
   });
-  return { records: delegated.records, handler: wrapped,
+  // The util merges response fragments for a step and keeps the first
+  // fragment's custom fields. Carry the same model evidence on each fragment.
+  const responsesWithModel = new Set<string>();
+  const responseKey = (record: EventLogRecord) => {
+    const id = record['gen_ai.response.id'];
+    return typeof id === 'string' && id ? JSON.stringify([record['gen_ai.step.id'], id]) : undefined;
+  };
+  const hasModel = (record: EventLogRecord) => {
+    const model = record['gen_ai.response.model'];
+    return typeof model === 'string' && model.length > 0;
+  };
+  for (const record of delegated.records) {
+    if (record['event.name'] !== 'llm.response' || !hasModel(record)) continue;
+    const key = responseKey(record);
+    if (key) responsesWithModel.add(key);
+  }
+  const withModelEvidence = delegated.records.map(record => {
+    if (record['event.name'] !== 'llm.response') return record;
+    const key = responseKey(record);
+    return { ...record, [QODER_RESPONSE_MODEL_RECORDED]: hasModel(record) || (!!key && responsesWithModel.has(key)) };
+  });
+  return { records: withModelEvidence, handler: wrapped,
     get removedEntryCount() { return delegated.removedEntryCount; },
     cleanup() { idGenerator.clear(); idGenerator.clearTraceId(); } };
 }

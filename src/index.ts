@@ -10,6 +10,7 @@ import { handleWorkerCli } from './local-workers/worker-cli.js';
 import { handlePiSdkAgentCli } from './pi-sdk/pi-sdk-agent-cli.js';
 import { acquireSingleInstanceLock } from './utils/single-instance-lock.js';
 import { COLLECTOR_PROCESS_PATTERNS, writePidFileSync, removeOwnPidFileSync } from './utils/pid-utils.js';
+import { bootstrapSyncHooksAssets } from './core/sync-hooks-assets-bootstrap.js';
 
 const logger = createLogger('Main');
 
@@ -138,6 +139,13 @@ async function main(): Promise<void> {
       logger.warn('cannot record daemon pid in spawn lock', { spawnLockPath, error: String(err) });
     }
   }
+
+  // Sync hook assets from versions/<current>/assets/hooks/ → data/hooks/.
+  // Invoked at process entry (not just via loongsuite-pilot.sh cmd_run) so
+  // production launchers that bypass cmd_run (e.g. start-collector.sh style
+  // `exec node dist/index.js`) also refresh the runtime hook copy after a
+  // version upgrade. Non-fatal: failures log a warning and never block startup.
+  await bootstrapSyncHooksAssets({ dataDir });
 
   // On Windows the launcher cannot record the daemon's real pid: there is no exec(2),
   // so wscript/PowerShell run node as a *child* and would only ever capture the wrapper

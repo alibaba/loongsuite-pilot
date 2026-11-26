@@ -43,7 +43,7 @@
 
 ## 内容、边界与可靠性
 
-只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史、不读取 Cookie、登录缓存或消息数据库，不采集快照中的业务文件正文（首次解析快照 JSON 仍需在预算内读取文件）。
+工作模式只读取新日志已确认的 conversation，支持 `Default` 与账号切换后的 `Profile N`，最多检查 16 个 Profile；同一 conversation 在多个 Profile 出现时跳过歧义。轨迹与需求文件只在该会话内读取，不扫描历史，不采集快照中的业务文件正文（首次解析快照 JSON 仍需在预算内读取文件）。普通聊天读取下述任务消息记录，所有模式均跳过 Cookie 和登录缓存。
 
 本次需求必须在源请求窗口中唯一；复用时结合原生 user 分隔记录及精确工具 ID 选择本次输出。LLM 输入可以保留同一会话此前的可见历史作为上下文，但不会把历史 assistant 输出再次生成为本次 LLM。原始内容字段最多 64 KiB；每轮输入最多 64 KiB，超出时移除最早完整消息。每个所属请求 / 本地执行最多 64 个 assistant 轮次，展开内容合计最多 512 KiB，超限记录省略数量。相邻重复的无工具最终答复只保留一个可见轮次。
 
@@ -85,22 +85,37 @@ Windows 缺少 `LOCALAPPDATA` 时使用 `~/AppData/Local`；macOS 时间保留�
 
 新版 Windows App 的 dispatcher 开始记录（`agent_sandbox_toolcall_exec`、`status: start`）提供明确的 actor、sandbox 与工具调用 ID，仍与原有 `execution_settled` 结果配对；遥测 success/error 重复记录不替代该结果。子执行关联继续校验原生图与 execution 身份。
 
-豆包 App 的工作模式复用同一 `doubao-work` 采集器，需显式设置 `listeners.doubao-work.client: "doubao"`；默认值 `"doubao-work"` 保持原来的豆包工作路径。一套 collector 配置只选择一个产品，不同时合并两个客户端。豆包 App 在 macOS 使用 `~/Library/Application Support/Doubao`，Windows 路径选择为 `%LOCALAPPDATA%/Doubao/User Data`，会话目录使用 `.doubao/agent_mode/workspace/.sessions`；豆包工作使用 `.doubaowork`。客户端选择同时绑定日志、会话和快照根，不通过日志目录推断。2026-10-30 已用真实 macOS、Windows App 验证工作模式的工具、菜单 Skill、并行与后台子 Agent 及复用。这仅证明已测试的工作模式数据源兼容性；普通聊天和完整提供商遥测仍不在支持范围内。
+豆包 App 工作模式与豆包工作是两个独立产品。默认安装自动发现两者，不需要手动选择客户端；同时使用时，在同一个 Pilot 进程中分别采集。豆包 App 的 Agent/listener ID 为 `doubao`，豆包工作为 `doubao-work`。两者复用同一 `DoubaoWorkInput`、原生文件解析器和 Trace 转换器，只维护两份产品声明，不复制采集代码；协议修复自动适用于两者。
 
-切换客户端前等待旧任务收口并重启 collector；切换后的 checkpoint 会重新基线化该产品的现有日志，只采集之后的新请求，不沿用另一产品的待配对记录或回放它的历史。旧版无客户端标记的 checkpoint 仍按豆包工作解释。普通“对话”模式不保证产生工作模式原生 trajectory，可能仅采到请求边界，无法据此生成 LLM 或补出输入输出。
+豆包 App 在 macOS 使用 `~/Library/Application Support/Doubao`，Windows 使用 `%LOCALAPPDATA%/Doubao/User Data`，原生命名空间为 `.doubao`；豆包工作分别使用 `DoubaoWork` 和 `.doubaowork`。每个产品有独立的 watcher、checkpoint、缓存和请求身份。首次发现只基线化该产品已有日志，后续采集新请求。两个入口同时启用时，各分配一半原有读取、工作量、原生缓存和重建队列预算，避免简单翻倍；这是协作预算，不能解释为严格的进程 CPU/RSS 上限。
 
-测试豆包 App 工作模式时，将下方 listener 设置为 `{ "enabled": true, "pollInterval": 10000, "client": "doubao" }`，无需设置 `logDir`。非法 `client` 值会在配置加载时禁用该 listener，警告包含合法取值及非法值类型。显式 Agent-control 强制启用可覆盖 listener 的 enabled 标记；此时非法 client 回退到默认 Work 数据源，不会自动切换 App。
-
-`logDir` 覆盖日志读取、监听及内置 Agent 定义的检测路径；原生会话与 `coding/snapshot` 仍从所选产品的默认数据目录读取，不从自定义日志目录向上推导。安装器 probe、`deploy --require doubao-work` 与 collector discovery 均使用所选数据源，Windows 同样遵循 `LOCALAPPDATA`。只安装豆包 App、使用默认 client 时，不会被检测成豆包工作；需先显式配置 `client: "doubao"` 再检测或部署。
-
-新增事件及其 OTLP Span 均包含 `loongsuite.doubao_work.client`：`doubao-work` 表示豆包工作，`doubao` 表示 App 工作模式。统一 Agent ID 仍为 `doubao-work`；历史记录没有此字段时保留未知，不根据 ID 猜测补标。多条真实需求即使文本或时间戳相同仍视为歧义，不能仅按文本去重后假定它们属于同一次 invocation。
+下面配置仅用于显式控制，普通接入不需要编辑。关闭一个产品的 Agent/listener 不影响另一个产品。`logDir` 只覆盖对应产品的日志读取、监听和检测路径，原生会话与快照仍绑定该产品的默认数据目录。安装器 probe、`deploy --require doubao` / `doubao-work` 和 collector discovery 使用一致的路径规则。
 
 ```json
 {
-  "agents": { "doubao-work": { "enabled": true } },
-  "listeners": { "doubao-work": { "enabled": true, "pollInterval": 10000 } }
+  "agents": { "doubao": { "enabled": true }, "doubao-work": { "enabled": true } },
+  "listeners": {
+    "doubao": { "enabled": true, "pollInterval": 10000 },
+    "doubao-work": { "enabled": true, "pollInterval": 10000 }
+  }
 }
 ```
+
+旧的 `listeners.doubao-work.client` 仍保留单产品选择语义：显式 `doubao-work` 不默认开启 App，显式 `doubao` 继续由旧入口采集 App，并抑制独立 App 入口，避免双采。迁移到双产品配置时，等待已有任务结束、停止 Pilot、备份并合并配置，移除旧 `client`；旧入口的 App `logDir` 应移到 `listeners.doubao.logDir`。已有 App checkpoint 自动接到独立 `doubao` 状态，保留待完成请求与去重记录；无客户端标记的旧状态仍属于豆包工作。已有显式禁用或安装器 Agent 选择不会被升级强行开启。
+
+独立入口使用 `doubao` 和 `doubao-work` 区分 `gen_ai.agent.type`、`gen_ai.framework`、缺省 Agent ID 和按 Agent 生成的服务名后缀。通过旧入口采集 App 时，这些字段仍使用 `doubao-work`，并继续应用该 Agent 的内容采集策略。两种入口都用 `loongsuite.doubao_work.client` 标记实际来源，原生主、子 Agent ID 保留源值。
+
+2026-10-30 已用真实 macOS、Windows App 验证工作模式工具、菜单 Skill、并行与后台子 Agent 及复用。多条真实需求即使文本或时间戳相同仍视为歧义。
+
+### 豆包 App 普通聊天
+
+普通聊天与工作模式共用默认 `doubao` 入口。客户端收发日志提供请求 UUID、会话 ID、消息 ID 和完成边界，本地 `Profile */IndexedDB/chrome_doubao-chat_0.indexeddb.leveldb` 的任务记录提供输入输出。Pilot 只读 Chromium WAL 和不可变 SSTable，检查校验和、分块和消息关联，保持数据库由客户端持有。记录迟写、半条记录和临时读取失败时保留待采请求，后续轮询继续推进。首次启用采集新请求，旧会话中的新增轮次也按独立请求身份采集。
+
+客户端任务库保存正在执行的请求，并会在回答完成后清空。Pilot 从 WAL 和 SSTable 保留已观察到的请求消息，按同一任务库键及请求 UUID 的最新序列选择，并与本次客户端日志的会话、消息 ID 和时间边界严格关联。空任务库和任务库键清理保留此前已观察到的请求，明确更新同一请求时使用更新后的状态。损坏或未支持的任务库编码继续保留待采状态，后续无关请求不会解除损坏来源的保护。客户端已压缩清除且无法恢复的正文会形成采集缺口。
+
+当前覆盖文本消息的输入输出及 ENTRY → AGENT → STEP → LLM。成功回复等待 `on_message_receiving_end`，即使会话结束日志先落盘也会保留待采状态。取消或失败的请求缺少接收结束事件时，使用已观测到的会话结束时间。Span 属性 `loongsuite.doubao_work.timing_basis` 记录时间来源。原生 `model_id` 保留为专属字段，提供商模型名称与 Token 尚无可靠来源。聊天记录中的图片、音频及其他非文本块需继续适配。2026-11-23 已在 macOS 2.34.6 和 Windows 2.35.8 真实验证普通文本聊天、同会话增量、取消与 collector 重启恢复。IndexedDB 数据库及对象库编号由本地安装分配，读取按键前缀编码解析，保持数据索引与任务库名称检查。普通聊天中的工具、文档等混合块尚未覆盖，已观察到长篇写作被客户端转为文档任务后保留待采状态。Windows 2.35.8 工作模式已验证本地写入与读取及工具观测，当前原生工作轨迹正文仍有缺口。
+
+聊天原生读取共用上述每轮预算。最多读取 32 个 WAL / SSTable 文件，逻辑记录和表文件各最多 8 MiB，单条文本最多 512 KiB，单源保留最近 128 个任务投影。消息投影缓存最多 16 MiB，双产品同时运行时减半；正在解码的单个表另有最多 8 MiB 的临时空间。首次冷读可能跨多个轮询周期，不变 WAL 只校验小锚点，不变表不再读取正文。原始任务对象及正文缓存不写入 checkpoint。
 
 Agent 使用 `detection-only`。关闭 listener / Agent 即停止采集。Skill 的选中不证明实际加载；独立工作伙伴页面、云端完整 Agent 生命周期仍无覆盖。
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   classifyExecutable,
+  resolveQoderCnSurface,
   readWindowsProcess,
   resolveQoderSurface,
 } from '../../../src/interceptor/cli/qoder-surface.js';
@@ -11,6 +12,9 @@ describe('qoder surface detection', () => {
     expect(classifyExecutable('Qoder.exe')).toBe('qoder');
     expect(classifyExecutable('qodercli')).toBe('qodercli');
     expect(classifyExecutable('qoder-cli')).toBe('qodercli');
+    expect(classifyExecutable('QoderCN.exe')).toBe('qoder-cn');
+    expect(classifyExecutable('qoder-cn')).toBe('qoder-cn');
+    expect(classifyExecutable('qoderclicn')).toBe('qoderclicn');
   });
 
   it('ignores Qoder Work and interceptor hosts', () => {
@@ -23,6 +27,11 @@ describe('qoder surface detection', () => {
 
   it('prefers QODER_CONFIG_DIR when it points at the desktop profile', () => {
     expect(resolveQoderSurface({ QODER_CONFIG_DIR: '/home/u/.qoder' })).toBe('qoder');
+    expect(resolveQoderSurface({ QODER_CONFIG_DIR: '/home/u/.qoder-cn' })).toBe('qoder-cn');
+    expect(resolveQoderSurface({ QODER_CONFIG_DIR: '/home/u/.qoder-cn',
+      LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn' })).toBe('qoderclicn');
+    expect(resolveQoderCnSurface({ LOONGSUITE_QODERCLI_FLAVOR: 'qoderclicn' })).toBe('qoderclicn');
+    expect(resolveQoderCnSurface({ QODER_CONFIG_DIR: '/home/u/.qoder' })).toBe('qoder-cn');
   });
 
   it('uses PowerShell CIM rather than the removed WMIC executable on Windows', () => {

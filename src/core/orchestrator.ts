@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 
 // Flushers
 import { BaseFlusher } from '../flushers/base-flusher.js';
-import { SlsFlusher } from '../flushers/sls-flusher.js';
+import { SlsFlusher, type EndpointCounter } from '../flushers/sls-flusher.js';
 import { JsonlFlusher } from '../flushers/jsonl-flusher.js';
 import { HttpFlusher } from '../flushers/http-flusher.js';
 import { MultiFlusher } from '../flushers/multi-flusher.js';
@@ -71,11 +71,14 @@ import { PiCodingAgentLogInput, ensurePiCodingAgentLogDir } from '../inputs/pi-c
 import { MimoCodeLogInput } from '../inputs/mimo-code-log/mimo-code-log-input.js';
 import { QwenCodeCliLogInput } from '../inputs/qwen-code-cli-log/qwen-code-cli-log-input.js';
 import { HermesLogInput } from '../inputs/hermes-log/hermes-log-input.js';
+import { TraeCnLogInput } from '../inputs/trae-cn-log/trae-cn-log-input.js';
 import { DshLogInput, ensureDshLogDir } from '../inputs/dsh-log/dsh-log-input.js';
 import { OpenClawPluginInput, ensureOpenClawPluginLogDir } from '../inputs/openclaw-plugin/openclaw-plugin-input.js';
 import { WukongInput } from '../inputs/wukong/wukong-input.js';
 import { WorkBuddyInput } from '../inputs/workbuddy/workbuddy-input.js';
 import { DoubaoWorkInput } from '../inputs/doubao-work/doubao-work-input.js';
+import { doubaoAppUsesLegacySource, resolveDoubaoAppEnabled, type DoubaoClient } from '../utils/doubao-work-paths.js';
+import { AntigravityInput, type AntigravityClientType } from '../inputs/antigravity/antigravity-input.js';
 
 import { LogRetentionService } from './log-retention-service.js';
 import { CorrelationStore } from './upstream-link/correlation-store.js';
@@ -159,10 +162,14 @@ export class Orchestrator extends EventEmitter {
     'qwen-code-cli-log': 'qwen-code-cli',
     'hermes-agent-log': 'hermes-agent',
     'openclaw-plugin-log': 'openclaw',
+    'trae-cn-log': 'trae-cn',
     'wukong': 'wukong',
     'workbuddy': 'workbuddy',
     'doubao-work': 'doubao-work',
+    doubao: 'doubao',
     'dsh-log': 'dsh',
+    'antigravity': 'antigravity',
+    'antigravity-cli': 'antigravity-cli',
   };
 
   private readonly config: AnalyticsConfig;
@@ -347,6 +354,7 @@ export class Orchestrator extends EventEmitter {
       installedBy: 'daemon',
       deployInterceptorHooks: shouldDeployInterceptorHooks(this.config.interceptor),
       doubaoWork: this.config.listeners['doubao-work'],
+      doubao: this.config.listeners.doubao,
     });
     await this.deploymentManager.loadDefinitions();
     await this.refreshDeploymentScope();
@@ -403,8 +411,10 @@ export class Orchestrator extends EventEmitter {
     this.hookWatchdog.start();
     this.startHookInstallSignalWatch();
 
-    // 11. Start updater watchdog only when resolved auto-update is enabled.
-    if (this.config.autoUpdate?.enabled) {
+    // 11. The process stays up when version checks or hook tamper repair is on.
+    // Both off means it exits, and a missing pid is the expected state.
+    const updaterExpected = (this.config.autoUpdate?.enabled ?? false) || this.config.hookWatchdog.tamperProtection;
+    if (updaterExpected) {
       this.updaterWatchdog = new UpdaterWatchdog({
         enabled: true,
         dataDir: this.dataDir,
@@ -448,12 +458,7 @@ export class Orchestrator extends EventEmitter {
       cmsWorkspace: this.config.cms?.workspace ?? '',
       hostSn: this.config.hostSn,
       hostIdentityTags: this.config.hostIdentityTags,
-      // Same condition as the updater watchdog above, deliberately: whether an updater is
-      // supposed to exist decides both whether we restart it and whether its absence is
-      // worth an alarm. Auto-update resolves to disabled whenever no package source is
-      // configured, and the updater exits immediately on that config — so a missing pid
-      // there is the expected state, not a fault.
-      autoUpdateEnabled: this.config.autoUpdate?.enabled ?? false,
+      updaterExpected: updaterExpected,
     });
     // 14. Always publish runtime health for service managers. The status bar UI
     // may be disabled, but Windows Task Scheduler still needs runtime.json to
@@ -574,18 +579,6 @@ export class Orchestrator extends EventEmitter {
     });
     await this.dashboardServer?.stop();
     this.dashboardServer = null;
-    await this.interceptorService?.stop().catch(err => {
-      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
-    });
-    try {
-      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
-    } catch {
-      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
-      logger.warn('final interceptor status unavailable');
-    }
-    // The worker is the only checkpoint writer. The collector cache is an IPC mirror.
-    this.interceptorService = null;
-    this.verdictStore = null;
     await this.metricsSummaryWriter?.stop();
     this.runtimeWriter?.stop();
     this.updaterWatchdog?.stop();
@@ -599,6 +592,20 @@ export class Orchestrator extends EventEmitter {
     this.inputManager?.cancelPendingOutputs();
     await this.agentDiscoveryService?.stop();
     await this.inputManager?.stopAll();
+    // Drain native requests before the worker's final checkpoint: enrichment
+    // can still establish anonymous prompt ownership while inputs are stopping.
+    await this.interceptorService?.stop().catch(err => {
+      logger.warn('interceptor stop failed during orchestrator shutdown', { error: String(err) });
+    });
+    try {
+      if (this.interceptorService?.getStatus) this.lastInterceptorStatus = await this.interceptorService.getStatus();
+    } catch {
+      this.lastInterceptorStatus = unavailableInterceptorStatus(this.config.interceptor.mode === 'all');
+      logger.warn('final interceptor status unavailable');
+    }
+    // The runtime writer has exited; stop has also saved any unconfirmed mirror bindings.
+    this.interceptorService = null;
+    this.verdictStore = null;
     // The final dataflow window must observe the last serialized collect and
     // entry queue drain, while the flusher counters are still available.
     try {
@@ -822,6 +829,7 @@ export class Orchestrator extends EventEmitter {
   }
 
   private createHookWatchdog(): HookWatchdog {
+    const pilotDir = this.resolvePilotDir();
     const watchdog = new HookWatchdog(this.config.hookWatchdog, this.buildHookWatchdogTargets(), [
       ...HookWatchdog.defaultInterceptTargets(this.dataDir, id => this.isAgentGatedEnabled(id) && this.scopeAllows(id)),
       ...this.buildGrokBuildInterceptTargets(),
@@ -829,7 +837,10 @@ export class Orchestrator extends EventEmitter {
       ...this.buildDirectoryPluginInterceptTargets(),
       ...this.buildCopilotPluginInterceptTargets(),
       ...this.buildDshYamlPatchInterceptTargets(),
-    ]);
+    ], {
+      pilotDir,
+      dataDir: this.dataDir,
+    });
     this.hookWatchdogTargetKey = this.currentHookWatchdogTargetKey();
     return watchdog;
   }
@@ -1084,7 +1095,7 @@ export class Orchestrator extends EventEmitter {
           this.globalAttributesProvider,
           undefined,
           new CodexTurnJournal(path.join(this.dataDir, 'logs', 'codex-pending-turns'), 10_000,
-            ['codex', 'hermes', 'openclaw']),
+            ['codex', 'hermes', 'openclaw', 'antigravity', 'antigravity-cli']),
           entries => this.inputManager!.prepareRestoredEntries(entries),
           sourceToken => this.inputManager!.confirmHermesSourceDrained(sourceToken),
         );
@@ -1621,16 +1632,18 @@ export class Orchestrator extends EventEmitter {
 
     // --- Claude Code Log (OTel plugin JSONL) ---
     const claudeCodeLogDir = this.resolveClaudeCodeLogDir();
+    const claudeCodePendingStopsDir = ClaudeCodeLogInput.pendingStopsDir(this.dataDir);
     const claudeCodeLogInput = new ClaudeCodeLogInput({
       stateStore: this.stateStore,
+      dataDir: this.dataDir,
       logDir: claudeCodeLogDir,
       pollIntervalMs: listenerCfg['claude-code-log']?.pollInterval,
     });
     this.inputManager.registerInput(claudeCodeLogInput);
     entries.push(
       this.inputManager.buildDetectionEntry(claudeCodeLogInput, {
-        watchPaths: [claudeCodeLogDir],
-        isAvailable: async () => directoryExists(claudeCodeLogDir),
+        watchPaths: [claudeCodeLogDir, claudeCodePendingStopsDir],
+        isAvailable: async () => (await directoryExists(claudeCodeLogDir)) || directoryExists(claudeCodePendingStopsDir),
         enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['claude-code-log']) &&
           this.agentControlManager.resolveEnabled(
             'claude-code-log',
@@ -1911,6 +1924,29 @@ export class Orchestrator extends EventEmitter {
       }),
     );
 
+    // --- TRAE-CN (Hook JSONL + best-effort ai-agent log aux source) ---
+    const traeCnLogDir = path.join(this.dataDir, 'logs', 'trae-cn', 'history');
+    await ensureDir(traeCnLogDir);
+    const traeCnLogInput = new TraeCnLogInput({
+      stateStore: this.stateStore,
+      sessionDir: traeCnLogDir,
+      captureMessageContent: this.config.agents['trae-cn']?.captureMessageContent === true,
+      pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
+    });
+    this.inputManager.registerInput(traeCnLogInput);
+    entries.push(
+      this.inputManager.buildDetectionEntry(traeCnLogInput, {
+        watchPaths: [traeCnLogDir],
+        isAvailable: async () => directoryExists(traeCnLogDir),
+        enabled: () => this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP['trae-cn-log']) &&
+          this.agentControlManager.resolveEnabled(
+            'trae-cn-log',
+            listenerCfg['trae-cn-log']?.enabled ?? true,
+          ),
+        pollIntervalMs: listenerCfg['trae-cn-log']?.pollInterval,
+      }),
+    );
+
     // --- DeepSeek Harness (plugin-inject via YAML patch layer; BaseSessionInput consumer) ---
     const dshLogDir = path.join(this.dataDir, 'logs', 'dsh');
     await ensureDshLogDir(dshLogDir);
@@ -1971,22 +2007,62 @@ export class Orchestrator extends EventEmitter {
     );
 
     // --- Doubao Work (passive frontend client-message lifecycle; no host injection) ---
-    const doubaoLogDir = listenerCfg['doubao-work']?.logDir;
-    const doubaoClient = listenerCfg['doubao-work']?.client;
-    const doubaoWorkInput = new DoubaoWorkInput({
-      stateStore: this.stateStore,
-      logDir: doubaoLogDir,
-      client: doubaoClient,
-      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
-    });
-    this.inputManager.registerInput(doubaoWorkInput);
-    entries.push(this.inputManager.buildDetectionEntry(doubaoWorkInput, {
-      watchPaths: DoubaoWorkInput.getWatchPaths(doubaoLogDir, doubaoClient),
-      isAvailable: () => DoubaoWorkInput.checkAvailability(doubaoLogDir, doubaoClient),
-      enabled: () => this.isAgentGatedEnabled('doubao-work')
-        && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true),
-      pollIntervalMs: listenerCfg['doubao-work']?.pollInterval,
-    }));
+    const doubaoWorkEnabled = () => this.isAgentGatedEnabled('doubao-work')
+      && this.agentControlManager.resolveEnabled('doubao-work', listenerCfg['doubao-work']?.enabled ?? true);
+    const doubaoAppEnabled = () => this.isAgentGatedEnabled('doubao')
+      && this.agentControlManager.resolveEnabled(
+        'doubao', listenerCfg.doubao?.enabled ?? resolveDoubaoAppEnabled(listenerCfg, this.config.agents),
+      )
+      && !doubaoAppUsesLegacySource(listenerCfg);
+    const resourceShare = doubaoWorkEnabled() && doubaoAppEnabled() ? 2 : 1;
+    for (const id of ['doubao-work', 'doubao'] as const) {
+      if (id === 'doubao' && doubaoAppUsesLegacySource(listenerCfg)) continue;
+      const client: DoubaoClient = id === 'doubao' ? 'doubao' : listenerCfg[id]?.client ?? 'doubao-work';
+      const logDir = listenerCfg[id]?.logDir;
+      const input = new DoubaoWorkInput({ stateStore: this.stateStore, inputId: id, client, logDir, resourceShare,
+        pollIntervalMs: listenerCfg[id]?.pollInterval });
+      this.inputManager.registerInput(input);
+      entries.push(this.inputManager.buildDetectionEntry(input, {
+        watchPaths: DoubaoWorkInput.getWatchPaths(logDir, client),
+        isAvailable: () => DoubaoWorkInput.checkAvailability(logDir, client),
+        enabled: id === 'doubao-work' ? doubaoWorkEnabled : doubaoAppEnabled,
+        pollIntervalMs: listenerCfg[id]?.pollInterval,
+      }));
+    }
+
+    // --- Antigravity App / new IDE share one data root and listener. CLI has its own. ---
+    const antigravityVariants: AntigravityClientType[] = [
+      ClientType.Antigravity,
+      ClientType.AntigravityCli,
+    ];
+    for (const clientType of antigravityVariants) {
+      const variantCfg = listenerCfg[clientType];
+      const agyAgentCfg = this.config.agents[clientType] ?? {};
+      const agyMultimodalEnabled = !!this.multimodalProcessor
+        && isAgentMultimodalEnabled(clientType, agyAgentCfg);
+      const agyInput = new AntigravityInput({
+        stateStore: this.stateStore,
+        clientType,
+        pollIntervalMs: variantCfg?.pollInterval,
+        multimodal: {
+          enabled: agyMultimodalEnabled,
+          uploadMode: agyAgentCfg.multimodal?.uploadMode ?? 'none',
+          allowedRootPaths: agyAgentCfg.multimodal?.allowedRootPaths,
+          ...(this.multimodalProcessor ? { processor: this.multimodalProcessor } : {}),
+        },
+      });
+      this.inputManager.registerInput(agyInput);
+      entries.push(
+        this.inputManager.buildDetectionEntry(agyInput, {
+          watchPaths: AntigravityInput.getWatchPaths(clientType),
+          isAvailable: () => AntigravityInput.checkAvailability(clientType),
+          enabled: () =>
+            this.isAgentGatedEnabled(Orchestrator.LISTENER_AGENT_MAP[clientType]) &&
+            this.agentControlManager.resolveEnabled(clientType, variantCfg?.enabled ?? true),
+          pollIntervalMs: variantCfg?.pollInterval,
+        }),
+      );
+    }
 
     return entries;
   }

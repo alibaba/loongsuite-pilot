@@ -9,7 +9,10 @@ import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import type { AutoUpdateConfig } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
+import { resolveDataDir } from '../utils/data-dir.js';
 import { readJsonFile, writeJsonFile, resolveHome } from '../utils/fs-utils.js';
+import { getUpgradeMarkerPath, hookUpgradeInProgress } from '../utils/hook-restore-request.js';
+import { repairRequestedHookAssets } from './hook-asset-repair.js';
 import {
   extractTarGz,
   makeTarStagingDir,
@@ -139,11 +142,11 @@ function pilotBinPath(): string {
 
 function defaultPaths(): UpdaterPaths {
   const home = homeDir();
-  const cacheDir = path.join(home, '.loongsuite-pilot');
-  const dataDir = resolveHome(process.env.LOONGSUITE_PILOT_DATA_DIR ?? cacheDir);
-  // The CLI wrapper reads the pin from CACHE_DIR (LOONGSUITE_PILOT_CACHE_DIR),
-  // which defaults to the same directory; honour the override to stay in lockstep.
-  const pinDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR ?? cacheDir);
+  const defaultDir = path.join(home, '.loongsuite-pilot');
+  // The daemon bootstraps load from this cache. Use the same control directory
+  // for pointers and the asset lock even when the shared hooks live elsewhere.
+  const cacheDir = resolveHome(process.env.LOONGSUITE_PILOT_CACHE_DIR || defaultDir, { homedir: () => home });
+  const dataDir = resolveDataDir();
   return {
     cacheDir,
     dataDir,
@@ -154,7 +157,7 @@ function defaultPaths(): UpdaterPaths {
     loongsuitePilotBin: pilotBinPath(),
     runtimeFile: updaterRuntimePath(dataDir),
     collectorRuntimeFile: path.join(dataDir, 'logs', 'runtime.json'),
-    nodePinFile: path.join(pinDir, 'node-bin'),
+    nodePinFile: path.join(cacheDir, 'node-bin'),
   };
 }
 
@@ -215,15 +218,15 @@ export class Updater {
 
   start(): void {
     if (!this.config.enabled) {
-      logger.debug('auto-update disabled');
-      return;
+      logger.info('auto-update disabled, hook repair only');
+    } else {
+      logger.info('updater started', {
+        intervalMs: this.config.checkIntervalMs,
+        manifestUrl: this.config.manifestUrl,
+      });
+      void this.metrics?.writeEvent('updater_started');
     }
 
-    logger.info('updater started', {
-      intervalMs: this.config.checkIntervalMs,
-      manifestUrl: this.config.manifestUrl,
-    });
-    void this.metrics?.writeEvent('updater_started');
     void this.writeHeartbeat();
     this.heartbeatTimer = setInterval(() => void this.writeHeartbeat(), 30_000);
     this.heartbeatTimer.unref();
@@ -252,121 +255,134 @@ export class Updater {
   async check(): Promise<void> {
     if (this.checking) return;
 
-    if (Date.now() < this.nextCheckAt) {
-      logger.debug('skipping check due to backoff', {
-        nextCheckAt: new Date(this.nextCheckAt).toISOString(),
-      });
-      return;
-    }
-
     this.checking = true;
+    let published = false;
 
     try {
-      const latestManifest = await this.fetchManifest() as LatestManifest | null;
-      if (!latestManifest) return;
+      try {
+        if (this.config.enabled && Date.now() >= this.nextCheckAt) {
+          const latestManifest = await this.fetchManifest() as LatestManifest | null;
+          if (latestManifest) {
+            await this.ensureInstallId();
+            const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
 
-      await this.ensureInstallId();
-      const { manifest: target, channel, hotfixVersion } = this.resolveTargetVersion(latestManifest);
+            const local = await this.readLocalVersion();
+            if (!this.needsUpdate(local, target, channel)) {
+              logger.debug('already up to date', {
+                local: local?.version ?? 'unknown',
+                remote: target.version,
+                channel,
+              });
+              const activeVersion: LocalVersion = local ?? {
+                version: target.version,
+                gitCommit: target.git_commit,
+              };
+              const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
+              if (collectorRecovered) {
+                void this.metrics?.writeEvent('collector_restarted', {
+                  latest_version: activeVersion.version,
+                });
+              }
+              this.consecutiveFailures = 0;
+              this.nextCheckAt = 0;
+              await this.gcOldVersions();
+              await this.writeHeartbeat();
+              if (collectorRecovered) await this.scheduleUpdaterRestart();
+            } else {
+              logger.info('new version available', {
+                current: local?.version ?? 'unknown',
+                latest: target.version,
+                commit: target.git_commit,
+                channel,
+              });
+              void this.metrics?.writeEvent('new_version_available', {
+                current_version: local?.version ?? 'unknown',
+                latest_version: target.version,
+              });
 
-      const local = await this.readLocalVersion();
-      if (!this.needsUpdate(local, target, channel)) {
-        logger.debug('already up to date', {
-          local: local?.version ?? 'unknown',
-          remote: target.version,
-          channel,
-        });
-        const activeVersion: LocalVersion = local ?? {
-          version: target.version,
-          gitCommit: target.git_commit,
-        };
-        const collectorRecovered = await this.recoverCurrentCollectorIfNeeded(activeVersion);
-        if (collectorRecovered) {
-          void this.metrics?.writeEvent('collector_restarted', {
-            latest_version: activeVersion.version,
+              const packageUrl = target.package_url || this.config.packageUrl;
+              if (packageUrl) {
+                void this.metrics?.writeEvent('downloading', {
+                  latest_version: target.version,
+                });
+                await this.downloadAndDeploy(packageUrl, target);
+                published = true;
+                void this.metrics?.writeEvent('deployed', {
+                  latest_version: target.version,
+                });
+
+                await this.restartCollector(
+                  target.version,
+                  local?.version === target.version,
+                  target.git_commit,
+                );
+                void this.metrics?.writeEvent('collector_restarted', {
+                  latest_version: target.version,
+                });
+
+                if (channel === 'canary') {
+                  await this.persistCanaryState(hotfixVersion ?? 0);
+                  this.config = { ...this.config, canaryHotfixVersion: hotfixVersion ?? 0 };
+                }
+
+                await this.gcOldVersions();
+                this.consecutiveFailures = 0;
+                this.nextCheckAt = 0;
+                await this.writeHeartbeat();
+                await this.scheduleUpdaterRestart();
+              } else {
+                logger.warn('no package URL in manifest or config');
+              }
+            }
+          }
+        } else if (this.config.enabled) {
+          logger.debug('skipping check due to backoff', {
+            nextCheckAt: new Date(this.nextCheckAt).toISOString(),
           });
         }
-        this.consecutiveFailures = 0;
-        this.nextCheckAt = 0;
-        await this.gcOldVersions();
-        await this.writeHeartbeat();
-        if (collectorRecovered) await this.scheduleUpdaterRestart();
-        return;
-      }
+      } catch (err) {
+        this.consecutiveFailures++;
+        const backoffMs = Math.min(
+          this.config.checkIntervalMs * Math.pow(2, this.consecutiveFailures),
+          MAX_BACKOFF_MS,
+        );
+        this.nextCheckAt = Date.now() + backoffMs;
+        logger.warn('update check failed', {
+          error: String(err),
+          consecutiveFailures: this.consecutiveFailures,
+          nextRetryIn: `${Math.round(backoffMs / 1000)}s`,
+        });
 
-      logger.info('new version available', {
-        current: local?.version ?? 'unknown',
-        latest: target.version,
-        commit: target.git_commit,
-        channel,
-      });
-      void this.metrics?.writeEvent('new_version_available', {
-        current_version: local?.version ?? 'unknown',
-        latest_version: target.version,
-      });
-
-      const packageUrl = target.package_url || this.config.packageUrl;
-      if (!packageUrl) {
-        logger.warn('no package URL in manifest or config');
-        return;
-      }
-
-      void this.metrics?.writeEvent('downloading', {
-        latest_version: target.version,
-      });
-      await this.downloadAndDeploy(packageUrl, target);
-      void this.metrics?.writeEvent('deployed', {
-        latest_version: target.version,
-      });
-
-      await this.restartCollector(
-        target.version,
-        local?.version === target.version,
-        target.git_commit,
-      );
-      void this.metrics?.writeEvent('collector_restarted', {
-        latest_version: target.version,
-      });
-
-      if (channel === 'canary') {
-        await this.persistCanaryState(hotfixVersion ?? 0);
-        this.config = { ...this.config, canaryHotfixVersion: hotfixVersion ?? 0 };
-      }
-
-      await this.gcOldVersions();
-      this.consecutiveFailures = 0;
-      this.nextCheckAt = 0;
-      await this.writeHeartbeat();
-      await this.scheduleUpdaterRestart();
-    } catch (err) {
-      this.consecutiveFailures++;
-      const backoffMs = Math.min(
-        this.config.checkIntervalMs * Math.pow(2, this.consecutiveFailures),
-        MAX_BACKOFF_MS,
-      );
-      this.nextCheckAt = Date.now() + backoffMs;
-      logger.warn('update check failed', {
-        error: String(err),
-        consecutiveFailures: this.consecutiveFailures,
-        nextRetryIn: `${Math.round(backoffMs / 1000)}s`,
-      });
-
-      void this.metrics?.writeEvent('update_failure', {
-        error: String(err),
-        consecutive_failures: this.consecutiveFailures,
-      });
-      void this.metrics?.writeAlarm(
-        'UPDATER_FAILURE_ALARM', '2',
-        `update check failed (attempt ${this.consecutiveFailures}): ${String(err)}`,
-      );
-
-      if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-        logger.error('too many consecutive failures, updater entering degraded retry');
-        void this.metrics?.writeEvent('updater_stopped_max_failures', {
-          error: `${MAX_CONSECUTIVE_FAILURES} consecutive failures; degraded retry continues`,
+        void this.metrics?.writeEvent('update_failure', {
+          error: String(err),
           consecutive_failures: this.consecutiveFailures,
         });
+        void this.metrics?.writeAlarm(
+          'UPDATER_FAILURE_ALARM', '2',
+          `update check failed (attempt ${this.consecutiveFailures}): ${String(err)}`,
+        );
+
+        if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+          logger.error('too many consecutive failures, updater entering degraded retry');
+          void this.metrics?.writeEvent('updater_stopped_max_failures', {
+            error: `${MAX_CONSECUTIVE_FAILURES} consecutive failures; degraded retry continues`,
+            consecutive_failures: this.consecutiveFailures,
+          });
+        }
+        await this.writeHeartbeat();
       }
-      await this.writeHeartbeat();
+      if (this.config.tamperProtection && !published) {
+        try {
+          await repairRequestedHookAssets({
+            cacheDir: this.paths.cacheDir,
+            dataDir: this.paths.dataDir,
+            manifestUrl: this.config.manifestUrl,
+            packageUrl: this.config.packageUrl,
+          });
+        } catch (err) {
+          logger.warn('hook asset repair failed', { error: String(err) });
+        }
+      }
     } finally {
       this.checking = false;
     }
@@ -544,8 +560,6 @@ export class Updater {
     let targetDir = path.join(versionsDir, dirName);
     const stagingDir = path.join(versionsDir, `${baseDirName}.candidate`);
     let activated = false;
-    let oldCurrent: string | null = null;
-    let oldPrevious: string | null = null;
 
     try {
       await fs.rm(tmpDir, { recursive: true, force: true });
@@ -616,7 +630,9 @@ export class Updater {
         logger.info('running npm install', { node: nodeBin, PATH: childEnv.PATH });
         await execFileAsync('npm', ['install', '--production', '--no-optional'], {
           cwd: stagingDir,
-          env: childEnv,
+          // npm also runs this package's postinstall. Give it disposable data
+          // so lifecycle scripts can run without updating the active assets.
+          env: { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: path.join(tmpDir, 'npm-data') },
           timeout: NPM_INSTALL_TIMEOUT_MS,
           shell: process.platform === 'win32',
         });
@@ -638,53 +654,20 @@ export class Updater {
         timeout: 30_000,
       });
 
-      // The new package's postinstall is what (re)fills <dataDir>/{hooks,skills,plugins}.
-      // It is also how an install broken by the fs.cpSync fail-fast heals itself: the
-      // trees get rebuilt and the stale AppleDouble sidecars pruned on the next upgrade,
-      // with no reinstall. Do not drop this call -- a missing plugins tree fails every
-      // dsh deployment with "plugin file not found or unreadable", once per cycle.
-      const postinstallScript = path.join(stagingDir, 'scripts', 'postinstall.js');
-      if (await fs.access(postinstallScript).then(() => true).catch(() => false)) {
-        try {
-          const { stdout, stderr } = await execFileAsync(nodeBin, [postinstallScript], {
-            cwd: stagingDir,
-            env: {
-              ...childEnv,
-              // Pin the target explicitly instead of trusting what we inherited: the
-              // script otherwise falls back to $HOME/.loongsuite-pilot, which is the
-              // wrong tree for any install using a custom data dir.
-              LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir,
-            },
-            timeout: 30_000,
-          });
-          // postinstall exits 0 even when a tree failed (it is package.json's
-          // `postinstall`, and a non-zero exit there aborts the whole install), so the
-          // only signal for a partial result is its own output. Unlogged, this path
-          // reproduces the failure mode it exists to heal: hooks or plugins absent while
-          // every step reports success.
-          const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
-          if (/failed asset tree/.test(output)) {
-            logger.warn('postinstall reported failed asset trees', { output });
-          } else if (output) {
-            logger.info('postinstall completed', { output });
-          }
-        } catch (err) {
-          logger.warn('postinstall failed, continuing', { error: String(err) });
-        }
+      if (await hookUpgradeInProgress(cacheDir)) {
+        throw new Error('a prior hook asset publication may still be running');
       }
 
       const { currentFile, previousFile } = this.paths;
-      oldCurrent = await this.readPointerFile(currentFile);
-      oldPrevious = await this.readPointerFile(previousFile);
-
+      const oldCurrent = await this.readPointerFile(currentFile);
+      const oldPrevious = await this.readPointerFile(previousFile);
+      const marker = getUpgradeMarkerPath(cacheDir);
+      // A postinstall subprocess can briefly outlive an updater crash.
+      await fs.writeFile(marker, `${Date.now()}\n`);
+      let publishedAssets = false;
       try {
-        // Never overwrite an existing version directory in place: `current` may still
-        // point at it and a collector relaunched mid-deploy would die with
-        // ERR_MODULE_NOT_FOUND (last-startup-crash.json phase=module_load), and a live
-        // collector may still hold native modules loaded out of it. Redeploying the
-        // same version/commit therefore lands in a suffixed sibling, which is what
-        // deploy/installer*.ps1 does too. Version and commit are read from VERSION, not
-        // from the directory name, so the suffix is inert.
+        publishedAssets = await this.runPackagePostinstall(stagingDir, nodeBin, childEnv);
+        // Keep the active installation intact if the same version is redeployed.
         if (await fs.access(targetDir).then(() => true).catch(() => false)) {
           const suffix = `${new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14)}_${Math.floor(Math.random() * 9000) + 1000}`;
           dirName = `${baseDirName}_${suffix}`;
@@ -698,34 +681,55 @@ export class Updater {
 
         await this.writePointerFile(currentFile, dirName);
         await this.syncInstalledScripts(targetDir);
-        // Repoint the CLI wrapper at the managed runtime only after activation, so
-        // the collector/updater restart (and any future launch) runs on it. Skipped
-        // when we fell back to system node, preserving the existing pin. When the
-        // managed runtime was adopted, pinNodeRuntime throws on failure so we roll the
-        // pointers back below: leaving the pin on a different node would start the
-        // collector against the wrong runtime, with no self-heal.
-        if (managedNodeBin) {
-          await this.pinNodeRuntime(managedNodeBin);
-        }
+        // Repin only after activation. A failure restores the previous installation.
+        if (managedNodeBin) await this.pinNodeRuntime(managedNodeBin);
         activated = true;
       } catch (err) {
         logger.warn('failed to finalize update, restoring previous installation', { error: String(err) });
         await this.restorePointers(oldCurrent, oldPrevious);
         if (oldCurrent) {
+          if (publishedAssets) {
+            await this.runPackagePostinstall(path.join(versionsDir, oldCurrent), nodeBin, childEnv);
+          }
           await this.syncInstalledScriptsForPointer(oldCurrent).catch((restoreErr) => {
             logger.warn('failed to restore installed scripts', { error: String(restoreErr) });
           });
         }
         throw err;
+      } finally {
+        await fs.rm(marker, { force: true }).catch((err) => {
+          logger.warn('failed to clear hook upgrade marker', { error: String(err) });
+        });
       }
 
       logger.info('update deployed', { version: manifest.version, dir: dirName });
     } finally {
       await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
-      if (!activated) {
-        await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
-      }
+      if (!activated) await fs.rm(stagingDir, { recursive: true, force: true }).catch(() => {});
     }
+  }
+
+  // Republish hooks, skills and plugins from the exact package. The script
+  // reports partial asset failures even when the npm lifecycle must exit zero.
+  private async runPackagePostinstall(versionDir: string, nodeBin: string, childEnv: NodeJS.ProcessEnv): Promise<boolean> {
+    const script = path.join(versionDir, 'scripts', 'postinstall.js');
+    if (!await fs.access(script).then(() => true).catch(() => false)) return false;
+    try {
+      const { stdout, stderr } = await execFileAsync(nodeBin, [script], {
+        cwd: versionDir,
+        env: { ...childEnv, LOONGSUITE_PILOT_DATA_DIR: this.paths.dataDir },
+        timeout: 30_000,
+      });
+      const output = `${stdout ?? ''}${stderr ?? ''}`.trim();
+      if (/failed asset tree/.test(output)) {
+        logger.warn('postinstall reported failed asset trees', { output });
+      } else if (output) {
+        logger.info('postinstall completed', { output });
+      }
+    } catch (err) {
+      logger.warn('postinstall failed, continuing', { error: String(err) });
+    }
+    return true;
   }
 
   private async findExtractedPackage(dir: string): Promise<string | null> {
@@ -1006,8 +1010,6 @@ export class Updater {
   }
 
   private async writeHeartbeat(): Promise<void> {
-    if (!this.config.enabled) return;
-
     try {
       const currentName = await this.readPointerFile(this.paths.currentFile);
       let local: LocalVersion | null = null;

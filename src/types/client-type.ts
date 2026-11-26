@@ -20,6 +20,7 @@ export enum ClientType {
   Wukong = 'wukong',
   WorkBuddy = 'workbuddy',
   DoubaoWork = 'doubao-work',
+  Doubao = 'doubao',
 
   // CLI tools
   GeminiCli = 'gemini-cli',
@@ -29,6 +30,7 @@ export enum ClientType {
   CodexSession = 'codex-session',
   QoderCli = 'qoder-cli',
   CursorCli = 'cursor-cli',
+  AntigravityCli = 'antigravity-cli',
   PiCodingAgent = 'pi-coding-agent',
 
   // Hook-based tools
@@ -50,6 +52,7 @@ export enum ClientType {
   Hermes = 'hermes',
   OpenClaw = 'openclaw',
   Dsh = 'dsh',
+  TraeCn = 'trae-cn',
 
 }
 

@@ -712,6 +712,19 @@ export function buildLlmBoundaries(_progressEvents, contentEvents) {
 
 // --- Event Builder -----------------------------------------------------------
 
+function modelKey(value) {
+  if (typeof value !== 'string' || value.length > 512) return undefined;
+  const key = value.trim();
+  const lower = key.toLowerCase();
+  return key && lower !== 'unknown' && lower !== 'custom_model' ? key : undefined;
+}
+
+function reportedAssistantModel(row) {
+  if (row?.type !== 'assistant') return undefined;
+  const model = modelKey(row.message?.model);
+  return model?.toLowerCase() === 'auto' ? undefined : model;
+}
+
 export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, turnId, sessionId, agentId, runtimeConfig, cwd) {
   const records = [];
   const observedTs = timestampToUnixNanos(Date.now());
@@ -719,6 +732,8 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
   // Find user prompt
   const userRow = contentEvents.find(isRealUserPrompt)
     || contentEvents.find(r => r.type === 'user' && !isToolResult(r));
+  const selectedModel = modelKey(userRow?.businessModelKey)
+    ?? modelKey(userRow?.businessIdentity?.model_key);
   const userText = userRow ? (extractUserTexts(userRow)[0] ?? '') : '';
   // humanInput is the submitted prompt before the host adds context text blocks.
   const submittedPrompt = typeof userRow?.humanInput?.text === 'string' && userRow.humanInput.text.length > 0
@@ -731,7 +746,8 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
 
   // User-hook event (ENTRY input)
   if (userRow && userText) {
-    const userHookModel = contentEvents.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'unknown';
+    const userHookModel = selectedModel
+      ?? reportedAssistantModel(contentEvents.find(reportedAssistantModel));
     records.push({
       'event.id': crypto.randomUUID(),
       'event.name': 'other',
@@ -758,7 +774,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     const residualEvents = contentEvents.filter(
       row => row.type === 'assistant' || isToolResult(row),
     );
-    const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs);
+    const legacyRecords = buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, records, observedTs, selectedModel);
     return finalizeRecords(legacyRecords, cwd, runtimeConfig);
   }
 
@@ -795,8 +811,10 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     }
     const inputToolResults = [...inputToolResultsById.values()];
 
-    // Pre-scan: extract model name from this step's assistant rows (CLI has message.model)
-    const stepModel = content.find(r => r.type === 'assistant' && r.message?.model)?.message?.model || 'auto';
+    // An assistant's "auto" may be a placeholder even for an explicit user
+    // selection. Only the native prompt proves the requested tier.
+    const responseModel = reportedAssistantModel(content.findLast(reportedAssistantModel));
+    const requestModel = selectedModel ?? responseModel;
 
     // llm.request for this step
     let inputDelta;
@@ -832,7 +850,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
         'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': stepModel,
+        'gen_ai.request.model': requestModel,
         'user.id': userId,
         ...(inputDelta ? { 'gen_ai.input.messages_delta': inputDelta } : {}),
         // Private join metadata survives content opt-out; InputManager removes it before output.
@@ -938,8 +956,9 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
         'gen_ai.session.id': sessionId,
         'gen_ai.agent.type': agentType,
         'gen_ai.provider.name': providerName,
-        'gen_ai.request.model': stepModel,
-        'gen_ai.response.model': stepModel,
+        'gen_ai.request.model': requestModel,
+        'gen_ai.response.model': responseModel,
+        ...(selectedModel !== undefined ? { 'agent.qoder.selected_request_model': true } : {}),
         'gen_ai.response.id': responseId,
         ...usageFields,
         ...(finishReason ? { 'gen_ai.response.finish_reasons': [finishReason] } : {}),
@@ -1407,12 +1426,20 @@ function resolveUserId(row, runtimeConfig) {
 // Limitations: no llm.request synthesis (LLM spans will be 0ms orphan responses),
 // no multi-part merging. QoderTraceInput's token enricher provides tokens but timing is approximate.
 
-function buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs) {
+function buildLegacyEvents(residualEvents, turnId, sessionId, agentId, runtimeConfig, existingRecords, observedTs, selectedModel) {
   // Per-line normalization for the rows the caller did not emit itself. The
   // turn's user prompt already arrives via `existingRecords`.
   for (const row of residualEvents) {
     const record = buildQoderHookRecord(row, { agentId, runtimeConfig, turnId });
-    if (record) existingRecords.push(record);
+    if (!record) continue;
+    if (record['event.name'] === 'llm.response') {
+      const reported = modelKey(record['gen_ai.response.model']);
+      const responseModel = reported?.toLowerCase() === 'auto' ? undefined : reported;
+      record['gen_ai.request.model'] = selectedModel ?? responseModel;
+      record['gen_ai.response.model'] = responseModel;
+      if (selectedModel !== undefined) record['agent.qoder.selected_request_model'] = true;
+    }
+    existingRecords.push(record);
   }
 
   // Apply step.id with timestamp proximity (legacy logic)

@@ -1,0 +1,12 @@
+{
+  "id": "doubao",
+  "displayName": "Doubao App (experimental)",
+  "deployMode": "detection-only",
+  "detection": {
+    "paths": ["$DOUBAO_APP_LOG_DIR"],
+    "commands": []
+  },
+  "input": {
+    "type": "doubao-work-client-log"
+  }
+}

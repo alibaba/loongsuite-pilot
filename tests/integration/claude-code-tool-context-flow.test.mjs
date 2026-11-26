@@ -1,4 +1,5 @@
 import { describe, expect, test, beforeEach, afterEach } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -55,7 +56,7 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
-  test('real wrapper injects context into a real downstream CLI and reuses its parent id for TOOL', async () => {
+  test.each(['legacy', 'inline', 'deferred'])('real wrapper reuses the downstream parent ID for TOOL on %s Stop', async (stopMode) => {
     const sessionId = 'simulated-claude-session';
     const toolUseId = 'toolu_demo_cli';
     const upstreamTraceId = '4bf92f3577b34da6a3ce929d0e0e4736';
@@ -171,9 +172,10 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
         },
       },
     ];
+    const stopTranscript = stopMode === 'deferred' ? transcript.slice(0, -1) : transcript;
     fs.writeFileSync(
       transcriptPath,
-      `${transcript.map((record) => JSON.stringify(record)).join('\n')}\n`,
+      `${stopTranscript.map((record) => JSON.stringify(record)).join('\n')}\n`,
       'utf-8',
     );
 
@@ -185,6 +187,7 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
         prompt_id: 'prompt-1',
         stop_reason: 'end_turn',
         transcript_path: transcriptPath,
+        ...(stopMode !== 'legacy' ? { last_assistant_message: 'done' } : {}),
       },
       env: {
         LOONGSUITE_PILOT_DATA_DIR: dataDir,
@@ -194,6 +197,17 @@ describe('Claude Code PreToolUse(Bash) downstream propagation flow', () => {
     });
     expect(stop.status).toBe(0);
     expect(stop.response).toEqual({});
+    if (stopMode === 'deferred') {
+      expect(readClaudeRecords(dataDir)).toEqual([]);
+      fs.appendFileSync(transcriptPath, JSON.stringify(transcript.at(-1)) + '\n');
+      const processor = path.join(path.dirname(HOOK), 'claude-code-hook-processor.mjs');
+      const worker = spawnSync(process.execPath, [processor, 'drain-stops'], {
+        encoding: 'utf8',
+        env: { ...process.env, LOONGSUITE_PILOT_DATA_DIR: dataDir, TRACEPARENT: '', TRACESTATE: '' },
+        timeout: 9000,
+      });
+      expect(worker.status, worker.stderr).toBe(0);
+    }
 
     const records = readClaudeRecords(dataDir);
     const toolCall = records.find((record) =>

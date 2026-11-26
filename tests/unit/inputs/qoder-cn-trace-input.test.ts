@@ -167,6 +167,47 @@ describe.skipIf(!hasNodeSqlite())('QoderCnTraceInput.collect (session-level enri
     expect(entries.every(e => e['gen_ai.agent.type'] === 'qoder-cn')).toBe(true);
   });
 
+  it.each([
+    { selected: 'auto', reported: 'auto', legacy: undefined, req: 'auto', resp: undefined },
+    { selected: 'dfmodel', reported: 'custom_model', legacy: undefined, req: 'dfmodel', resp: undefined },
+    { selected: 'auto', reported: 'qfmodel', legacy: undefined, req: 'auto', resp: 'qfmodel' },
+    { selected: 'custom_model', reported: 'custom_model', legacy: undefined, req: undefined, resp: undefined },
+    { selected: 'qfmodel', reported: undefined, legacy: 'custom_model', req: 'qfmodel', resp: undefined },
+  ])('uses independent request and assistant model evidence ($selected, $reported, $legacy)', async variant => {
+    const sessionId = 'separate-model-sources';
+    const responseTime = 1_780_000_001_000;
+    await execSql(dbPath, 'INSERT INTO chat_record (request_id, session_id, extra) VALUES (?, ?, ?)', [
+      'request-model-sources', sessionId, JSON.stringify({ modelConfig: { key: variant.selected } }),
+    ]);
+    await insertRow(dbPath, {
+      id: 'message-model-sources', session_id: sessionId, request_id: 'request-model-sources', role: 'assistant',
+      token_info: JSON.stringify({ prompt_tokens: 42, completion_tokens: 8, cached_tokens: 10 }),
+      model_info: JSON.stringify({ model_key: variant.reported }),
+      gmt_create: responseTime,
+    });
+    const base = { turn: 'model-sources-turn', step: 'model-sources-turn:s1', session: sessionId };
+    await writeHookJsonl(logDir, [{
+      ...buildEntry({ ...base, event: 'llm.request', ts: responseTime - 350 }),
+      'gen_ai.request.model': variant.legacy,
+      'gen_ai.response.model': undefined,
+    }, {
+      ...buildEntry({ ...base, event: 'llm.response', ts: responseTime }),
+      'gen_ai.request.model': variant.legacy,
+      'gen_ai.response.model': variant.legacy,
+      'agent.qoder.selected_request_model': variant.legacy !== undefined,
+    }]);
+
+    const entries = await collectOnce();
+    const request = entries.find(e => e['event.name'] === 'llm.request');
+    const response = entries.find(e => e['event.name'] === 'llm.response');
+    expect(request?.['gen_ai.request.model']).toBe(variant.req);
+    expect(response?.['gen_ai.request.model']).toBe(variant.req);
+    expect(response?.['gen_ai.response.model']).toBe(variant.resp);
+    expect(response?.['gen_ai.usage.input_tokens']).toBe(42);
+    expect(response?.['gen_ai.usage.output_tokens']).toBe(8);
+    expect(response?.['gen_ai.usage.cache_read.input_tokens']).toBe(10);
+  });
+
   it('assigns a distinct trace_id per turn even when sessionId is shared', async () => {
     const sessionId = 'sess-trace';
     await insertRow(dbPath, {

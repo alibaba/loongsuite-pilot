@@ -14,8 +14,10 @@ import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-cont
 import { readSqliteTokensForSession } from './sqlite-token-reader.js';
 import {
   collectCliExpectedRequestIds,
+  discardQoderCustomModelPlaceholder,
   enrichCliFromSegments,
   enrichCliPrimary,
+  enrichIdeRequestModels,
   enrichIdeTurn,
   injectTraceId,
 } from '../qoder-trace/token-enricher.js';
@@ -255,8 +257,9 @@ export class QoderCnTraceInput extends BaseInput {
       } else {
         // Intentionally ignores matchedDbPath: agent.type must never be derived from
         // which candidate DB matched. See resolveQoderCnDbPaths in sqlite-token-reader.
-        const { rows: sqliteRows } = await this.readIdeSqliteTokens(sessionId);
-        enrichIdeTurn(sessionEntries, sqliteRows);
+        const { rows, requestModels } = await this.readIdeSqliteTokens(sessionId);
+        enrichIdeTurn(sessionEntries, rows);
+        enrichIdeRequestModels(sessionEntries, requestModels);
       }
 
       // Shared by both variants: these repair hook-level artefacts inherited
@@ -435,9 +438,10 @@ export class QoderCnTraceInput extends BaseInput {
       record,
       ClientType.QoderCn,
       undefined,
-      { preserveSafeCustomTopLevelFields: true },
+      { preserveSafeCustomTopLevelFields: true, preserveMissingModels: true },
     );
     if (canonicalEntry) {
+      discardQoderCustomModelPlaceholder(canonicalEntry);
       await enrichCanonicalEntryWithGit(canonicalEntry, record, 'qoder-cn');
       return canonicalEntry;
     }
@@ -525,7 +529,6 @@ function alignUserBoundaryToFirstLlmRequest(entries: AgentActivityEntry[]): void
         // Propagate model from the real LLM request so 'other' doesn't show 'unknown'
         if (firstReq['gen_ai.request.model'] && firstReq['gen_ai.request.model'] !== 'unknown') {
           e['gen_ai.request.model'] = firstReq['gen_ai.request.model'];
-          e['gen_ai.response.model'] = firstReq['gen_ai.request.model'];
         }
         if (firstReq['gen_ai.provider.name'] && firstReq['gen_ai.provider.name'] !== 'unknown') {
           e['gen_ai.provider.name'] = firstReq['gen_ai.provider.name'];

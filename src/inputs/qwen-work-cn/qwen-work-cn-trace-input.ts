@@ -12,7 +12,9 @@ import { BaseInput, type InputOptions } from '../base/base-input.js';
 import { filterBootstrapHistoryTurns } from '../base/bootstrap-turn-filter.js';
 import { createHookHistoryStartupCheckpoint } from '../base/hook-history-checkpoint.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { enrichFlashModelSteps, readFlashSessionBindings, type QwenWorkCNFlashSource, type QwenWorkCNModelStep } from './qwen-work-cn-flash-usage.js';
 import { enrichQwenWorkCNMultimodal } from './qwen-work-cn-multimodal.js';
+import { resolveQwenWorkCNRoot } from './qwen-work-cn-sqlite-input.js';
 
 const NANO_PER_MILLI = 1_000_000n;
 const SEGMENT_TIMING_TOLERANCE_MS = 5 * 60 * 1000;
@@ -40,6 +42,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
 
   private readonly logDir: string;
   private readonly segmentsRoot: string;
+  private readonly flashSource: QwenWorkCNFlashSource;
   private readonly multimodal: {
     uploadMode: MultimodalUploadMode;
     processor: MultimodalProcessor;
@@ -56,6 +59,10 @@ export class QwenWorkCNTraceInput extends BaseInput {
     super({ ...opts, pollIntervalMs: opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS });
     this.logDir = opts.logDir ?? resolveHome('~/.loongsuite-pilot/logs/qwen-work-cn/history');
     this.segmentsRoot = opts.segmentsRoot ?? resolveHome('~/.qwenworkcn/logs/sessions');
+    this.flashSource = {
+      desktopDb: opts.flashSource?.desktopDb ?? path.join(resolveQwenWorkCNRoot(), 'data', 'agents.db'),
+      flashDb: path.resolve(opts.flashSource?.flashDb ?? resolveHome('~/.qwenworkcn/.harness/flash-cli/qwenwork/qwenwork.db')),
+    };
     const uploadMode = opts.multimodal?.uploadMode ?? 'none';
     const processor = opts.multimodal?.processor;
     this.multimodal = opts.multimodal?.enabled === true && processor && uploadMode !== 'none'
@@ -105,6 +112,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
       const rawEntries = await this.readHookJsonl();
       if (rawEntries.length === 0) return [];
       const entries = filterBootstrapHistoryTurns(rawEntries);
+      const flashBindings = await this.readFlashBindings(entries);
 
       for (const [sessionId, cwd] of this.collectSessionCwd(entries)) {
         await this.readSegmentsForSession(sessionId, cwd);
@@ -112,7 +120,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
 
       const output: AgentActivityEntry[] = [];
       for (const turnEntries of this.groupByTurn(entries).values()) {
-        this.enrichTurn(turnEntries);
+        await this.enrichTurn(turnEntries, flashBindings);
         this.injectTraceId(turnEntries);
         for (const entry of turnEntries) {
           (entry as Record<string, unknown>)['gen_ai.agent.type'] = ClientType.QwenWorkCN;
@@ -502,11 +510,25 @@ export class QwenWorkCNTraceInput extends BaseInput {
     return isIgnoredTurn(turnId) || this.subagentTurns.get(sessionId)?.has(turnId) === true;
   }
 
-  private enrichTurn(entries: AgentActivityEntry[]): void {
+  private async readFlashBindings(entries: AgentActivityEntry[]): Promise<Map<string, string>> {
+    const sessionIds = [...new Set(entries
+      .filter(entry => entry['event.name'] === 'llm.request')
+      .map(entry => entry['gen_ai.session.id']).filter(Boolean))];
+    try {
+      return await readFlashSessionBindings(this.flashSource, sessionIds);
+    } catch (error) {
+      this.logger.warn('could not read QwenWorkCN Flash session bindings', { code: (error as NodeJS.ErrnoException).code });
+      return new Map();
+    }
+  }
+
+  private async enrichTurn(entries: AgentActivityEntry[], flashBindings: Map<string, string>): Promise<void> {
     const sessionId = entries.find(entry => entry['gen_ai.session.id'])?.['gen_ai.session.id'] as string | undefined;
     const turnId = entries.find(entry => entry['gen_ai.turn.id'])?.['gen_ai.turn.id'] as string | undefined;
     const steps = this.groupByStep(entries);
     const stepOrder = [...steps.keys()].filter((key): key is string => key !== undefined);
+    const nativeSessionId = sessionId ? flashBindings.get(sessionId) : undefined;
+    const flashSteps: QwenWorkCNModelStep[] = [];
 
     if (sessionId) {
       for (const stepId of stepOrder) {
@@ -533,8 +555,21 @@ export class QwenWorkCNTraceInput extends BaseInput {
             }
             this.applyUsage(response, pair.usage);
           }
+          if (nativeSessionId) {
+            const toolIds = stepEntries.filter(entry => entry['event.name'] === 'tool.call')
+              .map(entry => entry['gen_ai.tool.call.id'] ?? '');
+            flashSteps.push({ request, response, toolIds });
+          }
         }
         this.applyToolTiming(sessionId, stepEntries);
+      }
+    }
+
+    if (nativeSessionId && flashSteps.length > 0) {
+      try {
+        await enrichFlashModelSteps(this.flashSource.flashDb, nativeSessionId, flashSteps);
+      } catch (error) {
+        this.logger.warn('could not read QwenWorkCN Flash model calls', { code: (error as NodeJS.ErrnoException).code });
       }
     }
 
@@ -642,6 +677,7 @@ export class QwenWorkCNTraceInput extends BaseInput {
 export interface QwenWorkCNTraceInputOptions extends InputOptions {
   logDir?: string;
   segmentsRoot?: string;
+  flashSource?: QwenWorkCNFlashSource;
   /** Cached multimodal policy. Omitted means collection stays text-only. */
   multimodal?: {
     enabled: boolean;

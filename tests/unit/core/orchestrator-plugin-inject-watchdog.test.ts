@@ -249,7 +249,7 @@ describe('Orchestrator.buildPluginInjectInterceptTargets', () => {
       needsRedeploy.mockResolvedValue(true);
       deploySingle.mockResolvedValue({ success: true, skipped: true, reason: 'not-detected' });
       const [target] = callBuild(orch);
-      const watchdog = new HookWatchdog({ enabled: true, intervalMs: 1000, repairCooldownMs: 0 }, [], [target]);
+      const watchdog = new HookWatchdog({ enabled: true, intervalMs: 1000, repairCooldownMs: 0, tamperProtection: false }, [], [target]);
       for (let i = 0; i < 4; i++) expect((await watchdog.runCheck()).repaired).toBe(0);
       deploySingle.mockResolvedValue({ success: true });
       expect((await watchdog.runCheck()).repaired).toBe(1);

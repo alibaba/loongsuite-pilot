@@ -5,6 +5,7 @@ export const AGENT_INPUT_EVENT_NAMESPACE = '29afa46e-d5de-5c48-946b-90c1d0537f36
 
 export function isInputOtherEvent(entry: AgentActivityEntry): boolean {
   return entry['event.name'] === 'other'
+    && entry['agent.antigravity.planner_joined'] !== true
     && (
       entry['gen_ai.input.messages'] !== undefined
       || entry['gen_ai.input.messages_delta'] !== undefined

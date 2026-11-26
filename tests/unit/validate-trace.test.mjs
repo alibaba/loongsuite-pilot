@@ -155,6 +155,116 @@ function checkTrace(spans) {
   return [...validateStructure(trace), ...validateTime(trace, traceRules), ...validateSemantic(trace, traceRules)];
 }
 
+describe('TRAE CN native response observations', () => {
+  const observation = 'loongsuite.trae_cn.observation';
+  const inputTokens = 'gen_ai.usage.input_tokens';
+  const toolCall = { type: 'tool_call', id: 'call-1', name: 'Read' };
+
+  function trace() {
+    function span(kind, id, parentSpanId, start, end, attributes) {
+      return {
+        traceId: 'b'.repeat(32), spanId: String(id).padStart(16, '0'), parentSpanId, name: kind,
+        startTimeUnixNano: String(start), endTimeUnixNano: String(end),
+        attributes: { 'gen_ai.span.kind': kind, 'gen_ai.agent.name': 'trae-cn', ...attributes },
+      };
+    }
+    const entry = span('ENTRY', 1, undefined, 1, 100);
+    const agent = span('AGENT', 2, entry.spanId, 1, 100, {
+      [inputTokens]: 20,
+      'agent.trae-cn.hub.usage_received': 2,
+      'agent.trae-cn.hub.input_tokens_observed': 20,
+    });
+    const summary = span('STEP', 3, agent.spanId, 1, 100, { [observation]: 'turn_summary' });
+    const answer = span('LLM', 4, summary.spanId, 1, 100, {
+      [observation]: 'turn_summary',
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'Done' }] }],
+    });
+    const step = span('STEP', 5, agent.spanId, 10, 50, { [observation]: 'response_recorded' });
+    const response = span('LLM', 6, step.spanId, 25, 25, {
+      [observation]: 'response_recorded',
+      'gen_ai.response.id': 'response-1',
+      [inputTokens]: 12,
+      'gen_ai.output.messages': [{ role: 'assistant', parts: [toolCall] }],
+    });
+    const tool = span('TOOL', 7, step.spanId, 26, 50, {
+      'gen_ai.tool.name': 'Read', 'gen_ai.tool.call.id': 'call-1', 'gen_ai.tool.call.arguments': '{}',
+    });
+    return { spans: [entry, agent, summary, answer, step, response, tool], entry, agent, summary, answer, step, response, tool };
+  }
+
+  const checkedRules = [
+    'structure.step_has_one_llm', 'time.non_zero_duration', 'time.no_step_overlap',
+    'semantic.agent_token_sum', 'semantic.last_step_no_tool_call',
+  ];
+  function errors(spans) {
+    return checkTrace(spans).filter(check => check.status === 'error').map(check => check.id);
+  }
+
+  test('accepts measured instants, a turn summary and receipts with partial model attribution', () => {
+    expect(errors(trace().spans).filter(rule => checkedRules.includes(rule))).toEqual([]);
+  });
+
+  test('validates the real terminal answer at agent scope for a shared TRAE stream', () => {
+    const { spans, agent, summary, answer } = trace();
+    const nativeSpans = spans.filter(span => span !== summary && span !== answer);
+    agent.attributes[observation] = 'turn_summary';
+    agent.attributes['gen_ai.output.messages'] = answer.attributes['gen_ai.output.messages'];
+    expect(errors(nativeSpans)).not.toContain('semantic.last_step_no_tool_call');
+    agent.attributes['gen_ai.output.messages'] = [{ role: 'assistant', parts: [toolCall] }];
+    expect(errors(nativeSpans)).toContain('semantic.last_step_no_tool_call');
+  });
+
+  test('permits an acknowledged native tool to have an unobserved body and an instantaneous timestamp', () => {
+    const { spans, tool } = trace();
+    tool.attributes[observation] = 'native_tool_acknowledged';
+    tool.startTimeUnixNano = tool.endTimeUnixNano = '24';
+    delete tool.attributes['gen_ai.tool.call.arguments'];
+    for (const rule of ['time.non_zero_duration', 'structure.llm_before_tools', 'semantic.tool_has_arguments']) {
+      expect(errors(spans)).not.toContain(rule);
+    }
+    delete tool.attributes[observation];
+    expect(errors(spans)).toEqual(expect.arrayContaining([
+      'time.non_zero_duration', 'structure.llm_before_tools', 'semantic.tool_has_arguments',
+    ]));
+  });
+
+  test.each([
+    ['time.non_zero_duration', ({ response }) => { response.endTimeUnixNano = '24'; }],
+    ['time.non_zero_duration', ({ response }) => { delete response.attributes['gen_ai.response.id']; }],
+    ['time.no_step_overlap', ({ summary }) => { delete summary.attributes[observation]; }],
+    ['semantic.agent_token_sum', ({ response }) => { response.attributes[inputTokens] = 21; }],
+    ['semantic.agent_token_sum', ({ agent }) => { agent.attributes['agent.trae-cn.hub.usage_received'] = 1; }],
+    ['semantic.agent_token_sum', ({ agent }) => { agent.attributes['agent.trae-cn.hub.input_tokens_observed'] = 19; }],
+    ['semantic.last_step_no_tool_call', ({ answer }) => {
+      answer.attributes['gen_ai.output.messages'] = [{ role: 'assistant', parts: [toolCall] }];
+    }],
+  ])('still reports %s outside the supported observation shape', (rule, mutate) => {
+    const fixture = trace();
+    mutate(fixture);
+    expect(errors(fixture.spans)).toContain(rule);
+  });
+
+  test('rejects a zero-duration STEP with a tool or a mismatched model identity', () => {
+    const { spans, step, response, tool } = trace();
+    step.startTimeUnixNano = step.endTimeUnixNano = response.startTimeUnixNano;
+    step.attributes['gen_ai.step.id'] = response.attributes['gen_ai.response.id'];
+    expect(errors(spans)).toContain('time.non_zero_duration');
+    step.attributes['gen_ai.step.id'] = 'other-response';
+    expect(errors(spans.filter(s => s !== tool))).toContain('time.non_zero_duration');
+  });
+
+  test('retains a tool-only STEP when model messages are unavailable', () => {
+    const { entry, agent, step, tool } = trace();
+    const spans = [entry, agent, step, tool];
+    expect(errors(spans)).not.toContain('structure.step_has_one_llm');
+    expect(errors(spans)).not.toContain('semantic.agent_token_sum');
+
+    expect(errors([entry, agent, step])).toContain('structure.step_has_one_llm');
+    step.attributes['gen_ai.agent.name'] = 'other-agent';
+    expect(errors(spans)).toContain('structure.step_has_one_llm');
+  });
+});
+
 describe('delegated trace validation scopes', () => {
   test('regenerating rules retains delegated topology, identity and execution scopes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'pilot-trace-rules-'));

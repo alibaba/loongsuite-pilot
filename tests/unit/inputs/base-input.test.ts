@@ -14,6 +14,10 @@ class TestInput extends BaseInput {
   onStartFn: () => Promise<void> = async () => {};
   onStopFn: () => Promise<void> = async () => {};
 
+  wake(queueIfBusy: boolean): void {
+    this.requestCollection(queueIfBusy);
+  }
+
   protected async collect(): Promise<AgentActivityEntry[]> {
     return this.collectFn();
   }
@@ -133,6 +137,30 @@ describe('BaseInput', () => {
     finish();
     await Promise.all([start, stop]);
     expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it.each([false, true])('coalesces wake-ups behind a checkpoint write (stop=%s)', async stop => {
+    let entered!: () => void;
+    const writing = new Promise<void>(resolve => { entered = resolve; });
+    let finish!: () => void;
+    const saved = new Promise<void>(resolve => { finish = resolve; });
+    vi.spyOn(stateStore, 'save').mockImplementationOnce(() => { entered(); return saved; });
+    const collect = vi.fn(async () => []);
+    input.collectFn = collect;
+    const start = input.start();
+    await writing;
+
+    input.wake(true);
+    input.wake(true);
+    const stopping = stop ? input.stop() : undefined;
+    try {
+      expect(collect).toHaveBeenCalledOnce();
+    } finally {
+      finish();
+      await Promise.all([start, stopping]);
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(collect).toHaveBeenCalledTimes(stop ? 1 : 2);
   });
 
   it.each([false, true])('finishes startup at an output hold without overlapping the pending first cycle (watcher=%s)', async earlyWatcher => {

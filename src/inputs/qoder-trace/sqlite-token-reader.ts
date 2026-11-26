@@ -19,8 +19,16 @@ export interface SqliteTokenData {
   model?: string;
 }
 
+export interface SqliteRequestModel {
+  requestId: string;
+  messageId: string;
+  gmtCreate: number;
+  model: string;
+}
+
 export interface SqliteTokenResult {
   rows: SqliteTokenData[];
+  requestModels?: SqliteRequestModel[];
   /** The DB path that contained the session data, for caller-side variant detection. */
   matchedDbPath: string | null;
 }
@@ -135,43 +143,26 @@ export function parseAttachedImagePaths(raw: string | null | undefined): string[
 }
 
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
-  const dbPaths = resolveAllQoderDbPaths();
-  if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
+  return readSqliteTokensFromCandidates(sessionId, resolveAllQoderDbPaths(), isIdeaDbPath);
+}
 
-  const sql = `
-    SELECT
-      cm.id AS message_id,
-      cm.session_id AS session_id,
-      cm.request_id AS request_id,
-      cm.gmt_create AS gmt_create,
-      cm.token_info AS token_info,
-      cm.model_info AS model_info,
-      cr.extra AS record_extra
-    FROM chat_message cm
-    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id
-    WHERE cm.session_id = ?
-      AND cm.role = 'assistant'
-      AND cm.token_info IS NOT NULL
-      AND cm.token_info != ''
-      AND json_valid(cm.token_info)
-      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
-    ORDER BY cm.gmt_create ASC, cm.id ASC
-  `;
-
+/** Read each product's own candidates without mixing usage and model rows across DBs. */
+export async function readSqliteTokensFromCandidates(
+  sessionId: string,
+  dbPaths: readonly string[],
+  withRequestModels: (dbPath: string) => boolean,
+): Promise<SqliteTokenResult> {
+  let modelOnly: SqliteTokenResult | undefined;
   for (const dbPath of dbPaths) {
-    let rows: Array<{
-      message_id?: string;
-      session_id?: string;
-      request_id: string;
-      gmt_create: number;
-      token_info: string;
-      model_info?: string | null;
-      record_extra?: string | null;
-    }>;
+    let rows: SqliteTokenRow[];
     try {
-      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
-        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
-      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
+      rows = withRequestModels(dbPath)
+        ? await readSqliteTokenRows(dbPath, sessionId, true).catch(error => {
+          // Older clients may omit chat_record or its model metadata.
+          logger.debug('sqlite request-model query failed', { sessionId, dbPath, error: String(error) });
+          return readSqliteTokenRows(dbPath, sessionId, false);
+        })
+        : await readSqliteTokenRows(dbPath, sessionId, false);
     } catch (err) {
       logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
       continue;
@@ -180,8 +171,17 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
     if (rows.length === 0) continue;
 
     const results: SqliteTokenData[] = [];
+    const requestModels: SqliteRequestModel[] = [];
     for (const row of rows) {
-      const info = parseTokenInfo(row.token_info);
+      if (row.request_id && row.request_model) {
+        requestModels.push({
+          requestId: row.request_id,
+          messageId: row.message_id ?? '',
+          gmtCreate: row.gmt_create,
+          model: row.request_model,
+        });
+      }
+      const info = row.token_info ? parseTokenInfo(row.token_info) : null;
       if (!info) continue;
       results.push({
         sessionId: row.session_id ?? '',
@@ -191,12 +191,67 @@ export async function readSqliteTokensForSession(sessionId: string): Promise<Sql
         inputTokens: info.promptTokens,
         outputTokens: info.completionTokens,
         cacheReadTokens: info.cachedTokens,
-        model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
+        model: parseModelKey(row.model_info),
       });
     }
-    if (results.length > 0) return { rows: results, matchedDbPath: dbPath };
+    if (results.length > 0) return { rows: results, requestModels, matchedDbPath: dbPath };
+    if (requestModels.length > 0) modelOnly ??= { rows: [], requestModels, matchedDbPath: dbPath };
   }
-  return { rows: [], matchedDbPath: null };
+  return modelOnly ?? { rows: [], matchedDbPath: null };
+}
+
+interface SqliteTokenRow {
+  message_id?: string;
+  session_id?: string;
+  request_id: string;
+  gmt_create: number;
+  token_info: string | null;
+  model_info?: string | null;
+  request_model: string | null;
+}
+
+function readSqliteTokenRows(dbPath: string, sessionId: string, withRequestModels: boolean): Promise<SqliteTokenRow[]> {
+  // Group repeated records before joining. They must not duplicate usage
+  // rows or turn conflicting model selections into an arbitrary choice.
+  const modelQuery = `
+    WITH recorded_models AS (
+      SELECT request_id, CASE WHEN json_valid(extra) THEN
+        CASE WHEN json_type(extra, '$.modelConfig.key') = 'text'
+          THEN trim(json_extract(extra, '$.modelConfig.key')) END
+      END AS model
+      FROM chat_record
+      WHERE session_id = ?
+    ), request_models AS (
+      SELECT request_id, MIN(model) AS request_model
+      FROM recorded_models
+      WHERE length(model) BETWEEN 1 AND 512 AND lower(model) NOT IN ('unknown', 'custom_model')
+      GROUP BY request_id
+      HAVING COUNT(DISTINCT model) = 1
+    )
+  `;
+  const sql = `
+    ${withRequestModels ? modelQuery : ''}
+    SELECT
+      cm.id AS message_id,
+      cm.session_id AS session_id,
+      cm.request_id AS request_id,
+      cm.gmt_create AS gmt_create,
+      cm.token_info AS token_info,
+      cm.model_info AS model_info,
+      ${withRequestModels ? 'rm.request_model' : 'NULL'} AS request_model
+    FROM chat_message cm
+    ${withRequestModels ? 'LEFT JOIN request_models rm ON rm.request_id = cm.request_id' : ''}
+    WHERE cm.session_id = ?
+      AND cm.role = 'assistant'
+      AND (json_valid(cm.token_info)${withRequestModels ? ' OR rm.request_model IS NOT NULL' : ''})
+      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
+    ORDER BY cm.gmt_create ASC, cm.id ASC
+  `;
+
+  const sessionParams = withRequestModels ? [sessionId, sessionId] : [sessionId];
+  return queryReadonlyPaged(dbPath, sql, (cursor) => [
+    ...sessionParams, cursor.continued, cursor.sort, cursor.sort, cursor.id,
+  ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
 }
 
 /**
