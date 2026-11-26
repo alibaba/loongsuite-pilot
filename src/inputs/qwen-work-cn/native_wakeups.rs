@@ -14,7 +14,7 @@ const MISSING_SOURCE_GRACE: Duration = Duration::from_secs(600);
 pub(crate) struct QwenWorkCnNativeWakeups {
     pub directory: PathBuf,
     pub pilot_policy_dir: Option<PathBuf>,
-    pub transcript_root: PathBuf,
+    pub transcript_roots: Vec<PathBuf>,
     pub producer_data_dir: PathBuf,
     pub user_id: String,
     pub legacy_cursor_root: Option<PathBuf>,
@@ -39,8 +39,12 @@ impl NativeWakeupReader {
         let Some(data) = &native.pilot_policy_dir else {
             return;
         };
-        if let Err(error) = crate::sdk::configure_qwen_wakeups(data, Some(&native.transcript_root))
-        {
+        let roots: Vec<_> = native
+            .transcript_roots
+            .iter()
+            .map(PathBuf::as_path)
+            .collect();
+        if let Err(error) = crate::sdk::configure_qwen_wakeups(data, &roots) {
             rt.warn(
                 "Qwen Work transcript wakeup setup failed",
                 serde_json::json!({"error": error.to_string()}).as_object(),
@@ -131,7 +135,10 @@ impl NativeWakeupReader {
                 tokio::fs::remove_file(marker).await?;
                 continue;
             };
-            if !path.starts_with(&native.transcript_root)
+            if !native
+                .transcript_roots
+                .iter()
+                .any(|root| path.starts_with(root))
                 || path
                     .components()
                     .any(|part| matches!(part, std::path::Component::ParentDir))

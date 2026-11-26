@@ -768,6 +768,169 @@ fn node_rollback_waits_for_both_qwen_outboxes_and_exports_both_cursors() {
 }
 
 #[test]
+fn node_rollback_protects_durable_hook_ingress_before_outbox_and_fences_stale_hooks() {
+    let fixture = Fixture::new();
+    fixture.package();
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let current = String::from_utf8(stage.stdout).unwrap();
+    let installed = cache.join("versions").join(current.trim());
+    let publish = || {
+        fixture.helper(
+            "publish-package",
+            &fixture.runtime_options(&installed),
+            true,
+        )
+    };
+    success(&publish());
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(node.join("scripts/loongsuite-pilot.sh"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let pointer = fs::read(cache.join("current")).unwrap();
+    let previous = fs::read(cache.join("previous")).unwrap();
+
+    let data = fixture.data.canonicalize().unwrap();
+    let qwen = data.join("state/standalone-qwen-work-cn-sdk");
+    let wakeups = qwen.join("wakeups/qwen-work-cn");
+    let transcripts = fixture
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("transcripts");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::create_dir_all(wakeups.parent().unwrap()).unwrap();
+    fs::write(
+        qwen.join("wakeups/qwen-work-cn-policy.json"),
+        json!({"schema":1,"enabled":true,"transcript_root":transcripts}).to_string(),
+    )
+    .unwrap();
+    let transcript = transcripts.join("native.jsonl");
+    fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let hook = |root: &Path, agent: &str, event: &str, payload: Value| {
+        let input = fixture.root.path().join("native-hook.json");
+        fs::write(&input, payload.to_string()).unwrap();
+        let mut cmd = fixture.command(Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook")));
+        cmd.args([
+            "sdk-hook",
+            "--agent",
+            agent,
+            "--channel",
+            "observe",
+            "--event",
+            event,
+        ])
+        .arg("--data-dir")
+        .arg(root)
+        .env("AGENT_DATA_COLLECTION_CONFIG", data.join("config.json"))
+        .stdin(fs::File::open(input).unwrap());
+        bounded(cmd)
+    };
+    let qwen_stop = || {
+        hook(
+            &qwen,
+            "qwen-work-cn",
+            "Stop",
+            json!({
+                "hook_event_name":"Stop","session_id":"offline-qwen","transcript_path":transcript
+            }),
+        )
+    };
+    let cursor_prompt = || {
+        hook(
+            &data,
+            "cursor",
+            "beforeSubmitPrompt",
+            json!({
+                "conversation_id":"offline-cursor","generation_id":"one","prompt":"offline test"
+            }),
+        )
+    };
+    let rollback = || fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    let refuse = |wanted: &str| {
+        let output = rollback();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(wanted), "{error}");
+        assert_eq!(fs::read(cache.join("current")).unwrap(), pointer);
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), previous);
+        assert!(!data.join("logs/input-state.json").exists());
+        assert!(!qwen.join("outbox/delivery.sqlite").exists());
+        assert!(!data
+            .join("state/standalone-cursor-sdk/outbox/delivery.sqlite")
+            .exists());
+    };
+    // The actual thin binaries publish even though no collector/outbox ever
+    // started. Move the observed records aside only to isolate each guard;
+    // the SDK delivery and retry are verified separately in sdk_dynamic.
+    assert!(qwen_stop().status.success());
+    let marker = fs::read_dir(&wakeups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let bytes = fs::read(&marker).unwrap();
+    refuse("Qwen Work Stop notifications are still pending");
+    assert_eq!(fs::read(&marker).unwrap(), bytes);
+    fs::rename(marker, fixture.root.path().join("qwen-queued-record")).unwrap();
+    assert!(cursor_prompt().status.success());
+    let inbox = data.join("state/cursor/deferred/inbox");
+    let queued = fs::read_dir(&inbox)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let payload = fs::read(&queued).unwrap();
+    refuse("Cursor deferred Hook activity is still pending");
+    assert_eq!(fs::read(&queued).unwrap(), payload);
+    fs::rename(queued, fixture.root.path().join("cursor-queued-record")).unwrap();
+    let journal = inbox.with_file_name("event-journal.jsonl");
+    let assembled_input =
+        b"{\"hook_event\":\"beforeSubmitPrompt\",\"conversation_id\":\"offline-cursor\"}\n";
+    fs::write(&journal, assembled_input).unwrap();
+    refuse("Cursor deferred Hook activity is still pending");
+    assert_eq!(fs::read(&journal).unwrap(), assembled_input);
+    fs::rename(
+        journal,
+        fixture.root.path().join("cursor-unassembled-record"),
+    )
+    .unwrap();
+
+    success(&rollback());
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    // Old commands cached in an Agent must still fail open for the Agent,
+    // but cannot append to a Rust-only queue while Node owns the installation.
+    assert!(qwen_stop().status.success());
+    assert!(cursor_prompt().status.success());
+    assert_eq!(fs::read_dir(&wakeups).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    success(&publish());
+    assert!(qwen_stop().status.success());
+    assert!(cursor_prompt().status.success());
+    assert_eq!(fs::read_dir(wakeups).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(inbox).unwrap().count(), 1);
+}
+
+#[test]
 fn failed_node_switch_restores_current_qwen_hooks_and_retry_retires_only_the_installed_hooks() {
     let fixture = Fixture::new();
     let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));

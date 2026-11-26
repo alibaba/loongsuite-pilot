@@ -1,6 +1,8 @@
 //! Hard deadline belongs to the main thread. This module has no collector link.
 #[path = "cursor_inbox.rs"]
 mod cursor_inbox;
+#[path = "hook_ingress.rs"]
+mod hook_ingress;
 #[path = "hook_protocol.rs"]
 mod protocol;
 #[path = "hook_qoder.rs"]

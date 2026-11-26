@@ -146,7 +146,7 @@ pub(super) async fn run_with_retirement(
                                     &paths.data_dir,
                                 )?;
                                 let _history_ownership = if operation == "rollback-package" && manifest.runtime == "node" {
-                                    Some(lock_legacy_history_for_rollback(&paths.data_dir).await?)
+                                    Some(lock_legacy_history_for_rollback(&paths.data_dir, &paths.cache_dir).await?)
                                 } else {
                                     None
                                 };
@@ -329,7 +329,10 @@ impl Drop for LegacyHistoryRollback {
     }
 }
 
-async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRollback> {
+async fn lock_legacy_history_for_rollback(
+    data: &Path,
+    cache: &Path,
+) -> Result<LegacyHistoryRollback> {
     use crate::sdk::hook_history::{canonical_data_dir, LegacyHistoryOwnership, PROFILES};
     let data = canonical_data_dir(data)?;
     let collector_path = data.join("collector.lock");
@@ -346,6 +349,11 @@ async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRo
         sdk_locks: Vec::new(),
         collector,
     };
+    // Check the durable stages *before* SQLite or shared cursor writes. Hold
+    // the writer leases through version publication, not just this snapshot.
+    ownership
+        .sdk_locks
+        .extend(lock_hook_ingress_for_rollback(&data, cache)?);
     let mut profiles = Vec::new();
     for profile in PROFILES {
         if profile.has_outbox(&data)? {
@@ -380,6 +388,63 @@ async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRo
         }
     }
     Ok(ownership)
+}
+
+fn lock_hook_ingress_for_rollback(data: &Path, cache: &Path) -> Result<Vec<fs::File>> {
+    use crate::sdk::hook_ingress::lock_for_rollback;
+    let mut leases = vec![lock_for_rollback(data, cache)
+        .context("Cursor Hook ingress is busy or inaccessible; current version retained")?];
+    let qwen = data.join("state/standalone-qwen-work-cn-sdk");
+    crate::utils::source_access::private_path(&qwen)?;
+    if qwen.try_exists()? {
+        leases.push(
+            lock_for_rollback(&qwen, cache).context(
+                "Qwen Work Hook ingress is busy or inaccessible; current version retained",
+            )?,
+        );
+        ensure!(
+            !has_hook_notifications(&qwen.join("wakeups/qwen-work-cn"))?,
+            "Qwen Work Stop notifications are still pending. Start the current release and let delivery finish before retrying the rollback"
+        );
+    }
+    ensure!(
+        !has_hook_notifications(&data.join("state/cursor/deferred/inbox"))?
+            && !has_cursor_deferred_journal(&data.join("state/cursor/deferred/event-journal.jsonl"))?,
+        "Cursor deferred Hook activity is still pending. Start the current release and let delivery finish before retrying the rollback"
+    );
+    Ok(leases)
+}
+
+fn has_hook_notifications(inbox: &Path) -> Result<bool> {
+    crate::utils::source_access::private_path(inbox)?;
+    match fs::read_dir(inbox) {
+        Ok(entries) => {
+            for entry in entries {
+                if entry?.path().extension().is_some_and(|ext| ext == "json") {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn has_cursor_deferred_journal(path: &Path) -> Result<bool> {
+    crate::utils::source_access::private_path(path)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(
+        metadata.is_file(),
+        "Cursor deferred journal is not a regular file"
+    );
+    // The legacy Hook reads state/cursor/event-journal.jsonl, not this file.
+    // Even an incomplete turn can hold durable prompt/tool rows in Rust only.
+    Ok(metadata.len() != 0)
 }
 
 /// The previous pointer authorizes the rollback target, including an installed

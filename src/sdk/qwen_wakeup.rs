@@ -53,24 +53,45 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16 * 1024 {
         return false;
     }
-    let Some(root) = fs::read(&policy_path)
+    let Some(policy) = fs::read(&policy_path)
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
         .filter(|policy| policy["schema"] == 1 && policy["enabled"] == true)
-        .and_then(|policy| policy["transcript_root"].as_str().map(str::to_owned))
-        .map(std::path::PathBuf::from)
     else {
         return false;
     };
-    if !private_path(transcript) || !private_path(&root) {
+    let roots: Vec<_> = match policy.get("transcript_roots") {
+        Some(Value::Array(roots)) if (1..=2).contains(&roots.len()) => {
+            roots.iter().filter_map(Value::as_str).collect()
+        }
+        Some(_) => return false,
+        None => policy["transcript_root"].as_str().into_iter().collect(),
+    };
+    if !private_path(transcript) {
         return false;
     }
-    let (Ok(resolved), Ok(root)) = (transcript.canonicalize(), root.canonicalize()) else {
+    let Ok(resolved) = transcript.canonicalize() else {
         return false;
     };
-    if !resolved.starts_with(root) {
+    if !roots.into_iter().map(Path::new).any(|root| {
+        root.is_absolute()
+            && private_path(root)
+            && root
+                .canonicalize()
+                .is_ok_and(|root| resolved.starts_with(root))
+    }) {
         return false;
     }
+    let _lease = match super::hook_ingress::lock_writer(data) {
+        Ok(lease) => lease,
+        Err(error) => {
+            eprintln!(
+                "loongsuite-pilot: Qwen Work Stop was not recorded: {}",
+                error.kind()
+            );
+            return false;
+        }
+    };
     let cwd = payload
         .get("cwd")
         .and_then(Value::as_str)

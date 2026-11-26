@@ -119,6 +119,7 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         roots.retain(Value::is_string);
     }
     regular_directory(root)?;
+    let _lease = super::hook_ingress::lock_writer(root)?;
     let mut directory = root.to_path_buf();
     for component in ["state", "cursor", "deferred", "inbox"] {
         directory.push(component);

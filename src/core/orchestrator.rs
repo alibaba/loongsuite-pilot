@@ -2580,9 +2580,13 @@ impl Orchestrator {
                 crate::inputs::qwen_work_cn::QwenWorkCnNativeWakeups {
                     directory: sdk_data.join("wakeups/qwen-work-cn"),
                     pilot_policy_dir: Some(sdk_data),
-                    transcript_root: std::path::PathBuf::from(resolve_home(
-                        "~/.qwenworkcn/projects",
-                    )),
+                    transcript_roots: [
+                        resolve_home("~/.qwenworkcn/projects"),
+                        resolve_home("~/.qwenworkcn/logs/hooks"),
+                    ]
+                    .into_iter()
+                    .map(std::path::PathBuf::from)
+                    .collect(),
                     producer_data_dir: data.clone(),
                     legacy_cursor_root: Some(data),
                     user_id: self.config.user_id.clone(),
@@ -3367,6 +3371,7 @@ impl Orchestrator {
         let history = self.data_dir_join("logs/qwen-work-cn/history");
         let segments = resolve_home("~/.qwenworkcn/logs/sessions");
         let transcripts = resolve_home("~/.qwenworkcn/projects");
+        let flash_transcripts = resolve_home("~/.qwenworkcn/logs/hooks");
         let (desktop_db, flash_db) = QwenWorkCnTraceInput::flash_database_paths();
         // This is Pilot-owned state. Create it before starting the SDK so the
         // first Stop is not mistaken for pre-existing history.
@@ -3384,11 +3389,12 @@ impl Orchestrator {
             "hcd": {"agent_configs": {"qwen-work-cn": {"collection": {
                 "enabled": true,
                 "profile": "qwen_work_cn_trace_v1",
-                "allowed_roots": [&self.data_dir, &segments, &transcripts, &desktop_db, &flash_db],
+                "allowed_roots": [&self.data_dir, &segments, &transcripts, &flash_transcripts, &desktop_db, &flash_db],
                 "sources": [
                     {"id": "history", "type": "hook_jsonl", "path": history},
                     {"id": "segments", "type": "segments", "path": segments},
                     {"id": "transcript", "type": "transcript", "path": transcripts},
+                    {"id": "flash-transcript", "type": "transcript", "path": flash_transcripts},
                     {"id": "desktop-binding", "type": "desktop_database", "path": desktop_db},
                     {"id": "flash-usage", "type": "flash_database", "path": flash_db},
                 ],

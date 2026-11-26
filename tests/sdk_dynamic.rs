@@ -1342,8 +1342,10 @@ fn qwen_stop_accepts_a_replacement_after_the_queued_transcript_is_removed() {
 fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() {
     let temporary = tempfile::tempdir().unwrap();
     let root = temporary.path().canonicalize().unwrap();
-    let source = root.join("transcripts");
-    std::fs::create_dir(&source).unwrap();
+    let projects = root.join("projects");
+    let source = root.join("logs/hooks");
+    std::fs::create_dir(&projects).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
     let transcript = source.join("session.jsonl");
     let data = root.join("data");
     let user = |turn: &str| {
@@ -1391,8 +1393,9 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
     assert!(!wakeups.exists(), "no collection policy must fail closed");
     let policy = json!({"version":"qwen-native","agents":["qwen-work-cn"],
         "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
-            "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[source],
-            "sources":[{"id":"transcript","type":"transcript","path":source}],
+            "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[projects,source],
+            "sources":[{"id":"transcript","type":"transcript","path":projects},
+                {"id":"flash-transcript","type":"transcript","path":source}],
             "capture_message_content":false,"limits":{"poll_interval_ms":500}}}}},
         "sdk_options":{"delivery":{"flush_interval_ms":10}}});
     let mut initialized = Host::start(&data, policy.clone(), Box::default());
@@ -1441,6 +1444,20 @@ fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() 
     host.ready();
     until(|| host.ctx.rows.lock().unwrap().len() >= 3);
     let first = host.ctx.rows.lock().unwrap().clone();
+    let event_ids = first
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        event_ids.len(),
+        first.len(),
+        "each recovered event was delivered once"
+    );
     assert!(first
         .iter()
         .all(|row| !String::from_utf8_lossy(row).contains("private-")));

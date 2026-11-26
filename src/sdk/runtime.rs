@@ -38,19 +38,21 @@ struct Agent {
 
 pub(crate) fn configure_qwen_wakeups(
     data_dir: &Path,
-    transcript_root: Option<&Path>,
+    transcript_roots: &[&Path],
 ) -> anyhow::Result<()> {
     let path = data_dir.join("wakeups/qwen-work-cn-policy.json");
-    if transcript_root.is_some() || path.try_exists()? {
-        write_checkpoint(&path, &qwen_wakeup_policy(transcript_root))?;
+    if !transcript_roots.is_empty() || path.try_exists()? {
+        write_checkpoint(&path, &qwen_wakeup_policy(transcript_roots))?;
     }
     Ok(())
 }
 
-fn qwen_wakeup_policy(transcript_root: Option<&Path>) -> String {
-    match transcript_root {
-        Some(root) => json!({"schema":1,"enabled":true,"transcript_root":root}),
-        None => json!({"schema":1,"enabled":false}),
+fn qwen_wakeup_policy(transcript_roots: &[&Path]) -> String {
+    match transcript_roots {
+        [] => json!({"schema":1,"enabled":false}),
+        [root] => json!({"schema":1,"enabled":true,"transcript_root":root}),
+        [primary, ..] => json!({"schema":1,"enabled":true,"transcript_root":primary,
+            "transcript_roots":transcript_roots}),
     }
     .to_string()
 }
@@ -104,15 +106,17 @@ impl Collector {
                 );
             }
         }
-        let qwen_root = policy.agents.get("qwen-work-cn").and_then(|plan| {
-            plan.sources
-                .iter()
-                .find(|source| source.kind == "transcript")
-                .map(|source| source.path.as_path())
-        });
+        let qwen_roots: Vec<_> = policy
+            .agents
+            .get("qwen-work-cn")
+            .into_iter()
+            .flat_map(|plan| plan.sources.iter())
+            .filter(|source| source.kind == "transcript")
+            .map(|source| source.path.as_path())
+            .collect();
         let qwen_policy = self.init.data_dir.join("wakeups/qwen-work-cn-policy.json");
-        let backup = if qwen_root.is_some() || qwen_policy.try_exists()? {
-            stage_checkpoint_mirror(&qwen_policy, Some(&qwen_wakeup_policy(qwen_root)), false)?
+        let backup = if !qwen_roots.is_empty() || qwen_policy.try_exists()? {
+            stage_checkpoint_mirror(&qwen_policy, Some(&qwen_wakeup_policy(&qwen_roots)), false)?
         } else {
             MirrorRollback::Unchanged
         };
@@ -406,11 +410,13 @@ fn run_agent(
             Some((Arc::new(linker), ttl))
         });
     let native_wakeups = if plan.agent == "qwen-work-cn" {
-        if let Some(source) = plan
+        let transcript_roots: Vec<_> = plan
             .sources
             .iter()
-            .find(|source| source.kind == "transcript")
-        {
+            .filter(|source| source.kind == "transcript")
+            .map(|source| source.path.clone())
+            .collect();
+        if !transcript_roots.is_empty() {
             let directory = init.data_dir.join("wakeups/qwen-work-cn");
             source_access::private_path(&directory)?;
             std::fs::create_dir_all(&directory)?;
@@ -449,7 +455,7 @@ fn run_agent(
             Some(QwenWorkCnNativeWakeups {
                 directory,
                 pilot_policy_dir: None,
-                transcript_root: source.path.clone(),
+                transcript_roots,
                 producer_data_dir,
                 user_id: init.user_id.clone(),
                 legacy_cursor_root: plan.pilot_host.as_ref().map(|state| state.data_dir.clone()),

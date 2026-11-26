@@ -121,7 +121,7 @@ async fn sdk_owned_history_survives_crash_before_first_checkpoint() {
     input.set_native_wakeups(QwenWorkCnNativeWakeups {
         directory: wakeups,
         pilot_policy_dir: None,
-        transcript_root: f.root.clone(),
+        transcript_roots: vec![f.root.clone()],
         producer_data_dir: f.root.clone(),
         user_id: "test".into(),
         legacy_cursor_root: None,

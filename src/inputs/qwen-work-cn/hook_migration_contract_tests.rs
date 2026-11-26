@@ -94,7 +94,7 @@ async fn history_only_listener_collects_native_stop_without_starting_trace() {
         input.set_native_wakeups(QwenWorkCnNativeWakeups {
             directory: wakeups.clone(),
             pilot_policy_dir: Some(sdk.clone()),
-            transcript_root: project.clone(),
+            transcript_roots: vec![project.clone()],
             producer_data_dir: pilot.clone(),
             legacy_cursor_root: Some(pilot.clone()),
             user_id: "fixture".into(),

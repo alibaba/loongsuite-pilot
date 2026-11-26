@@ -3041,24 +3041,32 @@ fn convert_qwen_collaboration(
         start.input_messages_delta = Some(Value::Array(Vec::new()));
     }
     let mut result = converter.convert(&[start, (**end).clone()], options)?;
-    if let Some(output) = end
+    let output = end
         .output_messages
         .as_ref()
         .filter(|value| value.is_array())
-    {
-        let output = output.to_string();
-        for span in &mut result.spans {
-            if matches!(
-                span.attributes
-                    .get("gen_ai.span.kind")
-                    .and_then(Value::as_str),
-                Some("ENTRY" | "AGENT")
-            ) {
-                span.attributes.insert(
-                    "gen_ai.output.messages".into(),
-                    Value::String(output.clone()),
-                );
-            }
+        .map(Value::to_string);
+    for span in &mut result.spans {
+        // Preserve existing CMS queries and the v1.20.0 collaboration Span
+        // contract, while retaining the generic agent_turn event projection.
+        span.kind = match span
+            .attributes
+            .get("gen_ai.span.kind")
+            .and_then(Value::as_str)
+        {
+            Some("ENTRY") => 2, // SERVER
+            Some("AGENT") => 3, // CLIENT
+            _ => continue,
+        };
+        span.attributes.insert(
+            "loongsuite.qwenworkcn.observation_scope".into(),
+            "collaboration_conversation".into(),
+        );
+        if let Some(output) = &output {
+            span.attributes.insert(
+                "gen_ai.output.messages".into(),
+                Value::String(output.clone()),
+            );
         }
     }
     Ok(result)
