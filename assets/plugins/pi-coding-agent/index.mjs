@@ -525,7 +525,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.captureContent = shouldCaptureContent(config, identity.agentType);
   };
 
-  pi.on('session_start', safeHandler('session_start', async (_event, ctx) => {
+  const syncBranchCompaction = (ctx) => {
     state.compacted = false;
     state.contextVersion = null;
     state.contextPreviousVersion = null;
@@ -537,6 +537,10 @@ export function createPiTelemetryExtension(identityOptions = {}) {
       state.contextVersion = installed.id;
       state.contextFirstKeptEntryId = installed.firstKeptEntryId || null;
     }
+  };
+
+  pi.on('session_start', safeHandler('session_start', async (_event, ctx) => {
+    syncBranchCompaction(ctx);
     state.compression?.signal?.removeEventListener('abort', state.compression.onAbort);
     state.compression = null;
     state.agentActive = false;
@@ -553,6 +557,14 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.previousRequestMessages = [];
     state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
+  }));
+
+  // Pi has already installed the target branch when this fires, without a
+  // matching session_start. A branch switch isn't a new compression.
+  pi.on('session_tree', safeHandler('session_tree', async (_event, ctx) => {
+    syncBranchCompaction(ctx);
+    state.previousRequestMessages = [];
+    state.hasPreviousRequestSnapshot = false;
   }));
 
   pi.on('before_agent_start', safeHandler('before_agent_start', async (event) => {

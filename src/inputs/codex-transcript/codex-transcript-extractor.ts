@@ -190,6 +190,7 @@ function extractCodexTurn(
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
+  const initialLegacyPrompts = new Set<string>();
   const stepEnvelopes: StepEnvelope[] = [];
   const unmatchedTokenUsages: CodexTranscriptUsage[] = [];
   const toolSteps = new Map<string, StepEnvelope>();
@@ -258,6 +259,15 @@ function extractCodexTurn(
   // TypeScript cannot infer mutations made by beginStep/flushCurrentStep through
   // their closures, so read the mutable step through an explicitly typed getter.
   const activeStep = (): StepEnvelope | null => currentStep;
+  const isAdditionalInput = (): boolean => Boolean(
+    contextResetId || activeStep() || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined,
+  );
+  const appendInputMessage = (message: JsonValue): void => {
+    // A message is either part of the initial request or input to a later
+    // wave. Putting it in both leaks future input into earlier requests and
+    // re-appends it when resuming from a compacted baseline.
+    (isAdditionalInput() ? additionalInputMessages : inputMessages).push(message);
+  };
   const appendPrompt = (value: string | undefined): void => {
     if (!value || promptParts.includes(value)) return;
     promptParts.push(value);
@@ -345,7 +355,9 @@ function extractCodexTurn(
         continue;
       }
       if (payload.type === 'user_message') {
-        appendPrompt(stringValue(payload.message));
+        const message = stringValue(payload.message);
+        appendPrompt(message);
+        if (message && !isAdditionalInput()) initialLegacyPrompts.add(message);
         sawSubmittedUserMessage = true;
         markActivity(timestamp);
         continue;
@@ -463,11 +475,7 @@ function extractCodexTurn(
     if (itemType === 'additional_tools') {
       const message = codexAdditionalToolsMessage(payload);
       if (!message) continue;
-      if (contextResetId || activeStep() || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined) {
-        additionalInputMessages.push(message);
-      } else {
-        inputMessages.push(message);
-      }
+      appendInputMessage(message);
       markActivity(timestamp);
       continue;
     }
@@ -485,8 +493,7 @@ function extractCodexTurn(
       ) {
         const message = transcriptInputMessage('user', payload.content);
         if (message) {
-          inputMessages.push(message);
-          if (contextResetId || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined) additionalInputMessages.push(message);
+          appendInputMessage(message);
           appendPrompt(extractMessageText(payload.content));
           sawSubmittedUserMessage = true;
           markActivity(timestamp);
@@ -521,11 +528,10 @@ function extractCodexTurn(
           source.startOffset,
         );
         if (message) {
-          inputMessages.push(message);
+          appendInputMessage(message);
           if (role === 'user') {
             appendPrompt(extractMessageText(payload.content));
           }
-          if (contextResetId || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined) additionalInputMessages.push(message);
         }
         markActivity(timestamp);
       }
@@ -645,7 +651,9 @@ function extractCodexTurn(
     terminalAtMs,
     ...(prompt ? { prompt } : {}),
     promptReady,
-    inputMessages,
+    inputMessages: inputMessages.length || initialLegacyPrompts.size === 0
+      ? inputMessages
+      : [{ role: 'user', parts: [{ type: 'text', content: [...initialLegacyPrompts].join('\n') }] }],
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),

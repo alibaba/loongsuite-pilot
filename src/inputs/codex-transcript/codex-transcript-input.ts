@@ -1449,17 +1449,19 @@ export class CodexTranscriptInput extends BaseInput {
       ? extraction.committedStepRanges[closedStepCount - 1]
       : undefined;
     if (closedStepCount > 0) {
-      const nextContext = persistedInputContext(built.nextInputContext, lastClosedRange, this.captureMessageContent);
-      activeTurn.inputContext = nextContext;
-      if (terminal && built.nextInputContext.compacted) {
-        checkpoint.compactedContext = nextContext;
-      }
+      activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange, this.captureMessageContent);
       if (extraction.nextStepStartedAtMs !== undefined) {
         activeTurn.nextStepStartedAtMs = extraction.nextStepStartedAtMs;
       }
       if (extraction.lastCumulativeTokenTotal !== undefined) {
         activeTurn.lastCumulativeTokenTotal = extraction.lastCumulativeTokenTotal;
       }
+    }
+    // A separate abort (or the next turn's start) may close a turn whose last
+    // wave was already committed. Promote that saved context before the
+    // caller clears the active turn, without rebuilding an uncommitted suffix.
+    if (terminal && activeTurn.inputContext?.compacted) {
+      checkpoint.compactedContext = activeTurn.inputContext;
     }
 
     const consumedEndOffset = terminal

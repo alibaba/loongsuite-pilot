@@ -339,8 +339,11 @@ Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_
 
 压缩操作和切换后的第一条 LLM 请求记录 `gen_ai.context.previous_version`、
 `gen_ai.context.version` 和 `gen_ai.context.replacement.boundary=replace`。
-Codex 使用原生 window ID，新版本跨后续 LLM 和正常新 turn 保持，下一次安装再切换。
+Codex 使用原生 window ID，已提交的压缩基线在独立中断或下一轮启动时仍保留，下一次安装再切换。
+轮中补充的消息从实际收到它的下一条模型请求加入上下文，不回填之前的请求。
 Pi 和 OpenClaw 使用原生 compaction entry ID，并可在 session 重开时从当前 branch 恢复。
+Pi 切换分支时按目标分支重算压缩版本，不把导航当作新的压缩。
+OpenClaw 关闭正文采集时依然恢复已安装的压缩版本，但不构建正文快照。
 DSH 使用已生效的 compact checkpoint ID，模型流开始时读取原生 `deriveMessages()`。
 两条路径都将原生摘要映射为 `CompactionPart`。成功替换后，完整快照覆盖旧的消息增量。
 快照缺失时省略压缩后的输入消息，防止旧历史被拼回。

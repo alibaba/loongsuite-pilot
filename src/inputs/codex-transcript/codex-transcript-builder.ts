@@ -89,7 +89,7 @@ export function buildCodexTranscriptSegment(
         ...(replacement?.messages ? { fullMessages: replacement.messages, delta: replacement.messages } : {}),
       };
     }
-    if (inputContext.compacted && step.additionalInputMessages?.length) {
+    if (step.additionalInputMessages?.length) {
       const extra = contextFromMessages(inputContext.hash, inputContext.fullMessages, step.additionalInputMessages);
       inputContext = { ...inputContext, ...extra, fullMessages: extra.fullMessages,
         delta: [...(inputContext.delta ?? []), ...step.additionalInputMessages] };
@@ -184,11 +184,7 @@ export function buildCodexTranscriptSegment(
 function initialInputContext(turn: CodexExtractedTranscriptTurn): CodexTranscriptInputContext {
   const delta = turn.steps[0]?.inputMessages?.length
     ? turn.steps[0].inputMessages
-    : turn.inputMessages.length > 0
-      ? turn.inputMessages
-      : turn.prompt
-        ? [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }]
-        : [];
+    : turn.inputMessages;
   return { ...contextFromMessages(INITIAL_INPUT_HASH, [], delta), version: initialContextVersion(turn) };
 }
 

@@ -1000,7 +1000,7 @@ function historyInputMessage(message) {
 
 /** Read only the bounded active branch rooted at the native compaction entry.
  * The hook supplies the file, and its native session header proves ownership. */
-function readCompactedSession(file, sessionId) {
+function readCompactedSession(file, sessionId, captureContent) {
   if (!sessionId || typeof file !== "string" || !path.isAbsolute(file) || !file.endsWith(".jsonl")) return;
   let fd;
   try {
@@ -1024,8 +1024,12 @@ function readCompactedSession(file, sessionId) {
       if (!line) continue;
       const entry = JSON.parse(line);
       if (entry.type !== "session" && typeof entry.id === "string") {
-        entries.set(entry.id, entry);
-        leaf = entry;
+        // Keep only the links needed to identify the installed compaction
+        // when message capture is disabled. Do not build a body snapshot.
+        leaf = captureContent ? entry : {
+          id: entry.id, parentId: entry.parentId, type: entry.type, timestamp: entry.timestamp,
+        };
+        entries.set(entry.id, leaf);
       }
     }
     const reversed = [];
@@ -1033,8 +1037,11 @@ function readCompactedSession(file, sessionId) {
     const seen = new Set();
     for (let entry = leaf; entry && !seen.has(entry.id); entry = entries.get(entry.parentId)) {
       seen.add(entry.id);
-      reversed.push(entry);
-      if (!compaction && entry.type === "compaction") compaction = entry;
+      if (!compaction && entry.type === "compaction") {
+        compaction = entry;
+        if (!captureContent) return { compaction };
+      }
+      if (captureContent) reversed.push(entry);
       if (compaction?.firstKeptEntryId === entry.id) break;
     }
     if (!compaction) return;
@@ -1054,12 +1061,12 @@ function readCompactedSession(file, sessionId) {
   finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* fail open */ } } }
 }
 
-function readResumedCompactedSession(run) {
+function readResumedCompactedSession(run, captureContent) {
   if (!run.sessionId || !resolveSessionFilePath) return;
   try {
     const agentId = /^agent:([^:]+):/.exec(run.sessionKey ?? "")?.[1];
     const file = resolveSessionFilePath(run.sessionId, undefined, { agentId });
-    return readCompactedSession(file, run.sessionId);
+    return readCompactedSession(file, run.sessionId, captureContent);
   } catch { /* Older hosts and custom stores can omit the transcript. */ }
 }
 
@@ -1510,8 +1517,8 @@ function handleModelCallStarted(event, ctx, userId, emit, cfg) {
       truncated: stash.truncated,
     } : null;
   }
-  if (run.callSeq === 1 && !run.compactedContext && shouldCaptureContent(cfg)) {
-    const resumed = readResumedCompactedSession(run);
+  if (run.callSeq === 1 && !run.compactedContext) {
+    const resumed = readResumedCompactedSession(run, shouldCaptureContent(cfg));
     if (resumed) {
       run.compactedContext = { version: contextVersion(run.sessionId, resumed.compaction.id),
         nativeId: resumed.compaction.id };
@@ -1522,7 +1529,7 @@ function handleModelCallStarted(event, ctx, userId, emit, cfg) {
   const compacted = run.compactedContext;
   const replacement = compacted?.replacementPending === true;
   if (replacement) {
-    const native = shouldCaptureContent(cfg) ? readCompactedSession(compacted.sessionFile, run.sessionId) : undefined;
+    const native = shouldCaptureContent(cfg) ? readCompactedSession(compacted.sessionFile, run.sessionId, true) : undefined;
     run.cycleInputSnapshot = native?.compaction.id === compacted.nativeId ? native?.snapshot : undefined;
     // The installed branch already includes retained tool results and the new prompt.
     run.pendingToolInputMessages.length = 0;
@@ -2056,7 +2063,7 @@ function handleAfterCompaction(event, ctx, userId, emit, cfg) {
     trace_id: generateTraceId(), 'gen_ai.turn.id': `compression:${id}`,
     'gen_ai.context.compress.standalone': true };
   const sessionFile = event.sessionFile ?? pending?.sessionFile;
-  const native = pending ? readCompactedSession(sessionFile, sessionId) : undefined;
+  const native = pending ? readCompactedSession(sessionFile, sessionId, shouldCaptureContent(cfg)) : undefined;
   const installed = native && native.compaction.id !== pending.run?.compactedContext?.nativeId
     && Date.parse(native.compaction.timestamp) >= pending.startedAt;
   const status = installed || event.compactedCount !== 0 ? 'success' : 'skipped';
@@ -2077,7 +2084,7 @@ function handleAfterCompaction(event, ctx, userId, emit, cfg) {
   }
   emit({ ...base, time_unix_nano: String(BigInt(Date.now()) * 1_000_000n),
     ...compressionIdentity(sessionId, id),
-    ...(context ? compactedContextFields(context, !!(installed && native.snapshot) && shouldCaptureContent(cfg), true) : {}),
+    ...(context ? compactedContextFields(context, !!(installed && native.snapshot), true) : {}),
     ...compressionFields({ id, status,
       startedAt: pending?.startedAt, endedAt: Date.now(), tokensBefore: pending?.tokensBefore,
       tokensAfter: event.tokenCount, messagesBefore: pending?.messagesBefore,

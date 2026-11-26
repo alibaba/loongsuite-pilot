@@ -160,16 +160,35 @@ it.each([true, false])('installs the native compaction branch for the next reque
       { role: 'user', parts: [{ type: 'text', content: 'keep this' }] },
       { role: 'user', parts: [{ type: 'text', content: 'new input' }] },
     ]);
-    const resumed = registerPlugin(await loadPlugin(), {}, { resolveSessionFilePath: () => file });
-    resumed.model_call_started({ callId: 'resumed', model: 'qwen' }, { ...ctx, runId: 'next-run' });
-    const request = readOutputRecords().at(-1);
-    expect(request['gen_ai.context.version']).toBe(after['gen_ai.context.version']);
-    expect(request['gen_ai.context.replacement.boundary']).toBeUndefined();
-    expect(request['gen_ai.input.messages']).toEqual(after['gen_ai.input.messages']);
   } else {
     expect(after['gen_ai.input.messages']).toBeUndefined();
     expect(JSON.stringify(records)).not.toContain('selected facts');
   }
+
+  // A later compaction entry on a different branch cannot replace the
+  // compaction on the active leaf's parent chain.
+  entries.splice(-1, 0, { type: 'compaction', id: 'inactive-cp', parentId: 'old',
+    timestamp: new Date().toISOString(), firstKeptEntryId: 'old', summary: 'inactive branch text' });
+  persist();
+  const resolveSessionFilePath = vi.fn(() => file);
+  const resumed = registerPlugin(await loadPlugin(), { captureMessageContent }, { resolveSessionFilePath });
+  const resumedCtx = { ...ctx, runId: 'next-run' };
+  await resumed.before_agent_run({ prompt: 'new input' }, resumedCtx);
+  resumed.llm_input({ prompt: 'new input', historyMessages: [], model: 'qwen' }, resumedCtx);
+  resumed.model_call_started({ callId: 'resumed', model: 'qwen' }, resumedCtx);
+  const resumedRecords = readOutputRecords().slice(records.length);
+  const request = resumedRecords.find(record => record['event.name'] === 'llm.request');
+  expect(request).toMatchObject({
+    'gen_ai.context.version': after['gen_ai.context.version'],
+    'gen_ai.conversation.compacted': true,
+    'gen_ai.context.content.availability': captureMessageContent ? 'plaintext' : 'unavailable',
+  });
+  expect(resolveSessionFilePath).toHaveBeenCalledTimes(1);
+  expect(resolveSessionFilePath).toHaveBeenCalledWith('s1', undefined, { agentId: 'main' });
+  expect(request['gen_ai.context.replacement.boundary']).toBeUndefined();
+  expect(request['gen_ai.input.messages']).toEqual(after['gen_ai.input.messages']);
+  expect(request['gen_ai.input.messages_delta']).toBeUndefined();
+  if (!captureMessageContent) expect(JSON.stringify(resumedRecords)).not.toMatch(/selected facts|inactive branch text|keep this|new input/);
 });
 
 it('pairs compression hooks across session rotation and preserves a skipped outcome', async () => {

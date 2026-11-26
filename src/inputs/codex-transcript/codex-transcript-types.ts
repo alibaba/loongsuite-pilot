@@ -288,6 +288,7 @@ export interface CodexExtractedTranscriptTurn {
    * UserPromptSubmit wakeup races the persisted user message.
    */
   promptReady: boolean;
+  /** Inputs observed before the first wave; later inputs belong to their step. */
   inputMessages: JsonValue[];
   cwd?: string;
   developerInstructions?: string;

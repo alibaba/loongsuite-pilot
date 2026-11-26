@@ -642,6 +642,120 @@ describe('CodexTranscriptInput', () => {
     expect(JSON.stringify(nextRequest['gen_ai.input.messages_delta'])).toContain('Continue from the summary');
   });
 
+  it.each(['abort', 'inferred'])('keeps the new compaction across a terminal-only %s and restart', async boundary => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-compaction-terminal-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const forTurn = (line: string, minute: number) =>
+      line.replaceAll('turn-1', `turn-${minute + 1}`).replaceAll('06:00:', `06:0${minute}:`);
+    const compaction = (minute: number, version: string) => forTurn(record(
+      '2026-06-24T06:00:06.900Z', 'compacted', { window_id: version, replacement_history: [
+        { type: 'compaction', id: version, content: `summary for ${version}` },
+      ] },
+    ), minute);
+    const transcript = await writeTranscript(first.sessionDir, [
+      ...lines.slice(0, 8), compaction(0, 'window-1'), ...lines.slice(8),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(transcriptCheckpoint(first.stateStore, transcript).compactedContext).toMatchObject({ version: 'window-1' });
+
+    await fs.appendFile(transcript, [
+      ...lines.slice(1, 8).map(line => forTurn(line, 1)), compaction(1, 'window-2'),
+      ...lines.slice(8, 12).map(line => forTurn(line, 1)),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-2')).toHaveLength(2);
+    expect(transcriptCheckpoint(first.stateStore, transcript).activeTurn).toMatchObject({
+      startOffset: (await fs.stat(transcript)).size, inputContext: { version: 'window-2', compacted: true },
+    });
+
+    await fs.appendFile(transcript, (boundary === 'abort'
+      ? record('2026-06-24T06:01:10.000Z', 'event_msg', { type: 'turn_aborted', turn_id: 'turn-2' })
+      : forTurn(lines[2]!, 2)) + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-2')).toHaveLength(2);
+    await first.stateStore.save();
+    await first.input.stop();
+
+    const resumed = await createDormantInput(root);
+    expect(transcriptCheckpoint(resumed.stateStore, transcript).compactedContext).toMatchObject({
+      version: 'window-2', compacted: true,
+    });
+    await fs.appendFile(transcript, [
+      ...(boundary === 'abort' ? [forTurn(lines[2]!, 2)] : []),
+      ...lines.slice(3).map(line => forTurn(line, 2)),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(resumed.input, transcript);
+    const request = resumed.entries.find(entry => entry['event.name'] === 'llm.request');
+    expect(request).toMatchObject({ 'gen_ai.context.version': 'window-2', 'gen_ai.conversation.compacted': true });
+    const messages = JSON.stringify(request?.['gen_ai.input.messages']);
+    expect(messages).toContain('summary for window-2');
+    expect(messages).not.toContain('summary for window-1');
+    expect(responsesForTurn(resumed.entries, 'turn-2')).toHaveLength(0);
+  });
+
+  it.each([true, false])('assigns steering input to the next request across poll boundaries (compacted=%s)', async compacted => {
+    const lines = completedTurn().trimEnd().split('\n');
+    const firstTurn = [
+      ...lines.slice(0, 8),
+      ...(compacted ? [record('2026-06-24T06:00:06.900Z', 'compacted', { window_id: 'window-1',
+        replacement_history: [{ type: 'compaction', content: 'retained summary' }] })] : []),
+      ...lines.slice(8),
+    ];
+    const followup = (line: string) => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:');
+    const run = async (split: boolean) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-compaction-steering-'));
+      tempDirs.push(root);
+      const source = await createDormantInput(root);
+      const transcript = await writeTranscript(source.sessionDir, firstTurn.join('\n') + '\n');
+      await processTranscriptOnce(source.input, transcript);
+      await fs.appendFile(transcript, lines.slice(1, 8).map(followup).join('\n') + '\n');
+      if (split) {
+        await processTranscriptOnce(source.input, transcript);
+        expect(responsesForTurn(source.entries, 'turn-2')).toHaveLength(1);
+      }
+      await fs.appendFile(transcript, [
+        record('2026-06-24T06:01:06.100Z', 'response_item', {
+          type: 'message', role: 'user', content: [{ type: 'input_text', text: 'steer after tool' }],
+        }),
+        record('2026-06-24T06:01:06.100Z', 'event_msg', { type: 'user_message', message: 'steer after tool' }),
+        record('2026-06-24T06:01:06.200Z', 'response_item', {
+          type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'injected after tool' }],
+        }),
+        ...lines.slice(8).map(followup),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(source.input, transcript);
+      return source.entries.filter(entry => entry['event.name'] === 'llm.request'
+        && entry['agent.codex.transcript_turn_id'] === 'turn-2').map(entry => ({
+        id: entry.span_id,
+        messages: entry['gen_ai.input.messages'],
+        delta: entry['gen_ai.input.messages_delta'],
+        hash: entry['gen_ai.input.messages_hash'],
+        version: entry['gen_ai.context.version'],
+      }));
+    };
+    const single = await run(false);
+    const split = await run(true);
+    expect(single).toHaveLength(3);
+    expect(new Set(single.map(step => step.version)).size).toBe(1);
+    if (compacted) expect(single[0]!.version).toBe('window-1');
+    const first = JSON.stringify(single[0]!.messages);
+    expect(first).not.toContain('steer after tool');
+    expect(first).not.toContain('injected after tool');
+    if (compacted) expect(first).toContain('retained summary');
+    const second = JSON.stringify(single[1]!.messages);
+    expect(second.match(/steer after tool/g)).toHaveLength(1);
+    expect(second.match(/injected after tool/g)).toHaveLength(1);
+    expect(single[1]!.delta).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      expect.objectContaining({ role: 'tool' }),
+      { role: 'user', parts: [{ type: 'text', content: 'steer after tool' }] },
+      { role: 'developer', parts: [{ type: 'text', content: 'injected after tool' }] },
+    ]);
+    expect(single).toEqual(split);
+  });
+
   it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-real-wakeup-'));
     tempDirs.push(root);
