@@ -232,7 +232,7 @@ fn cursor_native_hook_recovers_legacy_windows_encoding_only_in_windows_context()
 }
 
 #[test]
-fn retired_cursor_and_qwen_commands_are_noops() {
+fn retired_cursor_and_qwen_commands_cannot_write_activity() {
     let root = tempfile::tempdir().unwrap();
     let data = root.path().canonicalize().unwrap();
     let transcript = data.join("old-qwen-session.jsonl");
@@ -241,11 +241,12 @@ fn retired_cursor_and_qwen_commands_are_noops() {
         r#"{"type":"user","message":{"role":"user","content":"prompt"}}"#,
     )
     .unwrap();
-    for (args, payload) in [
+    for (args, payload, rejects_obsolete_syntax) in [
         (
             &["cursor", "--defer-assembly"][..],
             json!({"hook_event_name":"stop","conversation_id":"cursor-session",
                 "generation_id":"cursor-turn","status":"completed"}),
+            true,
         ),
         (
             &[
@@ -256,6 +257,13 @@ fn retired_cursor_and_qwen_commands_are_noops() {
                 "qwen-work-cn",
             ][..],
             json!({"hook_event_name":"Stop","transcript_path":transcript,"session_id":"old-qwen-session"}),
+            false,
+        ),
+        (&["cursor"][..], json!({"hook_event_name":"stop"}), false),
+        (
+            &["qwen-work-cn"][..],
+            json!({"hook_event_name":"Stop"}),
+            false,
         ),
     ] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"))
@@ -274,8 +282,13 @@ fn retired_cursor_and_qwen_commands_are_noops() {
             assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         }
         let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "{:?}", output);
-        assert_eq!(&output.stdout, b"{}\n");
+        if rejects_obsolete_syntax {
+            assert_eq!(output.status.code(), Some(2), "{output:?}");
+            assert!(output.stdout.is_empty());
+        } else {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(&output.stdout, b"{}\n");
+        }
     }
     assert_eq!(std::fs::read_dir(data).unwrap().count(), 1);
 }
