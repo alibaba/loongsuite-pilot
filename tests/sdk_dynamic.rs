@@ -838,6 +838,7 @@ fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
         "prompt",
         "private-ambiguous",
     );
+    let (late, guard) = hold_test_rollback_ingress(&root, &pilot);
     queue("cli-session", "b", cli, "stop", "status", "completed");
     queue(
         "ide-session",
@@ -856,9 +857,12 @@ fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
         "text",
         "collect-cli-answer",
     );
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 4);
+    drop(guard);
     let inbox = pilot.join("state/cursor/deferred/inbox");
     let files: Vec<_> = std::fs::read_dir(&inbox)
         .unwrap()
+        .chain(std::fs::read_dir(&late).unwrap())
         .map(|f| f.unwrap().path())
         .collect();
     assert_eq!(files.len(), 7);
@@ -893,11 +897,22 @@ fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
     };
     until(|| response_sessions(&host).len() >= 2);
     until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 0);
     assert_eq!(
         response_sessions(&host),
         ["cli-session".to_owned(), "ide-session".to_owned()].into()
     );
     let rows = host.ctx.rows.lock().unwrap();
+    let ids: std::collections::HashSet<_> = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(ids.len(), rows.len());
     assert!(rows
         .iter()
         .any(|row| String::from_utf8_lossy(row).contains("collect-cli-answer")));
@@ -933,6 +948,34 @@ fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
         ["after-restart".to_owned()].into()
     );
     resumed.stop();
+}
+
+fn hold_test_rollback_ingress(root: &Path, owner: &Path) -> (std::path::PathBuf, std::fs::File) {
+    let cache = root.join("rollback-cache");
+    let installed = cache.join("versions/native");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(cache.join("current"), b"native\n").unwrap();
+    std::fs::write(
+        installed.join("runtime-manifest.json"),
+        br#"{"runtime":"rust"}"#,
+    )
+    .unwrap();
+    let late = cache.join(".sdk-hook-rollback-inbox");
+    std::fs::create_dir(&late).unwrap();
+    std::fs::write(
+        owner.join(".sdk-hook-ingress-install.json"),
+        json!(cache.canonicalize().unwrap()).to_string(),
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(owner.join(".sdk-hook-ingress.lock"))
+        .unwrap();
+    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+    (late, lock)
 }
 
 #[test]
@@ -1549,7 +1592,7 @@ fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
             .unwrap();
         assert!(output.status.success());
     };
-    let mut host = Host::start(&data, policy, Box::default());
+    let mut host = Host::start(&data, policy.clone(), Box::default());
     host.ready();
     publish();
     let wakeups = data.join("wakeups/qwen-work-cn");
@@ -1558,6 +1601,8 @@ fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
         host.ctx.rows.lock().unwrap().is_empty(),
         "old turn must not be replayed"
     );
+    host.stop();
+    drop(host);
     writeln!(
         std::fs::OpenOptions::new()
             .append(true)
@@ -1568,8 +1613,15 @@ fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
         assistant("sdk-turn")
     )
     .unwrap();
+    let (late, guard) = hold_test_rollback_ingress(&root, &data);
     publish();
+    assert_eq!(std::fs::read_dir(&wakeups).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 1);
+    drop(guard);
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
     until(|| host.ctx.rows.lock().unwrap().len() >= 3);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 0);
     assert!(host
         .ctx
         .rows

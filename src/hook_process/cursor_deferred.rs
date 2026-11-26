@@ -124,24 +124,38 @@ impl DeferredCursor {
         let root = &self.root;
         let dir = directory(root);
         let inbox = dir.join("inbox");
-        crate::utils::source_access::private_path(&inbox).map_err(|err| err.to_string())?;
-        let mut paths = match fs::read_dir(&inbox) {
-            Ok(entries) => entries
-                .take(MAX_INBOX_FILES)
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|err| err.to_string())?
-                .into_iter()
-                .map(|entry| entry.path())
-                .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
-                .collect::<Vec<_>>(),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
-            Err(err) => return Err(err.to_string()),
-        };
+        let transition =
+            crate::sdk::hook_ingress::transition_inbox(root).map_err(|err| err.to_string())?;
+        let mut paths = Vec::new();
+        for source in std::iter::once(&inbox).chain(&transition) {
+            crate::utils::source_access::private_path(source).map_err(|err| err.to_string())?;
+            let scanned = if source == &inbox {
+                fs::read_dir(source)
+            } else {
+                crate::utils::source_access::read_dir(source)
+            };
+            let entries = match scanned {
+                Ok(entries) => entries,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err.to_string()),
+            };
+            for entry in entries.take(MAX_INBOX_FILES) {
+                let entry = entry.map_err(|err| err.to_string())?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(".json") && (source == &inbox || name.starts_with("cursor-")) {
+                    paths.push(entry.path());
+                }
+            }
+        }
         let mut recovered = self.recovered.lock().map_err(|err| err.to_string())?;
         if paths.is_empty() && *recovered {
             return Ok(());
         }
-        paths.sort_unstable();
+        paths.sort_by_cached_key(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.strip_prefix("cursor-").unwrap_or(&name).to_owned()
+        });
         let journal = Journal { dir };
         let env = Env::from([(
             "LOONGSUITE_PILOT_DATA_DIR".into(),
@@ -163,7 +177,17 @@ impl DeferredCursor {
                 let mut event = match read_deferred_event(&path) {
                     Ok(event) => event,
                     Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                        let quarantine = journal.dir.join("quarantine");
+                        // Cache and data directories can live on separate
+                        // filesystems. Quarantine next to the source inbox.
+                        let base = path
+                            .parent()
+                            .and_then(Path::parent)
+                            .ok_or("Cursor inbox path has no parent")?;
+                        let quarantine = base.join(if path.starts_with(&inbox) {
+                            "quarantine"
+                        } else {
+                            ".sdk-hook-rollback-quarantine"
+                        });
                         crate::utils::source_access::private_path(&quarantine)
                             .map_err(|err| err.to_string())?;
                         fs::create_dir_all(&quarantine).map_err(|err| err.to_string())?;

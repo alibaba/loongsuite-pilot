@@ -13,6 +13,7 @@ const MISSING_SOURCE_GRACE: Duration = Duration::from_secs(600);
 #[derive(Clone)]
 pub(crate) struct QwenWorkCnNativeWakeups {
     pub directory: PathBuf,
+    pub transition_inbox: Option<PathBuf>,
     pub pilot_policy_dir: Option<PathBuf>,
     pub transcript_roots: Vec<PathBuf>,
     pub producer_data_dir: PathBuf,
@@ -85,19 +86,28 @@ impl NativeWakeupReader {
             }
         }
 
-        let mut entries = match crate::utils::source_access::read_dir_async(&native.directory).await
-        {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
         let mut markers = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_name().to_string_lossy().ends_with(".json") {
-                markers.push(entry.path());
+        for directory in std::iter::once(&native.directory).chain(&native.transition_inbox) {
+            crate::utils::source_access::private_path(directory)?;
+            let mut entries = match crate::utils::source_access::read_dir_async(directory).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            while let Some(entry) = entries.next_entry().await? {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(".json")
+                    && (directory == &native.directory || name.starts_with("qwen-"))
+                {
+                    markers.push(entry.path());
+                }
             }
         }
-        markers.sort();
+        markers.sort_by_cached_key(|path| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            name.strip_prefix("qwen-").unwrap_or(&name).to_owned()
+        });
         for marker in markers {
             let bytes = crate::utils::source_access::read(&marker).await?;
             let value: Value = match serde_json::from_slice(&bytes) {

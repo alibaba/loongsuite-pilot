@@ -915,7 +915,66 @@ fn node_rollback_protects_durable_hook_ingress_before_outbox_and_fences_stale_ho
     )
     .unwrap();
 
+    // Pause the real activation *after* the first inbox/outbox inspection.
+    // Both thin Hooks must return promptly and persist to the shared gate.
+    let gate = cache.join(".sdk-hook-rollback-inbox");
+    let output = std::thread::scope(|scope| {
+        let asset_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data.join(".hook-assets.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&asset_lock).unwrap();
+        let switching = scope.spawn(rollback);
+        let started = Instant::now();
+        while !cache.join("update-recovery.json").is_file() {
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "rollback did not enter activation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(qwen_stop().status.success());
+        assert!(cursor_prompt().status.success());
+        let files: Vec<_> = fs::read_dir(&gate)
+            .unwrap()
+            .map(|f| f.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("qwen-")));
+        assert!(files.iter().any(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("cursor-")));
+        drop(asset_lock);
+        switching.join().unwrap()
+    });
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Hook notifications arrived during rollback"),
+        "{error}"
+    );
+    assert_eq!(fs::read(cache.join("current")).unwrap(), pointer);
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), previous);
+    assert!(!cache.join("update-recovery.json").exists());
+    assert_eq!(fs::read_dir(&gate).unwrap().count(), 2);
+    refuse("Hook notifications from a previous rollback are still pending");
+    // Decoder/restart/ACK of real pending bytes is exercised by sdk_dynamic.
+    // Keep these receipt files as fixture evidence while checking the empty cut.
+    for item in fs::read_dir(&gate).unwrap() {
+        let item = item.unwrap();
+        fs::rename(item.path(), fixture.root.path().join(item.file_name())).unwrap();
+    }
     success(&rollback());
+    assert!(!gate.exists());
     assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
     // Old commands cached in an Agent must still fail open for the Agent,
     // but cannot append to a Rust-only queue while Node owns the installation.

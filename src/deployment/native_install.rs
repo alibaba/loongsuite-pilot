@@ -258,7 +258,11 @@ pub(super) async fn run_with_retirement(
                                         for (key, (bytes, mode)) in files {
                                             transaction.write(&key, &bytes, mode)?;
                                         }
-                                        transaction.commit()?;
+                                        if retire_native_hooks {
+                                            transaction.commit_node_rollback()?;
+                                        } else {
+                                            transaction.commit()?;
+                                        }
                                         Ok(qoder_settings)
                                     }
                                 };
@@ -407,6 +411,10 @@ fn lock_hook_ingress_for_rollback(data: &Path, cache: &Path) -> Result<Vec<fs::F
             "Qwen Work Stop notifications are still pending. Start the current release and let delivery finish before retrying the rollback"
         );
     }
+    ensure!(
+        !has_hook_notifications(&cache.join(crate::sdk::hook_ingress::ROLLBACK_INBOX))?,
+        "Hook notifications from a previous rollback are still pending. Start the current release and let delivery finish before retrying"
+    );
     ensure!(
         !has_hook_notifications(&data.join("state/cursor/deferred/inbox"))?
             && !has_cursor_deferred_journal(&data.join("state/cursor/deferred/event-journal.jsonl"))?,

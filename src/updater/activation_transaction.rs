@@ -44,6 +44,8 @@ struct Change {
 struct Journal {
     schema: u32,
     committed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hook_ingress_armed: bool,
     targets: BTreeMap<String, PathBuf>,
     changes: BTreeMap<String, Change>,
 }
@@ -94,6 +96,7 @@ impl ActivationTransaction {
             journal: Journal {
                 schema: 2,
                 committed: false,
+                hook_ingress_armed: false,
                 targets,
                 changes,
             },
@@ -261,7 +264,10 @@ impl ActivationTransaction {
             journal,
             finished: false,
         };
-        if transaction.journal.committed {
+        if transaction.journal.committed
+            || (transaction.journal.hook_ingress_armed
+                && transaction.rollback_ingress_is_closed()?)
+        {
             transaction.finished = true;
             fs::remove_file(&transaction.path)?;
             return Ok(());
@@ -345,6 +351,33 @@ impl ActivationTransaction {
     }
 
     pub fn commit(&mut self) -> Result<()> {
+        self.commit_with_mode(false)
+    }
+
+    pub(crate) fn commit_node_rollback(&mut self) -> Result<()> {
+        self.commit_with_mode(true)
+    }
+
+    fn rollback_ingress(&self) -> Result<PathBuf> {
+        let root = self.path.parent().context("更新恢复记录缺少安装根目录")?;
+        let path = root.join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+        crate::utils::source_access::private_path(&path)?;
+        Ok(path)
+    }
+
+    fn rollback_ingress_is_closed(&self) -> Result<bool> {
+        let path = self.rollback_ingress()?;
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                ensure!(meta.is_dir(), "Hook rollback ingress is not a directory");
+                Ok(false)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn commit_with_mode(&mut self, node_rollback: bool) -> Result<()> {
         let _resource_lock = binding::resource_lock(&self.targets)?;
         self.check_bound()?;
         ensure!(!self.finished, "更新事务已结束");
@@ -363,10 +396,21 @@ impl ActivationTransaction {
                 "更新目标在提交前被外部修改，保留恢复材料：{key}"
             );
         }
-        self.journal.committed = true;
-        if let Err(err) = self.persist() {
-            self.journal.committed = false;
-            return Err(err);
+        if node_rollback {
+            // All version/Hook changes are written and verified. Arm recovery
+            // BEFORE the final decision: removing the directory only succeeds
+            // if no publisher has inserted a durable late record. There is no
+            // further fallible commit write after a successful remove.
+            let ingress = self.rollback_ingress()?;
+            self.journal.hook_ingress_armed = true;
+            self.persist()?;
+            fs::remove_dir(ingress).context("Hook notifications arrived during rollback or ingress could not be closed; current Rust version retained")?;
+        } else {
+            self.journal.committed = true;
+            if let Err(err) = self.persist() {
+                self.journal.committed = false;
+                return Err(err);
+            }
         }
         self.finished = true;
         // 提交记录已落盘，清理失败不会把成功更新误回滚。
@@ -433,6 +477,39 @@ impl Drop for ActivationTransaction {
                 self.path.display()
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn node_rollback_recovery_respects_the_atomic_hook_cutover() {
+    for gate_closed in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().canonicalize().unwrap();
+        let current = cache.join("current");
+        let gate = cache.join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+        fs::write(&current, b"rust\n").unwrap();
+        fs::create_dir(&gate).unwrap();
+        let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+        let mut txn = ActivationTransaction::begin(&cache, targets.clone()).unwrap();
+        txn.write("current", b"node\n", 0o600).unwrap();
+        txn.journal.hook_ingress_armed = true;
+        txn.persist().unwrap();
+        if gate_closed {
+            fs::remove_dir(&gate).unwrap();
+        } else {
+            fs::write(gate.join("qwen-kept.json"), b"{}").unwrap();
+        }
+        // Simulate exit without the normal Drop rollback or clearing journal.
+        txn.finished = true;
+        drop(txn);
+        ActivationTransaction::recover(&cache, targets).unwrap();
+        assert_eq!(
+            fs::read(&current).unwrap(),
+            if gate_closed { b"node\n" } else { b"rust\n" }
+        );
+        assert_eq!(gate.join("qwen-kept.json").exists(), !gate_closed);
+        assert!(!cache.join("update-recovery.json").exists());
     }
 }
 

@@ -82,7 +82,7 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     }) {
         return false;
     }
-    let _lease = match super::hook_ingress::lock_writer(data) {
+    let lease = match super::hook_ingress::lock_writer(data) {
         Ok(lease) => lease,
         Err(error) => {
             eprintln!(
@@ -97,15 +97,20 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
         .and_then(Value::as_str)
         .filter(|value| value.len() <= MAX_FIELD)
         .unwrap_or("");
-    let directory = data.join("wakeups").join("qwen-work-cn");
+    let (directory, switching) = match &lease {
+        super::hook_ingress::WriterLease::Active { .. } => {
+            (data.join("wakeups").join("qwen-work-cn"), false)
+        }
+        super::hook_ingress::WriterLease::Switching(dir) => (dir.clone(), true),
+    };
     if !private_path(&directory)
-        || fs::create_dir_all(&directory).is_err()
+        || (!switching && fs::create_dir_all(&directory).is_err())
         || !private_path(&directory)
     {
         return false;
     }
     #[cfg(unix)]
-    {
+    if !switching {
         use std::os::unix::fs::PermissionsExt;
         if fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).is_err() {
             return false;
@@ -132,6 +137,14 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return false;
     };
+    if switching {
+        let name = format!(
+            "qwen-{:020}-{:010}.json",
+            now.as_nanos(),
+            std::process::id()
+        );
+        return super::hook_ingress::publish_transition(&directory, &name, &bytes).is_ok();
+    }
     for attempt in 0..8u8 {
         let name = format!(
             "{:020}-{:010}-{attempt}.json",

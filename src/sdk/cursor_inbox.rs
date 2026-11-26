@@ -119,17 +119,24 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         roots.retain(Value::is_string);
     }
     regular_directory(root)?;
-    let _lease = super::hook_ingress::lock_writer(root)?;
-    let mut directory = root.to_path_buf();
-    for component in ["state", "cursor", "deferred", "inbox"] {
-        directory.push(component);
-        match fs::create_dir(&directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error),
+    let lease = super::hook_ingress::lock_writer(root)?;
+    let (directory, switching) = match &lease {
+        super::hook_ingress::WriterLease::Active { .. } => {
+            let mut directory = root.to_path_buf();
+            for component in ["state", "cursor", "deferred", "inbox"] {
+                directory.push(component);
+                match fs::create_dir(&directory) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(error),
+                }
+                regular_directory(&directory)?;
+            }
+            (directory, false)
         }
-        regular_directory(&directory)?;
-    }
+        super::hook_ingress::WriterLease::Switching(dir) => (dir.clone(), true),
+    };
+    regular_directory(&directory)?;
     if fs::read_dir(&directory)?.take(MAX_PENDING).count() >= MAX_PENDING {
         return Err(io::Error::other("Cursor Hook inbox is full"));
     }
@@ -160,10 +167,14 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         return Err(io::Error::other("Cursor Hook inbox record is too large"));
     }
     let name = format!(
-        "{captured_ns}-{}-{}.json",
+        "{}{captured_ns}-{}-{}.json",
+        if switching { "cursor-" } else { "" },
         std::process::id(),
         uuid::Uuid::new_v4()
     );
+    if switching {
+        return super::hook_ingress::publish_transition(&directory, &name, &data);
+    }
     let mut pending = tempfile::NamedTempFile::new_in(&directory)?;
     pending.write_all(&data)?;
     pending

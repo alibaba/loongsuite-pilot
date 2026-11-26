@@ -2579,6 +2579,9 @@ impl Orchestrator {
                 let data = std::path::PathBuf::from(&self.data_dir);
                 crate::inputs::qwen_work_cn::QwenWorkCnNativeWakeups {
                     directory: sdk_data.join("wakeups/qwen-work-cn"),
+                    transition_inbox: crate::sdk::hook_ingress::transition_inbox(&sdk_data)
+                        .ok()
+                        .flatten(),
                     pilot_policy_dir: Some(sdk_data),
                     transcript_roots: [
                         resolve_home("~/.qwenworkcn/projects"),

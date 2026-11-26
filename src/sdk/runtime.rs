@@ -397,6 +397,15 @@ fn run_agent(
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
     let hook_history_host = super::hook_history::find(&plan.agent).and(plan.pilot_host.as_ref());
+    if let Some(inbox) = hook_history_host
+        .filter(|_| plan.agent == "cursor")
+        .map(|host| super::hook_ingress::transition_inbox(&host.data_dir))
+        .transpose()?
+        .flatten()
+    {
+        source_access::private_path(&inbox)?;
+        roots.push(inbox);
+    }
     let upstream = hook_history_host
         .and_then(|host| host.upstream_link_ttl_ms.map(|ttl| (host, ttl)))
         .and_then(|(host, ttl)| {
@@ -452,8 +461,18 @@ fn run_agent(
                 write_checkpoint(&producer_data_dir.join("config.json"), &config.to_string())?;
             }
             roots.push(super::policy::canonical_candidate(&directory)?);
+            let transition_inbox = if plan.pilot_host.is_some() {
+                super::hook_ingress::transition_inbox(&init.data_dir)?
+            } else {
+                None
+            };
+            if let Some(inbox) = &transition_inbox {
+                source_access::private_path(inbox)?;
+                roots.push(inbox.clone());
+            }
             Some(QwenWorkCnNativeWakeups {
                 directory,
+                transition_inbox,
                 pilot_policy_dir: None,
                 transcript_roots,
                 producer_data_dir,

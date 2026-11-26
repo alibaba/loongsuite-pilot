@@ -8,6 +8,12 @@ use std::path::{Component, Path, PathBuf};
 
 const LEASE: &str = ".sdk-hook-ingress.lock";
 const INSTALL: &str = ".sdk-hook-ingress-install.json";
+pub(crate) const ROLLBACK_INBOX: &str = ".sdk-hook-rollback-inbox";
+
+pub(crate) enum WriterLease {
+    Active { _guard: File },
+    Switching(#[allow(dead_code, reason = "payload directory is used in the thin Hook")] PathBuf),
+}
 
 fn open_file(path: &Path, create_lock: bool) -> io::Result<File> {
     let mut options = OpenOptions::new();
@@ -60,16 +66,87 @@ fn read_bounded(path: &Path, max: usize) -> io::Result<Vec<u8>> {
 )]
 pub(crate) fn lock_for_rollback(root: &Path, cache: &Path) -> io::Result<File> {
     let root = root.canonicalize()?;
-    let lease = open_file(&root.join(LEASE), true)?;
-    fs2::FileExt::try_lock_exclusive(&lease)?;
     let cache = cache.canonicalize()?;
+    let gate = cache.join(ROLLBACK_INBOX);
+    let mut dir = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        dir.mode(0o700);
+    }
+    match dir.create(&gate) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error),
+    }
+    check_directory(&gate)?;
+    // Establish the contingency destination *before* a producer can observe
+    // contention. The active pointer is not modified under this preparation.
     let mut binding = tempfile::NamedTempFile::new_in(&root)?;
     binding.write_all(&serde_json::to_vec(&cache)?)?;
     binding.as_file().sync_all()?;
     binding
         .persist(root.join(INSTALL))
         .map_err(|error| error.error)?;
+    let lease = open_file(&root.join(LEASE), true)?;
+    fs2::FileExt::try_lock_exclusive(&lease)?;
     Ok(lease)
+}
+
+fn check_directory(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() || meta.file_type().is_symlink() {
+        return Err(io::Error::other("invalid Hook ingress directory"));
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        if meta.file_attributes() & 0x400 != 0 {
+            return Err(io::Error::other(
+                "Hook ingress directory reparse point rejected",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn bound_cache(root: &Path) -> io::Result<Option<PathBuf>> {
+    let bytes = match read_bounded(&root.join(INSTALL), 16 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let cache: PathBuf = serde_json::from_slice(&bytes)?;
+    if !cache.is_absolute() || cache.canonicalize()? != cache {
+        return Err(io::Error::other("invalid Hook ingress install binding"));
+    }
+    Ok(Some(cache))
+}
+
+pub(crate) fn transition_inbox(root: &Path) -> io::Result<Option<PathBuf>> {
+    Ok(bound_cache(root)?.map(|cache| cache.join(ROLLBACK_INBOX)))
+}
+
+/// Create and sync the body outside the gate, then atomically insert it.
+/// The installer closes the gate with rmdir: either this insert wins and the
+/// switch aborts, or the committed Node installation already owns future Hooks.
+#[allow(
+    dead_code,
+    reason = "shared source is also compiled into the installer"
+)]
+pub(crate) fn publish_transition(directory: &Path, name: &str, body: &[u8]) -> io::Result<()> {
+    check_directory(directory)?;
+    let mut pending = tempfile::NamedTempFile::new_in(
+        directory
+            .parent()
+            .ok_or_else(|| io::Error::other("Hook ingress directory has no parent"))?,
+    )?;
+    pending.write_all(body)?;
+    pending.as_file().sync_all()?;
+    pending
+        .persist_noclobber(directory.join(name))
+        .map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// Ordinary embedded SDKs have no install binding. For a bound installation
@@ -79,19 +156,25 @@ pub(crate) fn lock_for_rollback(root: &Path, cache: &Path) -> io::Result<File> {
     dead_code,
     reason = "shared source is also compiled into the installer"
 )]
-pub(crate) fn lock_writer(root: &Path) -> io::Result<File> {
+pub(crate) fn lock_writer(root: &Path) -> io::Result<WriterLease> {
     let root = root.canonicalize()?;
     let lease = open_file(&root.join(LEASE), true)?;
-    fs2::FileExt::try_lock_shared(&lease)?;
-    let bytes = match read_bounded(&root.join(INSTALL), 16 * 1024) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(lease),
+    match fs2::FileExt::try_lock_shared(&lease) {
+        Ok(()) => {}
+        Err(error)
+            if error.kind() == io::ErrorKind::WouldBlock
+                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+        {
+            if let Some(inbox) = transition_inbox(&root)? {
+                return Ok(WriterLease::Switching(inbox));
+            }
+            return Err(error);
+        }
         Err(error) => return Err(error),
-    };
-    let cache: PathBuf = serde_json::from_slice(&bytes)?;
-    if !cache.is_absolute() {
-        return Err(io::Error::other("invalid Hook ingress install binding"));
     }
+    let Some(cache) = bound_cache(&root)? else {
+        return Ok(WriterLease::Active { _guard: lease });
+    };
     let current = read_bounded(&cache.join("current"), 256)?;
     let name = std::str::from_utf8(&current)
         .map_err(io::Error::other)?
@@ -123,7 +206,7 @@ pub(crate) fn lock_writer(root: &Path) -> io::Result<File> {
     if manifest.runtime != "rust" {
         return Err(io::Error::other("Rust Hook ingress is inactive"));
     }
-    Ok(lease)
+    Ok(WriterLease::Active { _guard: lease })
 }
 
 #[cfg(test)]
@@ -150,11 +233,19 @@ mod tests {
         assert!(lock_for_rollback(&sdk, &cache).is_err());
         drop(writer);
         let rollback = lock_for_rollback(&sdk, &cache).unwrap();
-        assert!(lock_writer(&sdk).is_err());
+        let WriterLease::Switching(inbox) = lock_writer(&sdk).unwrap() else {
+            panic!("contended publisher needs a durable owner");
+        };
+        publish_transition(&inbox, "qwen-pending.json", b"{}").unwrap();
+        assert!(fs::remove_dir(&inbox).is_err());
         drop(rollback); // Failed handoff, native is still the active version.
         assert!(lock_writer(&sdk).is_ok());
+        assert_eq!(fs::read(inbox.join("qwen-pending.json")).unwrap(), b"{}");
+        fs::remove_file(inbox.join("qwen-pending.json")).unwrap();
         let rollback = lock_for_rollback(&sdk, &cache).unwrap();
         fs::write(cache.join("current"), "legacy\n").unwrap();
+        fs::remove_dir(&inbox).unwrap();
+        assert!(publish_transition(&inbox, "qwen-late.json", b"{}").is_err());
         drop(rollback);
         assert!(lock_writer(&sdk).is_err());
         fs::write(cache.join("current"), "native\n").unwrap();

@@ -122,6 +122,7 @@ async fn sdk_owned_history_survives_crash_before_first_checkpoint() {
         directory: wakeups,
         pilot_policy_dir: None,
         transcript_roots: vec![f.root.clone()],
+        transition_inbox: None,
         producer_data_dir: f.root.clone(),
         user_id: "test".into(),
         legacy_cursor_root: None,
