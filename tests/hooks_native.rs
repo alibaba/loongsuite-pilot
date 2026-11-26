@@ -306,7 +306,7 @@ printf '%s\n' "$QODER_EXPOSE_TOKEN_USAGE" "$NODE_OPTIONS" "$BUN_OPTIONS" "$1"
 #[cfg(unix)]
 #[test]
 fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
-    let mut count = 0;
+    let mut checked = Vec::new();
     for entry in fs::read_dir(workspace().join("assets/hooks")).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().and_then(|s| s.to_str()) != Some("sh") {
@@ -318,6 +318,7 @@ fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
             .status()
             .unwrap();
         assert!(status.success(), "{}", path.display());
+        checked.push(path.file_name().unwrap().to_str().unwrap().to_owned());
         // 仅 Qoder CN 仍在 Agent 进程内加载 preload。
         if path
             .file_name()
@@ -335,9 +336,28 @@ fn every_shell_entry_has_valid_syntax_and_no_legacy_runtime_fallback() {
         ] {
             assert!(!body.contains(forbidden), "{}: {forbidden}", path.display());
         }
-        count += 1;
     }
-    assert_eq!(count, 15, "including TRAE CN and Copilot CLI");
+    // Cursor and Qwen Work CN now deploy the shared native SDK Hook. Their
+    // historical shell scripts belong in test fixtures, not in this inventory.
+    checked.sort_unstable();
+    assert_eq!(
+        checked,
+        [
+            "claude-code-loongsuite-pilot-hook.sh",
+            "copilot-loongsuite-pilot-hook.sh",
+            "grok-build-loongsuite-pilot-hook.sh",
+            "interceptor-hook.sh",
+            "kiro-cli-loongsuite-pilot-hook.sh",
+            "qoder-loongsuite-pilot-hook.sh",
+            "qodercli-runtime-wrapper.sh",
+            "qodercn-loongsuite-pilot-hook.sh",
+            "qoderwork-loongsuite-pilot-hook.sh",
+            "qoderworkcn-loongsuite-pilot-hook.sh",
+            "qwen-code-cli-loongsuite-pilot-hook.sh",
+            "trae-cn-loongsuite-pilot-hook.sh",
+            "workbuddy-loongsuite-pilot-hook.sh",
+        ]
+    );
 }
 
 #[cfg(windows)]
