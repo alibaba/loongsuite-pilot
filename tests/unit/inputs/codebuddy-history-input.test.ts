@@ -405,47 +405,35 @@ describe('settledRequestIds', () => {
 
 describe('candidateDataRoots', () => {
   it('uses LOCALAPPDATA on win32', () => {
-    const roots = candidateDataRoots({ LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' }, 'C:\\Users\\x');
+    const roots = candidateDataRoots({ LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local' }, 'C:\\Users\\x', 'win32');
     expect(roots).toContain('C:\\Users\\x\\AppData\\Local\\CodeBuddyExtension\\Data');
   });
 
   it('falls back to home-derived paths when env is missing', () => {
-    const roots = candidateDataRoots({}, 'C:\\Users\\x');
-    expect(roots).toContain(path.join('C:\\Users\\x', 'AppData', 'Local', 'CodeBuddyExtension', 'Data'));
+    const roots = candidateDataRoots({}, 'C:\\Users\\x', 'win32');
+    expect(roots).toContain(path.win32.join('C:\\Users\\x', 'AppData', 'Local', 'CodeBuddyExtension', 'Data'));
   });
 
   it('probes APPDATA (Roaming) on win32 per the official FAQ', () => {
     const roots = candidateDataRoots({
       LOCALAPPDATA: 'C:\\Users\\x\\AppData\\Local',
       APPDATA: 'C:\\Users\\x\\AppData\\Roaming',
-    }, 'C:\\Users\\x');
+    }, 'C:\\Users\\x', 'win32');
     expect(roots).toContain('C:\\Users\\x\\AppData\\Roaming\\CodeBuddyExtension\\Data');
     expect(roots[0]).toBe('C:\\Users\\x\\AppData\\Local\\CodeBuddyExtension\\Data');
   });
 
   it('prefers Application Support on darwin (Electron userData, official FAQ)', () => {
-    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
-    Object.defineProperty(process, 'platform', { value: 'darwin' });
-    try {
-      const roots = candidateDataRoots({}, '/Users/x');
-      expect(roots[0]).toBe(path.join('/Users/x', 'Library', 'Application Support', 'CodeBuddyExtension', 'Data'));
-      expect(roots).toContain(path.join('/Users/x', 'Library', 'Caches', 'CodeBuddyExtension', 'Data'));
-    } finally {
-      Object.defineProperty(process, 'platform', descriptor);
-    }
+    const roots = candidateDataRoots({}, '/Users/x', 'darwin');
+    expect(roots[0]).toBe(path.posix.join('/Users/x', 'Library', 'Application Support', 'CodeBuddyExtension', 'Data'));
+    expect(roots).toContain(path.posix.join('/Users/x', 'Library', 'Caches', 'CodeBuddyExtension', 'Data'));
   });
 
   it('prefers ~/.config on linux (Electron userData) with cache candidates', () => {
-    const descriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
-    Object.defineProperty(process, 'platform', { value: 'linux' });
-    try {
-      const roots = candidateDataRoots({}, '/home/x');
-      expect(roots[0]).toBe(path.join('/home/x', '.config', 'CodeBuddyExtension', 'Data'));
-      expect(roots).toContain(path.join('/home/x', '.cache', 'CodeBuddyExtension', 'Data'));
-      expect(roots).toContain(path.join('/home/x', '.local', 'share', 'CodeBuddyExtension', 'Data'));
-    } finally {
-      Object.defineProperty(process, 'platform', descriptor);
-    }
+    const roots = candidateDataRoots({}, '/home/x', 'linux');
+    expect(roots[0]).toBe(path.posix.join('/home/x', '.config', 'CodeBuddyExtension', 'Data'));
+    expect(roots).toContain(path.posix.join('/home/x', '.cache', 'CodeBuddyExtension', 'Data'));
+    expect(roots).toContain(path.posix.join('/home/x', '.local', 'share', 'CodeBuddyExtension', 'Data'));
   });
 });
 
@@ -505,6 +493,51 @@ describe('CodeBuddyHistoryInput', () => {
       // Third cycle: no duplicate emission.
       const third = await (input as unknown as { collect(): Promise<unknown[]> }).collect();
       expect(third).toEqual([]);
+      await (input as unknown as { onStop(): Promise<void> }).onStop();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not re-emit requests evicted from the capped checkpoint (4,097-request conversation)', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'codebuddy-hist-'));
+    try {
+      const convDir = path.join(
+        root, 'default', 'CodeBuddyIDE', 'tok', 'history', 'ws', 'conv-1',
+      );
+      await mkdir(path.join(convDir, 'messages'), { recursive: true });
+      // One request beyond the 4,096-id retention cap: the cap evicts the
+      // oldest id, which used to make every unchanged poll re-emit it and
+      // evict the next one in a cascade.
+      const requests = Array.from({ length: 4_097 }, (_, i) => ({
+        id: `req-${String(i + 1).padStart(5, '0')}`,
+        messages: ['u1', 'a1'],
+        state: 'complete',
+        startedAt: i + 1,
+        usage: { inputTokens: 11, outputTokens: 2, totalTokens: 13 },
+      }));
+      await writeFile(path.join(convDir, 'index.json'), JSON.stringify({ requests }));
+      await writeFile(path.join(convDir, 'messages', 'u1.json'), JSON.stringify(
+        message('u1', 'user', { role: 'user', content: [{ type: 'text', text: 'one' }] }, { traceId: 'c'.repeat(32) }),
+      ));
+      await writeFile(path.join(convDir, 'messages', 'a1.json'), JSON.stringify(
+        message('a1', 'assistant', { role: 'assistant', content: [{ type: 'text', text: 'r1' }] }),
+      ));
+
+      const stateStore = new StateStore(path.join(root, 'state.json'));
+      const input = new CodeBuddyHistoryInput({ stateStore, dataRoots: [root] });
+      await (input as unknown as { onStart(): Promise<void> }).onStart();
+
+      // Baseline consumes the whole pre-existing conversation.
+      const baseline = await (input as unknown as { collect(): Promise<unknown[]> }).collect();
+      expect(baseline).toEqual([]);
+
+      // Two unchanged polls: nothing may be re-emitted after baseline even
+      // though the cap has already evicted the first id from the set.
+      const first = await (input as unknown as { collect(): Promise<unknown[]> }).collect();
+      expect(first).toEqual([]);
+      const second = await (input as unknown as { collect(): Promise<unknown[]> }).collect();
+      expect(second).toEqual([]);
       await (input as unknown as { onStop(): Promise<void> }).onStop();
     } finally {
       await rm(root, { recursive: true, force: true });

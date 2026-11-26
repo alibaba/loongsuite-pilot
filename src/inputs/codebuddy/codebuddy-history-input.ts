@@ -20,6 +20,13 @@ const logger = createLogger('CodeBuddyHistoryInput');
 const INITIALIZED_KEY = 'codebuddyHistoryInitialized';
 const PROCESSED_KEY = 'codebuddyHistoryProcessed';
 const INDEX_MTIME_KEY = 'codebuddyHistoryIndexMtime';
+/**
+ * Per conversation: how many leading requests of the append-only index the
+ * reader has already consumed. The retained id set (PROCESSED_KEY) is capped,
+ * so without this watermark a conversation longer than the cap would forget
+ * its oldest id on every poll and re-emit it forever.
+ */
+const WATERMARK_KEY = 'codebuddyHistoryWatermark';
 /** Cap on request ids retained per conversation to bound checkpoint growth. */
 const MAX_PROCESSED_PER_CONVERSATION = 4_096;
 
@@ -102,28 +109,35 @@ export class CodeBuddyHistoryInput extends BaseInput {
   }
 
   /** All plausible `CodeBuddyExtension/Data` roots for this platform. */
-  static candidateDataRoots(env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
+  static candidateDataRoots(
+    env: NodeJS.ProcessEnv = process.env,
+    home = homedir(),
+    platform: NodeJS.Platform = process.platform,
+  ): string[] {
+    // Injected platform keeps tests hermetic: each layout is joined with the
+    // matching path impl regardless of the host OS the test suite runs on.
+    const pathImpl = platform === 'win32' ? path.win32 : path.posix;
     const bases: string[] = [];
-    if (process.platform === 'win32') {
+    if (platform === 'win32') {
       // The client's own data dir is %LOCALAPPDATA% (verified in the field);
       // the official FAQ references %APPDATA% (Roaming), so both are probed.
       if (env.LOCALAPPDATA) bases.push(env.LOCALAPPDATA);
       if (env.APPDATA) bases.push(env.APPDATA);
-      bases.push(path.join(home, 'AppData', 'Local'));
-    } else if (process.platform === 'darwin') {
+      bases.push(pathImpl.join(home, 'AppData', 'Local'));
+    } else if (platform === 'darwin') {
       // Electron's userData on macOS: ~/Library/Application Support (the
       // official FAQ points there for CodeBuddyExtension). ~/Library/Caches
       // stays as a compatibility candidate for older builds.
-      bases.push(path.join(home, 'Library', 'Application Support'));
-      bases.push(path.join(home, 'Library', 'Caches'));
+      bases.push(pathImpl.join(home, 'Library', 'Application Support'));
+      bases.push(pathImpl.join(home, 'Library', 'Caches'));
     } else {
       // Electron's userData on Linux: ~/.config. ~/.cache and ~/.local/share
       // stay as compatibility candidates.
-      bases.push(path.join(home, '.config'));
-      bases.push(path.join(home, '.cache'));
-      bases.push(path.join(home, '.local', 'share'));
+      bases.push(pathImpl.join(home, '.config'));
+      bases.push(pathImpl.join(home, '.cache'));
+      bases.push(pathImpl.join(home, '.local', 'share'));
     }
-    const roots = bases.map(base => path.join(base, 'CodeBuddyExtension', 'Data'));
+    const roots = bases.map(base => pathImpl.join(base, 'CodeBuddyExtension', 'Data'));
     return [...new Set(roots)];
   }
 
@@ -158,6 +172,7 @@ export class CodeBuddyHistoryInput extends BaseInput {
     const initialized = state.extra?.[INITIALIZED_KEY] === true;
     const processedBefore = normalizeProcessedMap(state.extra?.[PROCESSED_KEY]);
     const mtimeBefore = normalizeMtimeMap(state.extra?.[INDEX_MTIME_KEY]);
+    const watermarkBefore = normalizeWatermarkMap(state.extra?.[WATERMARK_KEY]);
 
     const discovered = await this.discoverConversations();
     const discoveredIds = new Set(discovered.map(location => location.conversationId));
@@ -171,11 +186,15 @@ export class CodeBuddyHistoryInput extends BaseInput {
     // Drop checkpoints for conversations whose directory no longer exists.
     const processedNow: Record<string, string[]> = {};
     const mtimeNow: Record<string, number> = {};
+    const watermarkNow: Record<string, number> = {};
     for (const [conversationId, ids] of Object.entries(processedBefore)) {
       if (discoveredIds.has(conversationId)) processedNow[conversationId] = ids;
     }
     for (const [conversationId, mtime] of Object.entries(mtimeBefore)) {
       if (discoveredIds.has(conversationId)) mtimeNow[conversationId] = mtime;
+    }
+    for (const [conversationId, watermark] of Object.entries(watermarkBefore)) {
+      if (discoveredIds.has(conversationId)) watermarkNow[conversationId] = watermark;
     }
 
     const entries: AgentActivityEntry[] = [];
@@ -196,7 +215,22 @@ export class CodeBuddyHistoryInput extends BaseInput {
 
       const requests = conversation.index.requests ?? [];
       const settled = settledRequestIds(requests);
+      const settledSet = new Set(settled);
       const processed = new Set(processedNow[location.conversationId] ?? []);
+      const watermark = Math.max(0, Math.trunc(watermarkNow[location.conversationId] ?? 0));
+      // A request counts as processed when it sits below the watermark (how
+      // far the reader has consumed the append-only index) or when its id is
+      // still in the retained set. The watermark is what makes the capped set
+      // safe: ids evicted by the size cap can never resurface as new.
+      const requestProcessed = (index: number, id: string): boolean =>
+        index < watermark || processed.has(id);
+
+      const newRequestIds: string[] = [];
+      for (let index = 0; index < requests.length; index++) {
+        const id = requests[index]?.id;
+        if (typeof id !== 'string' || !settledSet.has(id)) continue;
+        if (!requestProcessed(index, id)) newRequestIds.push(id);
+      }
 
       if (!initialized) {
         // Baseline: mark everything already on disk as processed so an install
@@ -205,6 +239,8 @@ export class CodeBuddyHistoryInput extends BaseInput {
           processedNow[location.conversationId] ?? [],
           settled,
         );
+        for (const id of settled) processed.add(id);
+        watermarkNow[location.conversationId] = advanceWatermark(requests, processed, watermark);
         continue;
       }
 
@@ -225,7 +261,7 @@ export class CodeBuddyHistoryInput extends BaseInput {
       const sealableLast = lastRequest
         && typeof lastRequest.id === 'string' && lastRequest.id.length > 0
         && !settled.includes(lastRequest.id)
-        && !processed.has(lastRequest.id)
+        && !requestProcessed(requests.length - 1, lastRequest.id)
         && typeof lastRequest.startedAt === 'number'
         && Number.isFinite(lastRequest.startedAt)
         && boundaryAtMs !== undefined
@@ -234,11 +270,10 @@ export class CodeBuddyHistoryInput extends BaseInput {
 
       // Skip unchanged conversations that produced nothing new last cycle.
       // (A pending Stop seal counts as new work even when the store is quiet.)
-      if (seenMtime === mtimeMs && settled.every(id => processed.has(id)) && sealableLast === undefined) {
+      if (seenMtime === mtimeMs && newRequestIds.length === 0 && sealableLast === undefined) {
         continue;
       }
 
-      const newRequestIds = settled.filter(id => !processed.has(id));
       if (newRequestIds.length === 0 && sealableLast === undefined) continue;
 
       const built = buildCodeBuddyHistoryEvents(conversation, {
@@ -255,6 +290,8 @@ export class CodeBuddyHistoryInput extends BaseInput {
         processedNow[location.conversationId] ?? [],
         emitIds,
       );
+      for (const id of emitIds) processed.add(id);
+      watermarkNow[location.conversationId] = advanceWatermark(requests, processed, watermark);
     }
 
     const nextExtra: Record<string, unknown> = {
@@ -262,6 +299,7 @@ export class CodeBuddyHistoryInput extends BaseInput {
       [INITIALIZED_KEY]: true,
       [PROCESSED_KEY]: processedNow,
       [INDEX_MTIME_KEY]: mtimeNow,
+      [WATERMARK_KEY]: watermarkNow,
     };
     this.setState({ extra: nextExtra });
     return entries;
@@ -445,6 +483,37 @@ export function appendProcessed(existing: string[], added: string[]): string[] {
   return list.length > MAX_PROCESSED_PER_CONVERSATION
     ? list.slice(list.length - MAX_PROCESSED_PER_CONVERSATION)
     : list;
+}
+
+/**
+ * Advances the consumed-prefix watermark: the first index whose request is
+ * not (or no longer) recorded as processed stops the scan. Requests below
+ * this point are considered emitted even when their ids were evicted from
+ * the capped retained set.
+ */
+function advanceWatermark(
+  requests: CodeBuddyHistoryRequest[],
+  processed: Set<string>,
+  from: number,
+): number {
+  let index = Math.max(0, from);
+  while (index < requests.length) {
+    const id = requests[index]?.id;
+    if (typeof id !== 'string' || !processed.has(id)) break;
+    index++;
+  }
+  return index;
+}
+
+function normalizeWatermarkMap(raw: unknown): Record<string, number> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, number> = {};
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+      out[key] = Math.trunc(value);
+    }
+  }
+  return out;
 }
 
 function normalizeProcessedMap(raw: unknown): Record<string, string[]> {
