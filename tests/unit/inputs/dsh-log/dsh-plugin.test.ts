@@ -44,6 +44,38 @@ describe('DSH plugin collection enabled marker', () => {
     return { apply: module.default, pluginDir };
   }
 
+  it('records the admitted request only after a native checkpoint is installed', async () => {
+    const { apply, pluginDir } = await loadPlugin();
+    await fs.writeFile(path.join(pluginDir, '.collection-enabled'), 'enabled');
+    const handlers = new Map<string, (...args: any[]) => void>();
+    apply({
+      on: (name: string, handler: (...args: any[]) => void) => handlers.set(name, handler),
+      logger: () => ({ info: () => {} }),
+    });
+    const checkpoint = {
+      type: 'user/message',
+      seq: 15,
+      time: 15,
+      surfaceOp: { op: 'replace', startSeq: 3, endSeq: 8 },
+      data: { role: 'user', source: { kind: 'compact-checkpoint', compactionId: 'cp15' },
+        content: [{ type: 'text', text: 'summary' }] },
+    };
+    const messages = [checkpoint.data, { role: 'user', content: [{ type: 'text', text: 'new prompt' }] }];
+    const session = { id: 's1', deriveMessages: () => messages, surface: { nodes: [] } };
+    const start = (step: number) => handlers.get('agent/assistant-stream')!({
+      agent: { session }, frame: { type: 'start', turn: 1, step },
+    });
+    start(1);
+    handlers.get('session/event')!(session, checkpoint);
+    start(2);
+    const file = path.join(tmpDir, 'data/logs/dsh/dsh-s1.jsonl');
+    const records = (await fs.readFile(file, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
+    expect(records).toHaveLength(2);
+    expect(records[0].surfaceOp).toEqual(checkpoint.surfaceOp);
+    expect(records[1]).toMatchObject({ type: 'loongsuite-pilot/request-context',
+      data: { turn: 1, step: 2, compactionId: 'cp15', messages } });
+  });
+
   it('stops an already-loaded plugin from writing after disable and resumes after enable', async () => {
     const { apply, pluginDir } = await loadPlugin();
     const marker = path.join(pluginDir, '.collection-enabled');
@@ -143,7 +175,7 @@ describe('DSH plugin collection enabled marker', () => {
       on: (name: string, handler: (...args: any[]) => void) => handlers.set(name, handler),
       logger: () => ({ info: () => {} }),
     })).not.toThrow();
-    expect(handlers.size).toBe(2);
+    expect([...handlers.keys()]).toEqual(['session/created', 'session/event', 'agent/assistant-stream']);
     await fs.unlink(dataDir);
     handlers.get('session/created')!({ id: 'recovered-session' });
     expect(await fs.readFile(path.join(dataDir, 'logs/dsh/dsh-recovered-session.jsonl'), 'utf8'))

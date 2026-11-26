@@ -26,6 +26,7 @@
  *   and are filtered by OpenClawPluginInput before the canonical event pipeline.
  */
 
+import { compressionFields, compressionIdentity } from '../shared/context-compression.mjs';
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -71,6 +72,7 @@ const MAX_RUN_STATE_ENTRIES = 512;
 const MAX_CONTENT_SIZE = 64 * 1024;
 const MAX_INPUT_MESSAGES = 1024;
 const MAX_INPUT_BYTES = 2 * 1024 * 1024;
+const MAX_SESSION_CONTEXT_BYTES = 4 * 1024 * 1024;
 const MAX_TOOL_RESULT_SIZE = 64 * 1024;
 const PILOT_CONFIG_CACHE_TTL_MS = 5_000;
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
@@ -318,6 +320,7 @@ function isExplicitlyFalse(value) {
 }
 
 let openClawPluginConfig = {};
+let resolveSessionFilePath;
 
 function shouldCaptureContent(pilotConfig) {
   return !isExplicitlyFalse(openClawPluginConfig?.captureMessageContent)
@@ -867,6 +870,7 @@ function resetCompletedRunState(run) {
   run.pendingToolInputMessages.length = 0;
   run.persistedToolCallIds.clear();
   run.perCallUsage.clear();
+  run.lastAssistantFinishReason = undefined;
 }
 
 function reactivateRun(run, event, ctx) {
@@ -969,6 +973,10 @@ function inferProviderName(provider, model) {
 
 function historyInputMessage(message) {
   if (!message || typeof message !== "object") return undefined;
+  if (message.role === "compactionSummary") {
+    return { role: "user", parts: [{ type: "compaction", id: message.id,
+      content: typeof message.summary === "string" ? truncate(message.summary, MAX_CONTENT_SIZE) : undefined }] };
+  }
   if (Array.isArray(message.content)) message = { ...message, content: message.content.slice(0, 64) };
   if (message.role === "assistant") {
     return buildAssistantOutputMessagesFromOpenClawMessage(message)?.[0]
@@ -988,6 +996,95 @@ function historyInputMessage(message) {
     if (parts.length) return { role: message.role, parts };
   }
   return undefined;
+}
+
+/** Read only the bounded active branch rooted at the native compaction entry.
+ * The hook supplies the file, and its native session header proves ownership. */
+function readCompactedSession(file, sessionId, captureContent) {
+  if (!sessionId || typeof file !== "string" || !path.isAbsolute(file) || !file.endsWith(".jsonl")) return;
+  let fd;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK || 0));
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return;
+    const header = Buffer.alloc(Math.min(stat.size, 4096));
+    const head = header.subarray(0, fs.readSync(fd, header, 0, header.length, 0)).toString("utf8");
+    const session = JSON.parse(head.slice(0, head.indexOf("\n")));
+    if (session.type !== "session" || session.id !== sessionId) return;
+
+    const offset = Math.max(0, stat.size - MAX_SESSION_CONTEXT_BYTES);
+    const buffer = Buffer.alloc(stat.size - offset);
+    const tail = buffer.subarray(0, fs.readSync(fd, buffer, 0, buffer.length, offset)).toString("utf8");
+    if (!tail.includes('"compaction"')) return;
+    const lines = tail.trimEnd().split("\n");
+    if (offset) lines.shift();
+    const entries = new Map();
+    let leaf;
+    for (const line of lines) {
+      if (!line) continue;
+      const entry = JSON.parse(line);
+      if (entry.type !== "session" && typeof entry.id === "string") {
+        // Keep only the links needed to identify the installed compaction
+        // when message capture is disabled. Do not build a body snapshot.
+        leaf = captureContent ? entry : {
+          id: entry.id, parentId: entry.parentId, type: entry.type, timestamp: entry.timestamp,
+        };
+        entries.set(entry.id, leaf);
+      }
+    }
+    const reversed = [];
+    let compaction;
+    const seen = new Set();
+    for (let entry = leaf; entry && !seen.has(entry.id); entry = entries.get(entry.parentId)) {
+      seen.add(entry.id);
+      if (!compaction && entry.type === "compaction") {
+        compaction = entry;
+        if (!captureContent) return { compaction };
+      }
+      if (captureContent) reversed.push(entry);
+      if (compaction?.firstKeptEntryId === entry.id) break;
+    }
+    if (!compaction) return;
+    if (reversed.at(-1)?.id !== compaction.firstKeptEntryId) return { compaction };
+    const messages = [{ role: "compactionSummary", id: compaction.id, summary: compaction.summary }];
+    for (const entry of reversed.reverse()) {
+      if (entry.type === "message" && !["error", "aborted"].includes(entry.message?.stopReason)) {
+        messages.push(entry.message);
+      } else if (entry.type === "custom_message") {
+        messages.push({ role: "user", content: entry.content });
+      } else if (entry.type === "branch_summary" && typeof entry.summary === "string") {
+        messages.push({ role: "user", content: entry.summary });
+      }
+    }
+    return { compaction, snapshot: buildUserInputMessages(undefined, undefined, messages) };
+  } catch { /* A partial transcript or unavailable branch cannot supply a snapshot. */ }
+  finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* fail open */ } } }
+}
+
+function readResumedCompactedSession(run, captureContent) {
+  if (!run.sessionId || !resolveSessionFilePath) return;
+  try {
+    const agentId = /^agent:([^:]+):/.exec(run.sessionKey ?? "")?.[1];
+    const file = resolveSessionFilePath(run.sessionId, undefined, { agentId });
+    return readCompactedSession(file, run.sessionId, captureContent);
+  } catch { /* Older hosts and custom stores can omit the transcript. */ }
+}
+
+function contextVersion(sessionId, nativeId) {
+  return nativeId ? `${sessionId}:compaction:${nativeId}` : `${sessionId}:initial`;
+}
+
+function compactedContextFields(context, available, replacement) {
+  return {
+    "gen_ai.conversation.compacted": true,
+    "gen_ai.context.version": context.version,
+    "gen_ai.context.compress.id": context.operationId,
+    "gen_ai.context.content.availability": available ? "plaintext" : "unavailable",
+    ...(replacement ? {
+      "gen_ai.context.previous_version": context.previousVersion,
+      "gen_ai.context.replacement.boundary": "replace",
+    } : {}),
+  };
 }
 
 function buildUserInputMessages(systemPrompt, userPromptText, historyMessages) {
@@ -1319,12 +1416,13 @@ function handleBeforeAgentRun(event, ctx, userId, emit, cfg) {
   if (event?.systemPrompt) run.systemPrompt = event.systemPrompt;
   if (ctx?.sessionId) run.sessionId = ctx.sessionId;
   if (ctx?.sessionKey) run.sessionKey = ctx.sessionKey;
+  const resumingCompactedTurn = !run.completed && run.turnStartEmitted && run.compactedContext?.replacementPending;
   const record = {
     ...buildCommonFields(run, ctx?.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "before_agent_run",
     "gen_ai.turn.start": !run.turnStartEmitted,
-    "gen_ai.input.messages_delta": run.userPromptText
+    "gen_ai.input.messages_delta": run.userPromptText && !resumingCompactedTurn
       ? [{ role: "user", parts: [{ type: "text", content: truncate(run.userPromptText, MAX_CONTENT_SIZE) }] }]
       : undefined,
     "gen_ai.system_instructions": run.systemPrompt
@@ -1378,7 +1476,7 @@ function handleLlmInput(event, ctx, userId, emit, cfg) {
   // LLM span's input messages land on the right step.id.
 }
 
-function handleModelCallStarted(event, ctx, userId, emit) {
+function handleModelCallStarted(event, ctx, userId, emit, cfg) {
   const runId = event?.runId || ctx?.runId;
   if (!runId) return;
   const run = getRun(runId, event, ctx);
@@ -1392,8 +1490,8 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   run.lastCallId = callId;
   if (event?.provider) run.provider = event.provider;
   if (event?.model) run.model = event.model;
-  if (event?.sessionId) run.sessionId = run.sessionId || event.sessionId;
-  if (event?.sessionKey) run.sessionKey = run.sessionKey || event.sessionKey;
+  run.sessionId ||= event?.sessionId || ctx?.sessionId;
+  run.sessionKey ||= event?.sessionKey || ctx?.sessionKey;
 
   if (run.announcedWork) {
     // New OpenClaw can suppress the persisted user prompt for internal events.
@@ -1419,6 +1517,24 @@ function handleModelCallStarted(event, ctx, userId, emit) {
       truncated: stash.truncated,
     } : null;
   }
+  if (run.callSeq === 1 && !run.compactedContext) {
+    const resumed = readResumedCompactedSession(run, shouldCaptureContent(cfg));
+    if (resumed) {
+      run.compactedContext = { version: contextVersion(run.sessionId, resumed.compaction.id),
+        nativeId: resumed.compaction.id };
+      run.cycleInputSnapshot = resumed.snapshot;
+      run.pendingToolInputMessages.length = 0;
+    }
+  }
+  const compacted = run.compactedContext;
+  const replacement = compacted?.replacementPending === true;
+  if (replacement) {
+    const native = shouldCaptureContent(cfg) ? readCompactedSession(compacted.sessionFile, run.sessionId, true) : undefined;
+    run.cycleInputSnapshot = native?.compaction.id === compacted.nativeId ? native?.snapshot : undefined;
+    // The installed branch already includes retained tool results and the new prompt.
+    run.pendingToolInputMessages.length = 0;
+    compacted.replacementPending = false;
+  }
   const inputDelta = startsAgentCycle && stash
     // The first cycle can use deltas; fallback cycles must not seed history
     // again into that same accumulator. Keep normal tool loops incremental.
@@ -1430,7 +1546,8 @@ function handleModelCallStarted(event, ctx, userId, emit) {
   if (!startsAgentCycle && run.cycleInputSnapshot && inputDelta) {
     appendCycleInputMessages(run.cycleInputSnapshot, inputDelta);
   }
-  const inputMessages = startsAgentCycle ? stash?.messages : run.cycleInputSnapshot?.messages;
+  const inputMessages = compacted ? run.cycleInputSnapshot?.messages
+    : startsAgentCycle ? stash?.messages : run.cycleInputSnapshot?.messages;
   const systemInstructions = startsAgentCycle ? stash?.systemInstructions : undefined;
   const toolDefinitions = startsAgentCycle ? stash?.toolDefinitions : undefined;
   if (startsAgentCycle) {
@@ -1448,7 +1565,9 @@ function handleModelCallStarted(event, ctx, userId, emit) {
     "gen_ai.request.model": event?.model || run.model,
     "gen_ai.response.model": event?.model || run.model,
     "gen_ai.input.messages": truncateContent(inputMessages),
-    "gen_ai.input.messages_delta": run.cycleInputSnapshot ? undefined : inputDelta,
+    "gen_ai.input.messages_delta": compacted || run.cycleInputSnapshot ? undefined : inputDelta,
+    ...(compacted ? compactedContextFields(compacted, !!inputMessages, replacement)
+      : run.sessionId ? { "gen_ai.context.version": contextVersion(run.sessionId) } : {}),
     "gen_ai.system_instructions": systemInstructions,
     "gen_ai.tool.definitions": truncateContent(toolDefinitions),
     "agent.pilot.request_context.truncated": (run.cycleInputSnapshot?.truncated || (startsAgentCycle && stash?.truncated)) ? true : undefined,
@@ -1489,19 +1608,22 @@ function handleLlmOutput(event, ctx, userId, emit) {
 
   flushUnmatchedModelResponses(run, userId, emit);
 
-  // llm_output is a run-level aggregate in OpenClaw, not a single model call.
-  // Keep it as the explicit flush boundary and diagnostic checksum only. The
-  // canonical per-call tokens/output/finish reason are emitted exactly once by
-  // before_message_write, avoiding both final-span inflation and AGENT double
-  // counting.
+  // llm_output carries aggregate usage for an attempt. Per-call usage stays
+  // on the response emitted from before_message_write.
   const aggregate = normalizeUsage(event?.usage);
   const summed = sumCallUsage(run);
   const observedCalls = run.perCallUsage.size;
+  const pendingCompression = compressionStarts.get(run.sessionKey || run.sessionId);
+  // A context-overflow attempt can emit llm_output before the same run
+  // submits its first ordinary request on the installed context.
+  const awaitingCompactedRequest = (pendingCompression?.run === run || run.compactedContext?.replacementPending)
+    && !["stop", "cancelled"].includes(run.lastAssistantFinishReason);
 
   const record = {
     ...buildCommonFields(run, run.sessionId, userId),
     "event.name": "other",
     "agent.openclaw.hook": "llm_output",
+    "gen_ai.turn.end": run.cronExecution ? undefined : !awaitingCompactedRequest,
     "agent.openclaw.aggregate_usage.input_tokens": aggregate.input,
     "agent.openclaw.aggregate_usage.output_tokens": aggregate.output,
     "agent.openclaw.aggregate_usage.cache_read_input_tokens": aggregate.cacheRead,
@@ -1518,7 +1640,7 @@ function handleLlmOutput(event, ctx, userId, emit) {
   };
   emit(record);
   persistCronContext(run);
-  completeRun(run);
+  if (!awaitingCompactedRequest) completeRun(run);
 }
 
 function handleBeforeToolCall(event, ctx, userId, emit) {
@@ -1812,6 +1934,7 @@ function handleBeforeMessageWrite(event, ctx, userId, emit, cfg, waitForEnd = tr
       || (message.usage && typeof message.usage === "object")
       || typeof message.responseId === "string";
     if (!rawOutputMessages && !hasTerminalMetadata) return;
+    run.lastAssistantFinishReason = finishReason;
     // The converter accumulates request deltas; it does not copy responses
     // into the next request. Persisted assistant messages are observed input
     // for the following model call, before the matching tool results.
@@ -1904,6 +2027,70 @@ function handleAgentEnd(event, ctx, userId, emit) {
 
 function emitRecord(record) {
   return writeRecord(record, shouldCaptureContent(loadPilotConfig()));
+}
+
+const compressionStarts = new Map();
+
+function handleBeforeCompaction(event, ctx, userId, emit) {
+  const sessionId = ctx?.sessionId;
+  const key = ctx?.sessionKey || sessionId;
+  if (!key) return;
+  // Hosts serialize session rewrites. A fresh before hook supersedes an
+  // unmatched older attempt without assigning it an invented outcome.
+  compressionStarts.delete(key);
+  if (compressionStarts.size >= 1024) compressionStarts.delete(compressionStarts.keys().next().value);
+  const resolved = resolveContextRun(event, ctx);
+  const run = resolved && !resolved.completed ? resolved : null;
+  const id = crypto.randomUUID();
+  const startedAt = Date.now();
+  const base = { ...buildCommonFields(run, sessionId, userId),
+    ...(!run ? { trace_id: generateTraceId(), 'gen_ai.turn.id': `compression:${id}` } : {}),
+    'gen_ai.context.compress.standalone': !run };
+  compressionStarts.set(key, { id, startedAt, base, run, sessionFile: event.sessionFile,
+    tokensBefore: event.tokenCount, messagesBefore: event.messageCount });
+  emit({ ...base, 'event.id': `${id}:start`, ...compressionFields({ id, phase: 'start',
+    startedAt, tokensBefore: event.tokenCount, messagesBefore: event.messageCount,
+    countingMethod: 'openclaw_native_estimate', countingScope: 'conversation_messages' }) });
+}
+
+function handleAfterCompaction(event, ctx, userId, emit, cfg) {
+  const key = ctx?.sessionKey || event.previousSessionId || ctx?.sessionId;
+  const pending = compressionStarts.get(key);
+  compressionStarts.delete(key);
+  const id = pending?.id || crypto.randomUUID();
+  const sessionId = pending?.base['gen_ai.session.id'] || ctx?.sessionId;
+  const base = pending?.base || { ...buildCommonFields(null, sessionId, userId),
+    trace_id: generateTraceId(), 'gen_ai.turn.id': `compression:${id}`,
+    'gen_ai.context.compress.standalone': true };
+  const sessionFile = event.sessionFile ?? pending?.sessionFile;
+  const native = pending ? readCompactedSession(sessionFile, sessionId, shouldCaptureContent(cfg)) : undefined;
+  const installed = native && native.compaction.id !== pending.run?.compactedContext?.nativeId
+    && Date.parse(native.compaction.timestamp) >= pending.startedAt;
+  const status = installed || event.compactedCount !== 0 ? 'success' : 'skipped';
+  const nativeId = installed ? native.compaction.id : undefined;
+  const run = pending?.run;
+  const context = status === 'success' && sessionId ? {
+    operationId: id,
+    nativeId,
+    sessionFile,
+    version: contextVersion(sessionId, nativeId ?? id),
+    previousVersion: run?.compactedContext?.version ?? contextVersion(sessionId),
+    replacementPending: true,
+  } : undefined;
+  if (run && !run.completed && context) {
+    run.compactedContext = context;
+    run.cycleInputSnapshot = null;
+    run.pendingToolInputMessages.length = 0;
+  }
+  emit({ ...base, time_unix_nano: String(BigInt(Date.now()) * 1_000_000n),
+    ...compressionIdentity(sessionId, id),
+    ...(context ? compactedContextFields(context, !!(installed && native.snapshot), true) : {}),
+    ...compressionFields({ id, status,
+      startedAt: pending?.startedAt, endedAt: Date.now(), tokensBefore: pending?.tokensBefore,
+      tokensAfter: event.tokenCount, messagesBefore: pending?.messagesBefore,
+      messagesAfter: event.messageCount, countingMethod: 'openclaw_native_estimate',
+      countingScope: 'conversation_messages', comparable: true }),
+  });
 }
 
 function makeHandler(fn, interceptHook) {
@@ -2056,6 +2243,8 @@ export default {
     }
 
     agentCwd = process.cwd() || undefined;
+    const sessionRuntime = capabilities.adapter === "modern" ? api.runtime?.agent?.session : undefined;
+    resolveSessionFilePath = sessionRuntime?.resolveSessionFilePath?.bind(sessionRuntime);
     openClawPluginConfig = api?.pluginConfig && typeof api.pluginConfig === "object"
       ? api.pluginConfig
       : {};
@@ -2094,6 +2283,9 @@ export default {
       for (const [name, handler] of Object.entries(handlers)) on(name, handler);
       return;
     }
+
+    try { on('before_compaction', handleBeforeCompaction); on('after_compaction', handleAfterCompaction); }
+    catch (err) { debugFailureOnce('compaction-register', err); }
 
     try { firstTokenObserver = installFirstTokenObserver(); } catch (err) {
       debugFailureOnce("first-token-observer", err);

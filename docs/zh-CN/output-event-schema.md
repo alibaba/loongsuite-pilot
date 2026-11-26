@@ -43,6 +43,54 @@ OpenClaw modern 插件在 `model_call_started` 中分配本次模型调用的 `s
 
 ## Event Names
 
+### 上下文压缩 POC
+
+`gen_ai.context.compress` 记录源端确认的压缩结束。`gen_ai.context.compress.start`
+记录可观察的开始边界。可靠开始/结束或完成时间与正 duration 会生成执行 AGENT 下的
+OTel INTERNAL Span，名称为 `gen_ai.context.compress`，POC 分类为
+`gen_ai.span.kind=COMPRESSION`、操作名为 `compress_context`。这些生命周期扩展仍待
+[语义规范 PR #41](https://github.com/alibaba/loongsuite-semantic-conventions-genai/pull/41) 评审。
+
+压缩字段包括 `gen_ai.context.compress.id`、`status`、`duration`（秒）、
+`start_time_unix_nano`，以及 `gen_ai.context.tokens_before`、`tokens_after`、
+`compression_ratio`。同范围且 before > 0 时比例为 after / before。
+`gen_ai.context.counting.method` 和 `scope` 说明计数依据。缺失数据省略，完成通知单独保留在
+事件输出中。摘要模型用量按实际 LLM 调用记录。手动独立压缩有独立执行身份，关联原生 session。
+
+| 来源 | 本 POC 采集入口 | 可用数据 |
+| --- | --- | --- |
+| Qoder / QoderCN | transcript `compact_boundary` | 完成时间及原生 pre/post token、duration，缺失时省略 |
+| Codex | rollout `compacted` / `ContextCompaction` completion | 原生开始/结束毫秒、同轮身份、安装后上下文估算、摘要请求 input/output 用量 |
+| Pi Coding Agent | `session_before_compact` / `session_compact` | Hook 区间、同范围文本 chars/4 估算、原生 before 单独保留；新版 failure Hook 及 AbortSignal 记录失败/取消 |
+| OpenClaw | before/after compaction Hook 与当前 session branch | Hook 区间、原生估算 token 与消息数、摘要及保留消息、skipped |
+| DSH | `compaction/start` / `compaction/end` 与模型流开始事件 | 原生区间、压缩 ID、成功/错误、已生效的消息快照、`turn:null` 独立事务 |
+
+Pi 文本估算有 8192 条记录和 2 MiB 文本预算，覆盖 conversation text，排除 system、工具定义和图片计价。
+Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于执行 AGENT 下，后续 LLM 从压缩结束后开始。
+原生 `compacted.replacement_history` 成为新的输入基线。后续请求带
+`gen_ai.conversation.compacted=true` 和 `gen_ai.context.version`，新增消息和工具结果从该基线追加。
+原生输入中的 `additional_tools` 保留其位置和 `role=developer`，映射为
+`gen_ai.input.messages` 中的 `openai.additional_tools` Part，包含当前快照的原生 ID 和嵌套 `tools`。
+声明随上下文传递，实际执行工具时才产生 TOOL Span。
+明文 checkpoint 以 `CompactionPart` 表示，保留原生 role、摘要正文和压缩响应 ID。
+加密 checkpoint 保留 `type=compaction` 和可用的块 ID。内容可用性由
+`gen_ai.context.content.availability` 标为 `plaintext`、`opaque`、`partial` 或 `unavailable`。
+替换快照最多保留 1 MiB。未知原生 item 或内容超限会明确降级。历史缺少替换快照时继续记录已知增量。
+当 `agents.codex.captureMessageContent=false` 时，Pilot 的 checkpoint 仍保留上下文版本、游标和关联 ID，
+但不保存替换消息、消息增量或开发者指令；加载已有 checkpoint 时也会移除这些内容，不修改 Codex 原生 rollout。
+安装后上下文计数标为 `native_estimate` / `active_context`。
+摘要请求用量单独记录为 `agent.codex.compaction.input_tokens` / `output_tokens`，与上下文计数分别展示。
+源端没有同范围 before 计数时省略 before 和压缩比例。只有完成时间的旧版记录保留为事件。
+同轮长上下文验证可运行 `node scripts/e2e/context-compression-codex.mjs --codex /path/to/codex`。
+脚本复用 CLI 登录态，在独立空目录提交一次任务并连续读取四份长文本，检查自动压缩的原生 turn 归属及最终结果。
+6000 token 的触发阈值仅作用于测试子进程，适用于支持该配置及原生完成记录的 Codex 版本。
+Pilot 和 CMS 采集需先按测试环境配置启动，脚本输出保留目录和原生 transcript 路径用于对账。
+Qoder / QoderCN 当前使用已有 transcript 唤醒与轮询，CLI `runtime-config.contextWindow`
+解析和 PreCompact/PostCompact 部署接入仍待补充。请求窗口从匹配的 SQLite 行提供。
+OpenClaw 缺少失败结束 Hook 时保留开始证据。未配对开始最多延缓 idle 收口一小时，并遵循现有缓冲上限。
+后台压缩的源区间表示 wall time，前台阻塞时间需额外源证据。其他 Agent 的适配与真实验收继续在
+[Pilot #685](https://github.com/alibaba/loongsuite-pilot/issues/685) 跟进。
+
 OpenClaw 2026.3.8 起的 legacy 和 modern 插件均支持原生逻辑路由字段
 `agent.openclaw.session_key`。已取得 key 的运行事件（`other`、`agent.input`、
 `llm.request`、`llm.response`、`tool.call`、`tool.result`）会保留该字段，
@@ -286,3 +334,44 @@ Claude Code、Qoder、Codex、OpenCode、Pi Coding Agent、DeepSeek Harness、Mi
 ### 逐轮关联原文 hash
 
 Hermes 的用户输入 `other` 事件可携带 `agent.pilot.correlation.content_hash`：用户原文 UTF-8 的 SHA-256 前 16 位十六进制字符，与关联文件的 `contentHash` 相同。该值在正文截断前计算，使超长输入在仅提供 hash 时仍可关联；旧生产者不提供此字段时，Pilot 继续按采集正文计算 hash / 匹配前缀。它不替代对消息结构计算的 `gen_ai.input.messages_hash`。
+
+#### 上下文版本与来源
+
+压缩操作和切换后的第一条 LLM 请求记录 `gen_ai.context.previous_version`、
+`gen_ai.context.version` 和 `gen_ai.context.replacement.boundary=replace`。
+Codex 使用原生 window ID，已提交的压缩基线在独立中断或下一轮启动时仍保留，下一次安装再切换。
+轮中补充的消息从实际收到它的下一条模型请求加入上下文，不回填之前的请求。
+Pi 和 OpenClaw 使用原生 compaction entry ID，并可在 session 重开时从当前 branch 恢复。
+Pi 切换分支时按目标分支重算压缩版本，不把导航当作新的压缩。
+OpenClaw 关闭正文采集时依然恢复已安装的压缩版本，但不构建正文快照。
+DSH 使用已生效的 compact checkpoint ID，模型流开始时读取原生 `deriveMessages()`。
+两条路径都将原生摘要映射为 `CompactionPart`。成功替换后，完整快照覆盖旧的消息增量。
+快照缺失时省略压缩后的输入消息，防止旧历史被拼回。
+OpenClaw 的普通 ReAct 步骤按可配对的模型调用编号，压缩摘要请求仍由独立压缩 Span 表示。
+等待压缩后请求时，OpenClaw 将中间尝试的 `llm_output` 标为 `gen_ai.turn.end=false`，
+同一轮的续跑由最终 `llm_output` 收口。
+
+Codex 的 `gen_ai.context.retained_message_ids` 来自 native retained-source metadata。
+`agent.codex.context.sampled_through_sequence` 保留原生采样边界。
+`gen_ai.context.source_span_ids` 和压缩 Span Links 关联本 Trace 中已观察到的旧上下文操作，最多 256 个 ID。
+`gen_ai.context.source.scope=observed_active_context` 和 `source.complete=false` 表示此列表具有采集范围限制。
+它帮助查看摘要形成前的执行历史。摘要的逐句来源和采集开始前的全部历史仍需更完整的原生 input-item metadata。
+Pi 暴露 `agent.pi.context.first_kept_entry_id` 作为保留历史的边界。
+
+#### 各 Agent 的内容可获取范围
+
+| Agent | 原生能力 | 本 PR 的内容支持与验证 |
+| --- | --- | --- |
+| Codex | 安装后的 replacement history，明文摘要或加密块，window ID、retained-source metadata | 明文/opaque CompactionPart、替换快照、版本关联、来源引用；真实同轮自动压缩及 CMS 对照 |
+| Pi Coding Agent | context Hook 有有效消息，compaction entry 有 summary 和 firstKeptEntryId | CompactionPart、版本、保留边界；真实手动压缩与后续 LLM 的明文输入已有 CMS 回读 |
+| OpenClaw | after_compaction 有计数和 sessionFile，原生 compaction 有摘要和 firstKeptEntryId | 按原生 branch 恢复摘要、保留消息和新增消息；系统提示和模型路由变换依赖各自的原生观测入口 |
+| DSH | compact checkpoint 和模型请求前的有效 surface | 从模型流开始事件采集原生有效消息，保留角色和摘要；路由特定的序列化转换由模型适配器处理 |
+| Qwen Code | PostCompact.compact_summary 有明文，内部候选有 newHistory | 源码确认内容可取，Pilot 专用 Hook 适配待实现 |
+| Hermes | 压缩后的 messages 含 _compressed_summary | 源码确认明文可取，Pilot 适配待实现 |
+| Qoder / QoderCN | compact_boundary 有生命周期信息，摘要依赖对应 transcript writer/version | 生命周期已接入，完整替换消息和来源需逐版本确认 |
+| 其他已支持 Agent | 原生协议和版本各异 | 压缩正文与有效上下文仍需专项核对 |
+
+内容可获取范围依据固定源码修订和实际 native rollout 核对。支持普通 LLM 消息采集并不能证明具备压缩替换快照。
+Codex 核对 openai/codex `f1fd6c4c`，Pi 核对 badlogic/pi-mono `69a69934`，
+OpenClaw 核对 `db6a1bb7`，DSH 核对 `4b399c39`，Qwen Code 核对 `d4b28087`，Hermes 核对 `0f602c5f`。
+Pi 的实测运行版本为 0.73.1，摘要 content 保留该版本 provider 转换中的 summary 前后文本。

@@ -815,6 +815,13 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
     // selection. Only the native prompt proves the requested tier.
     const responseModel = reportedAssistantModel(content.findLast(reportedAssistantModel));
     const requestModel = selectedModel ?? responseModel;
+    const contextUsage = content.find(r => r.type === 'assistant' && r.message?.usage?.request_id)?.message?.usage;
+    const contextFields = {};
+    if (Number.isFinite(contextUsage?.input_tokens) && contextUsage.input_tokens >= 0) contextFields['gen_ai.context.tokens_used'] = contextUsage.input_tokens;
+    if (Number.isFinite(contextUsage?.context_usage_ratio) && contextUsage.context_usage_ratio >= 0) contextFields['gen_ai.context.window_usage_pct'] = contextUsage.context_usage_ratio;
+    const requestStart = Date.parse(boundary.startTs);
+    if (Number.isFinite(requestStart) && allParsed.some(row => row.type === 'system' && row.subtype === 'compact_boundary'
+      && Date.parse(row.timestamp) <= requestStart)) contextFields['gen_ai.conversation.compacted'] = true;
 
     // llm.request for this step
     let inputDelta;
@@ -845,6 +852,7 @@ export function buildEventsFromBoundaries(boundaries, contentEvents, allParsed, 
       records.push({
         'event.id': crypto.randomUUID(),
         'event.name': 'llm.request',
+        ...contextFields,
         'gen_ai.step.id': stepId,
         'gen_ai.turn.id': turnId,
         'gen_ai.session.id': sessionId,

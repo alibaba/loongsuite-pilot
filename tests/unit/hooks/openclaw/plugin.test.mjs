@@ -84,12 +84,12 @@ async function loadPlugin() {
   return mod.default;
 }
 
-function registerPlugin(plugin, pluginConfig = {}) {
+function registerPlugin(plugin, pluginConfig = {}, session) {
   const handlers = {};
   const api = {
     pluginConfig,
     registrationMode: 'full',
-    runtime: { version: '2026.6.10' },
+    runtime: { version: '2026.6.10', agent: { session } },
     on: (name, handler) => { handlers[name] = handler; },
   };
   plugin.register(api);
@@ -101,6 +101,116 @@ function readOutputRecords() {
   const text = fs.readFileSync(logFile, 'utf-8');
   return text.split('\n').filter((l) => l.trim().length > 0).map((l) => JSON.parse(l));
 }
+
+it.each([true, false])('installs the native compaction branch for the next request (content=%s)', async (captureMessageContent) => {
+  vi.useFakeTimers();
+  const handlers = registerPlugin(await loadPlugin(), { captureMessageContent });
+  const ctx = { runId: 'run', sessionId: 's1', sessionKey: 'agent:main:compact' };
+  const file = path.join(tmpDir, 'session.jsonl');
+  await handlers.before_agent_run({ prompt: 'old prompt' }, ctx);
+  handlers.llm_input({ prompt: 'old prompt', historyMessages: [], model: 'qwen' }, ctx);
+  handlers.model_call_started({ callId: 'before', model: 'qwen' }, ctx);
+  handlers.before_message_write({ message: { role: 'assistant', stopReason: 'toolUse', content: [] } }, ctx);
+  handlers.before_compaction({ messageCount: 3 }, ctx);
+  vi.advanceTimersByTime(3000);
+  const entries = [
+    { type: 'session', id: 's1' },
+    { type: 'message', id: 'old', parentId: null, message: { role: 'user', content: 'old prompt' } },
+    { type: 'message', id: 'keep', parentId: 'old', message: { role: 'user', content: 'keep this' } },
+    { type: 'message', id: 'overflow', parentId: 'keep',
+      message: { role: 'assistant', stopReason: 'error', content: 'overflow detail' } },
+    { type: 'compaction', id: 'native-cp', parentId: 'overflow',
+      timestamp: new Date().toISOString(), firstKeptEntryId: 'keep', summary: 'selected facts' },
+  ];
+  const persist = () => fs.writeFileSync(file, entries.map(entry => JSON.stringify(entry)).join('\n') + '\n');
+  persist();
+  handlers.after_compaction({ messageCount: 2, compactedCount: 0, sessionFile: file }, ctx);
+  handlers.agent_end({ success: true }, ctx);
+  handlers.llm_output({ assistantTexts: [] }, ctx);
+  await handlers.before_agent_run({ prompt: 'new input' }, ctx);
+  entries.push({ type: 'message', id: 'next', parentId: 'native-cp',
+    message: { role: 'user', content: 'new input' } });
+  persist();
+  handlers.model_call_started({ callId: 'after', model: 'qwen' }, ctx);
+  handlers.before_message_write({ message: { role: 'assistant', stopReason: 'stop', content: [] } }, ctx);
+  handlers.llm_output({ assistantTexts: ['complete'] }, ctx);
+
+  const records = readOutputRecords();
+  const outputs = records.filter(record => record['agent.openclaw.hook'] === 'llm_output');
+  expect(outputs.map(record => record['gen_ai.turn.end'])).toEqual([false, true]);
+  const reentry = records.filter(record => record['agent.openclaw.hook'] === 'before_agent_run').at(-1);
+  expect(reentry['gen_ai.turn.start']).toBe(false);
+  expect(reentry['gen_ai.input.messages_delta']).toBeUndefined();
+  const operation = records.find(record => record['event.name'] === 'gen_ai.context.compress');
+  const after = records.filter(record => record['event.name'] === 'llm.request').at(-1);
+  expect(operation).toMatchObject({
+    'gen_ai.context.compress.status': 'success',
+    'gen_ai.context.version': 's1:compaction:native-cp',
+  });
+  expect(after).toMatchObject({
+    'gen_ai.context.version': operation['gen_ai.context.version'],
+    'gen_ai.context.previous_version': 's1:initial',
+    'gen_ai.context.replacement.boundary': 'replace',
+    'gen_ai.context.compress.id': operation['gen_ai.context.compress.id'],
+  });
+  expect(after['gen_ai.input.messages_delta']).toBeUndefined();
+  if (captureMessageContent) {
+    expect(after['gen_ai.input.messages']).toEqual([
+      { role: 'user', parts: [{ type: 'compaction', id: 'native-cp', content: 'selected facts' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'keep this' }] },
+      { role: 'user', parts: [{ type: 'text', content: 'new input' }] },
+    ]);
+  } else {
+    expect(after['gen_ai.input.messages']).toBeUndefined();
+    expect(JSON.stringify(records)).not.toContain('selected facts');
+  }
+
+  // A later compaction entry on a different branch cannot replace the
+  // compaction on the active leaf's parent chain.
+  entries.splice(-1, 0, { type: 'compaction', id: 'inactive-cp', parentId: 'old',
+    timestamp: new Date().toISOString(), firstKeptEntryId: 'old', summary: 'inactive branch text' });
+  persist();
+  const resolveSessionFilePath = vi.fn(() => file);
+  const resumed = registerPlugin(await loadPlugin(), { captureMessageContent }, { resolveSessionFilePath });
+  const resumedCtx = { ...ctx, runId: 'next-run' };
+  await resumed.before_agent_run({ prompt: 'new input' }, resumedCtx);
+  resumed.llm_input({ prompt: 'new input', historyMessages: [], model: 'qwen' }, resumedCtx);
+  resumed.model_call_started({ callId: 'resumed', model: 'qwen' }, resumedCtx);
+  const resumedRecords = readOutputRecords().slice(records.length);
+  const request = resumedRecords.find(record => record['event.name'] === 'llm.request');
+  expect(request).toMatchObject({
+    'gen_ai.context.version': after['gen_ai.context.version'],
+    'gen_ai.conversation.compacted': true,
+    'gen_ai.context.content.availability': captureMessageContent ? 'plaintext' : 'unavailable',
+  });
+  expect(resolveSessionFilePath).toHaveBeenCalledTimes(1);
+  expect(resolveSessionFilePath).toHaveBeenCalledWith('s1', undefined, { agentId: 'main' });
+  expect(request['gen_ai.context.replacement.boundary']).toBeUndefined();
+  expect(request['gen_ai.input.messages']).toEqual(after['gen_ai.input.messages']);
+  expect(request['gen_ai.input.messages_delta']).toBeUndefined();
+  if (!captureMessageContent) expect(JSON.stringify(resumedRecords)).not.toMatch(/selected facts|inactive branch text|keep this|new input/);
+});
+
+it('pairs compression hooks across session rotation and preserves a skipped outcome', async () => {
+  vi.useFakeTimers();
+  const handlers = registerPlugin(await loadPlugin());
+  const ctx = { sessionId: 'before', sessionKey: 'agent:main:compact', agentId: 'main' };
+  handlers.before_compaction({ tokenCount: 10000, messageCount: 20 }, ctx);
+  vi.advanceTimersByTime(2100);
+  handlers.after_compaction({ tokenCount: 2000, messageCount: 4, compactedCount: 16,
+    previousSessionId: 'before' }, { ...ctx, sessionId: 'after' });
+  const records = readOutputRecords();
+  const completion = records.find(r => r['event.name'] === 'gen_ai.context.compress');
+  expect(completion).toMatchObject({ 'gen_ai.context.compress.status': 'success',
+    'gen_ai.context.compress.duration': 2.1, 'gen_ai.context.compression_ratio': 0.2,
+    'gen_ai.session.id': 'before' });
+  expect(completion['gen_ai.context.compress.id']).toBe(records[0]['gen_ai.context.compress.id']);
+  handlers.before_compaction({ messageCount: -1 }, ctx);
+  vi.advanceTimersByTime(1000);
+  handlers.after_compaction({ messageCount: -1, compactedCount: 0 }, ctx);
+  expect(readOutputRecords().at(-1)['gen_ai.context.compress.status']).toBe('skipped');
+  expect(readOutputRecords().at(-1)['gen_ai.context.messages_after']).toBeUndefined();
+});
 
 it('makes each model SpanID readable before completion and reuses it for its provider response', async () => {
   const handlers = registerPlugin(await loadPlugin());
@@ -114,7 +224,7 @@ it('makes each model SpanID readable before completion and reuses it for its pro
         .flatMap(n => fs.readFileSync(process.argv[1] + '/' + n, 'utf8').trim().split('\\n').map(JSON.parse));
       console.log(JSON.stringify(rows));
     `, path.join(pilotDataDir, 'logs/openclaw')], { encoding: 'utf8' });
-    expect(read.status, read.stderr).toBe(0);
+    expect(read.status, `${read.stderr} signal=${read.signal} error=${read.error}`).toBe(0);
     const request = JSON.parse(read.stdout).at(-1);
     expect(request['event.name']).toBe('llm.request');
     expect(request.span_id).toMatch(/^[0-9a-f]{16}$/);
@@ -229,7 +339,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
       on: (name) => registered.add(name),
     };
     plugin.register(api);
-    expect(registered.size).toBe(18);
+    expect(registered.size).toBe(20);
     expect(registered.has('cron_changed')).toBe(true);
     expect(registered.has('session_start')).toBe(true);
     expect(registered.has('session_end')).toBe(true);
@@ -336,7 +446,7 @@ describe('OpenClaw plugin stateful pipeline', () => {
         on: (name) => registered.add(name),
       });
 
-      expect(registered.size).toBe(18);
+      expect(registered.size).toBe(20);
     },
   );
 

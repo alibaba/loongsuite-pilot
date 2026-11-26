@@ -7,6 +7,7 @@ import type {
   CodexTranscriptStep,
   CodexTranscriptTool,
   CodexTranscriptUsage,
+  CodexContextReplacement,
 } from './codex-transcript-types.js';
 
 const MAX_INPUT_MESSAGES_BYTES = 1024 * 1024;
@@ -57,6 +58,7 @@ export function buildCodexTranscriptSegment(
   let inputContext = opts.inputContext ?? initialInputContext(turn);
   const contextStepCount = opts.contextStepCount ?? turn.steps.length;
   let nextInputContext = inputContext;
+  const compressionContexts = new Map<string, CodexTranscriptInputContext>();
 
   if (includePrompt && turn.promptReady && turn.prompt) {
     records.push(buildEntry({
@@ -76,13 +78,29 @@ export function buildCodexTranscriptSegment(
   }
 
   for (const [index, step] of turn.steps.entries()) {
+    if (step.contextResetId) {
+      const replacement = step.contextReplacement;
+      if (replacement?.operationId) compressionContexts.set(replacement.operationId, inputContext);
+      inputContext = {
+        hash: hashId([turn.sessionId, turn.transcriptTurnId, 'compacted-context', step.contextResetId], 32),
+        compacted: true,
+        version: replacement?.version ?? step.contextResetId,
+        contentAvailability: replacement?.contentAvailability ?? 'unavailable',
+        ...(replacement?.messages ? { fullMessages: replacement.messages, delta: replacement.messages } : {}),
+      };
+    }
+    if (step.additionalInputMessages?.length) {
+      const extra = contextFromMessages(inputContext.hash, inputContext.fullMessages, step.additionalInputMessages);
+      inputContext = { ...inputContext, ...extra, fullMessages: extra.fullMessages,
+        delta: [...(inputContext.delta ?? []), ...step.additionalInputMessages] };
+    }
     const stepNumber = startStepNumber + index;
     const stepId = `${turnId}:s${stepNumber}`;
     const stepSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'step', String(stepNumber)], 16);
     const llmSpanId = hashId([turn.sessionId, turn.transcriptTurnId, 'llm', String(stepNumber)], 16);
     const responseId = step.responseId ?? `${turnId}:r${stepNumber}`;
     const inputMessages = inputContext.delta ?? [];
-    const outputInputMessages = inputContext.fullMessages ?? inputMessages;
+    const outputInputMessages = inputContext.fullMessages ?? (inputContext.compacted ? [] : inputMessages);
 
     records.push(buildEntry({
       ...base,
@@ -95,6 +113,10 @@ export function buildCodexTranscriptSegment(
       'gen_ai.request.model': model,
       'gen_ai.response.id': responseId,
       'gen_ai.input.messages_hash': inputContext.hash,
+      'gen_ai.context.version': inputContext.version ?? initialContextVersion(turn),
+      ...(inputContext.contentAvailability ? { 'gen_ai.context.content.availability': inputContext.contentAvailability } : {}),
+      ...(step.contextReplacement ? replacementFields(step.contextReplacement, compressionContexts.get(step.contextReplacement.operationId ?? '') ?? opts.inputContext) : {}),
+      ...(inputContext.compacted ? { 'gen_ai.conversation.compacted': true } : {}),
       ...(inputMessages.length > 0 ? { 'gen_ai.input.messages_delta': inputMessages } : {}),
       ...(outputInputMessages.length > 0 ? { 'gen_ai.input.messages': outputInputMessages } : {}),
       ...sharedLlmFields(turn),
@@ -123,8 +145,37 @@ export function buildCodexTranscriptSegment(
       records.push(...buildToolEntries(turn, tool, toolIndex, base, stepId, stepSpanId));
     }
 
-    inputContext = advanceInputContext(inputContext, step);
+    const sourceIds = [...new Set([...(inputContext.sourceSpanIds ?? []), llmSpanId,
+      ...step.tools.map(tool => codexToolSpanId(turn.sessionId, turn.transcriptTurnId, tool.callId))])];
+    inputContext = advanceInputContext({ ...inputContext, sourceSpanIds: sourceIds.slice(-256),
+      ...(sourceIds.length > 256 || inputContext.sourceSpanIdsTruncated ? { sourceSpanIdsTruncated: true } : {}) }, step);
     if (index + 1 === contextStepCount) nextInputContext = inputContext;
+  }
+
+  for (const compression of turn.compressions ?? []) {
+    records.push(buildEntry({
+      ...base,
+      timestamp: compression.completedAtMs,
+      'event.id': hashId([turn.sessionId, turn.transcriptTurnId, 'compression', compression.id], 32),
+      'event.name': 'gen_ai.context.compress',
+      'gen_ai.agent.name': 'codex',
+      'gen_ai.context.compress.id': compression.id,
+      'gen_ai.context.compress.status': 'success',
+      ...(compression.replacement ? replacementFields(compression.replacement,
+        compressionContexts.get(compression.id) ?? inputContext) : {}),
+      ...(compression.startedAtMs !== undefined ? {
+        'gen_ai.context.compress.start_time_unix_nano': timestampToUnixNanos(compression.startedAtMs),
+        'gen_ai.context.compress.duration': (compression.completedAtMs - compression.startedAtMs) / 1000,
+      } : {}),
+      ...(compression.contextTokensAfter !== undefined ? {
+        'gen_ai.context.tokens_after': compression.contextTokensAfter,
+        'gen_ai.context.counting.method': 'native_estimate',
+        'gen_ai.context.counting.scope': 'active_context',
+      } : {}),
+      ...(compression.windowSize !== undefined ? { 'gen_ai.context.window_size': compression.windowSize } : {}),
+      ...(compression.inputTokens !== undefined ? { 'agent.codex.compaction.input_tokens': compression.inputTokens } : {}),
+      ...(compression.outputTokens !== undefined ? { 'agent.codex.compaction.output_tokens': compression.outputTokens } : {}),
+    }));
   }
 
   return { entries: records, nextInputContext };
@@ -133,20 +184,46 @@ export function buildCodexTranscriptSegment(
 function initialInputContext(turn: CodexExtractedTranscriptTurn): CodexTranscriptInputContext {
   const delta = turn.steps[0]?.inputMessages?.length
     ? turn.steps[0].inputMessages
-    : turn.inputMessages.length > 0
-      ? turn.inputMessages
-      : turn.prompt
-        ? [{ role: 'user', parts: [{ type: 'text', content: turn.prompt }] }]
-        : [];
-  return contextFromMessages(INITIAL_INPUT_HASH, [], delta);
+    : turn.inputMessages;
+  return { ...contextFromMessages(INITIAL_INPUT_HASH, [], delta), version: initialContextVersion(turn) };
+}
+
+export function continueCodexInputContext(context: CodexTranscriptInputContext, turn: CodexExtractedTranscriptTurn): CodexTranscriptInputContext {
+  const messages = initialInputContext(turn).delta ?? [];
+  const next = contextFromMessages(context.hash, context.fullMessages, messages);
+  return { ...context, ...next, fullMessages: next.fullMessages, sourceSpanIds: [] };
+}
+
+function initialContextVersion(turn: CodexExtractedTranscriptTurn): string {
+  return turn.contextWindowId ?? hashId([turn.sessionId, turn.transcriptTurnId, 'context'], 32);
+}
+
+function replacementFields(replacement: CodexContextReplacement, before?: CodexTranscriptInputContext): Record<string, JsonValue> {
+  return {
+    'gen_ai.context.version': replacement.version,
+    ...(replacement.previousVersion ?? before?.version
+      ? { 'gen_ai.context.previous_version': replacement.previousVersion ?? before!.version! } : {}),
+    'gen_ai.context.replacement.boundary': 'replace',
+    'gen_ai.context.content.availability': replacement.contentAvailability,
+    ...(replacement.operationId ? { 'gen_ai.context.compress.id': replacement.operationId } : {}),
+    ...(replacement.retainedMessageIds.length ? { 'gen_ai.context.retained_message_ids': replacement.retainedMessageIds } : {}),
+    ...(replacement.sampledThroughSequence !== undefined ? { 'agent.codex.context.sampled_through_sequence': replacement.sampledThroughSequence } : {}),
+    ...(before?.sourceSpanIds?.length ? {
+      'gen_ai.context.source_span_ids': before.sourceSpanIds,
+      'gen_ai.context.source.scope': 'observed_active_context',
+      'gen_ai.context.source.complete': false,
+    } : {}),
+  };
 }
 
 function advanceInputContext(
   context: CodexTranscriptInputContext,
   step: CodexTranscriptStep,
 ): CodexTranscriptInputContext {
-  const delta = nextInputMessagesForStep(step);
-  return contextFromMessages(context.hash, context.fullMessages, delta);
+  const delta = nextInputMessagesForStep(step, context.compacted);
+  const next = contextFromMessages(context.hash, context.fullMessages, delta);
+  return { ...context, ...next, fullMessages: next.fullMessages,
+    ...(context.compacted && !next.fullMessages ? { contentAvailability: 'partial' } : {}) };
 }
 
 function contextFromMessages(
@@ -166,17 +243,17 @@ function contextFromMessages(
   };
 }
 
-export function nextInputMessagesForStep(step: CodexTranscriptStep): JsonValue[] {
+export function nextInputMessagesForStep(step: CodexTranscriptStep, nativeContext = false): JsonValue[] {
   const completedTools = step.tools.filter(tool => tool.completedAtMs !== undefined);
-  const messages: JsonValue[] = [];
-  const toolCallMessage = assistantToolCallMessage(completedTools);
+  const messages: JsonValue[] = nativeContext ? [...(step.nativeAssistantMessages ?? [])] : [];
+  const toolCallMessage = assistantToolCallMessage(completedTools, nativeContext);
   if (toolCallMessage) messages.push(toolCallMessage);
-  const toolMessage = toolResponseMessage(completedTools);
+  const toolMessage = toolResponseMessage(completedTools, nativeContext);
   if (toolMessage) messages.push(toolMessage);
   return messages;
 }
 
-function assistantToolCallMessage(tools: CodexTranscriptTool[]): JsonValue | undefined {
+function assistantToolCallMessage(tools: CodexTranscriptTool[], nativeContext = false): JsonValue | undefined {
   if (tools.length === 0) return undefined;
   return {
     role: 'assistant',
@@ -184,19 +261,19 @@ function assistantToolCallMessage(tools: CodexTranscriptTool[]): JsonValue | und
       type: 'tool_call',
       id: tool.callId,
       name: tool.name,
-      arguments: tool.input ?? null,
+      arguments: (nativeContext ? tool.nativeInput : tool.input) ?? tool.input ?? null,
     })),
   };
 }
 
-function toolResponseMessage(tools: CodexTranscriptTool[]): JsonValue | undefined {
+function toolResponseMessage(tools: CodexTranscriptTool[], nativeContext = false): JsonValue | undefined {
   if (tools.length === 0) return undefined;
   return {
     role: 'tool',
     parts: tools.map(tool => ({
       type: 'tool_call_response',
       id: tool.callId,
-      response: tool.output ?? null,
+      response: (nativeContext ? tool.nativeOutput : tool.output) ?? tool.output ?? null,
     })),
   };
 }

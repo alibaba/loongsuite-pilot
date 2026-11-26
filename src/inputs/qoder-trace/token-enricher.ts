@@ -529,6 +529,8 @@ function enrichIdeRegularTurn(
           bestEntry['gen_ai.response.id'] = row.messageId || requestId;
         }
         bestEntry['gen_ai.request.id'] = requestId;
+        const matchedRequest = findStepRequest(entries, bestEntry);
+        if (matchedRequest) applyRequestContext(matchedRequest, row);
         (bestEntry as Record<string, unknown>)['agent.request_id'] = requestId;
 
         if (!isMissingModel(row.model)) {
@@ -819,6 +821,7 @@ function applySqliteRowsToIdeResponse(
 
   const request = findStepRequest(allEntries, response) ?? turnEntries.find(e => e['event.name'] === 'llm.request');
   if (request) {
+    if (rows.length === 1) applyRequestContext(request, representative);
     request['gen_ai.request.id'] = requestId;
     (request as Record<string, unknown>)['agent.request_id'] = requestId;
     if (!isMissingModel(representative.model) && !response['agent.qoder.selected_request_model']) {
@@ -842,6 +845,14 @@ function applySqliteRowsToIdeResponse(
     (response as Record<string, unknown>)['agent.qoder.sqlite_row_count'] = unusedRows.length;
   }
   for (const row of unusedRows) tokenWritten.add(sqliteDedupeKey(row));
+}
+
+function applyRequestContext(request: AgentActivityEntry, row: SqliteTokenData): void {
+  if (Number.isFinite(row.inputTokens) && row.inputTokens >= 0) request['gen_ai.context.tokens_used'] = row.inputTokens;
+  if (typeof row.contextWindow === 'number' && Number.isFinite(row.contextWindow) && row.contextWindow > 0) {
+    request['gen_ai.context.window_size'] = row.contextWindow;
+    request['gen_ai.context.window_usage_pct'] = row.inputTokens / row.contextWindow;
+  }
 }
 
 function parseUnixNanos(value: unknown): bigint | undefined {

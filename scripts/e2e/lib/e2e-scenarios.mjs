@@ -762,6 +762,7 @@ const COMMON_REQUIRED = [
 ];
 const EVENT_NAME_ENUM = new Set([
   'gen_ai.agent.invoke', 'gen_ai.agent.result',
+  'gen_ai.context.compress.start', 'gen_ai.context.compress',
   'llm.request', 'llm.response', 'tool.call', 'tool.result',
   'gen_ai.model.request', 'gen_ai.model.response', 'gen_ai.tool.call', 'gen_ai.tool.result',
   'gen_ai.agent.invoke', 'gen_ai.agent.result',
@@ -792,6 +793,9 @@ const COVERAGE_FIELDS = [
   'gen_ai.agent.invocation.id', 'gen_ai.agent.parent.invocation.id',
 ];
 const NUMBER_FIELDS = [
+  'gen_ai.context.tokens_before', 'gen_ai.context.tokens_after', 'gen_ai.context.compression_ratio',
+  'gen_ai.context.compress.duration', 'gen_ai.context.window_size', 'gen_ai.context.tokens_used',
+  'gen_ai.context.window_usage_pct',
   'gen_ai.usage.input_tokens', 'gen_ai.usage.output_tokens',
   'gen_ai.usage.cache_read.input_tokens', 'gen_ai.usage.cache_creation.input_tokens',
   'gen_ai.usage.total_tokens', 'gen_ai.usage.input_cost',
@@ -975,7 +979,8 @@ for (const file of files) {
     if (entry['loongsuite.observation.scope'] !== undefined && !providerOptionalForAgentTurn(entry)) {
       addIssue(base, 'invalid_observation_scope', ['loongsuite.observation.scope']);
     }
-    if (!hasValue(entry['gen_ai.provider.name']) && !providerOptionalForAgentTurn(entry)) {
+    if (!hasValue(entry['gen_ai.provider.name']) && !providerOptionalForAgentTurn(entry)
+      && en !== 'gen_ai.context.compress' && en !== 'gen_ai.context.compress.start') {
       miss.push('gen_ai.provider.name');
     }
     const failedStatus = typeof entry['tool.result.status'] === 'string'

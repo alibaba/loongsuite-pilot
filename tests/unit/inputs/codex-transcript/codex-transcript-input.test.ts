@@ -334,7 +334,7 @@ async function createInput(
   return { input, entries, batches, sessionDir, wakeupDir, spanContextDir, stateStore };
 }
 
-async function createDormantInput(root: string): Promise<{
+async function createDormantInput(root: string, captureMessageContent?: boolean): Promise<{
   input: CodexTranscriptInput;
   entries: AgentActivityEntry[];
   batches: AgentActivityEntry[][];
@@ -354,6 +354,7 @@ async function createDormantInput(root: string): Promise<{
     wakeupDir,
     spanContextDir,
     pollIntervalMs: 60_000,
+    captureMessageContent,
   });
   const entries: AgentActivityEntry[] = [];
   const batches: AgentActivityEntry[][] = [];
@@ -471,6 +472,290 @@ async function appendOversizedTerminal(transcript: string, terminal = 'task_comp
 }
 
 describe('CodexTranscriptInput', () => {
+  it.each([false, true])('keeps a restarted checkpoint content-free after compaction (initial capture: %s)', async initialCapture => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-compaction-privacy-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root, initialCapture);
+    const lines = completedTurn().trimEnd().split('\n');
+    const version = 'compacted-window';
+    const summary = 'private compaction summary';
+    const retainedText = 'private retained request';
+    const developerInstructions = 'Follow the project conventions.';
+    const end = '2026-06-24T06:00:06.900Z';
+    const transcript = await writeTranscript(first.sessionDir, [
+      ...lines.slice(0, 8),
+      record(end, 'compacted', { window_id: version, message: '', replacement_history: [
+        { type: 'message', role: 'user', content: [{ type: 'input_text', text: retainedText }] },
+        { type: 'compaction', id: 'summary-block', content: summary },
+      ] }),
+      record(end, 'event_msg', { type: 'item_completed', turn_id: 'turn-1',
+        item: { type: 'ContextCompaction', id: version },
+        started_at_ms: Date.parse('2026-06-24T06:00:06.100Z'), completed_at_ms: Date.parse(end) }),
+      ...lines.slice(8, 12),
+    ].join('\n') + '\n');
+    const readDisk = async () => {
+      const raw = await fs.readFile(path.join(root, 'input-state.json'), 'utf8');
+      const checkpoint: CodexTranscriptCheckpoint = JSON.parse(raw)[`codex-transcript:${transcript}`].extra.codexTranscript;
+      return { raw, checkpoint };
+    };
+    const expectNoContent = (raw: string) => {
+      for (const body of [summary, retainedText, developerInstructions, 'Done']) expect(raw).not.toContain(body);
+    };
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-1')).toHaveLength(2);
+    await first.stateStore.save();
+    await first.input.stop();
+    const before = await readDisk();
+    expect(before.checkpoint.activeTurn?.inputContext).toMatchObject({
+      version, compacted: true, contentAvailability: 'plaintext', hash: expect.any(String),
+      sourceSpanIds: expect.arrayContaining([expect.any(String)]),
+    });
+    if (initialCapture) {
+      for (const body of [summary, retainedText, developerInstructions, 'Done']) expect(before.raw).toContain(body);
+    } else {
+      expectNoContent(before.raw);
+    }
+
+    const restarted = await createDormantInput(root, false);
+    // Scrub persisted state even when no new transcript data has arrived.
+    await restarted.stateStore.save();
+    const afterRestart = await readDisk();
+    expectNoContent(afterRestart.raw);
+    expect(afterRestart.checkpoint.scanOffset).toBe(before.checkpoint.scanOffset);
+    const { fullMessages: _full, delta: _delta, deltaRange: _range, ...metadata } = before.checkpoint.activeTurn!.inputContext!;
+    expect(afterRestart.checkpoint.activeTurn?.inputContext).toEqual(metadata);
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(restarted.entries).toHaveLength(0);
+    await fs.appendFile(transcript, lines.slice(12).join('\n') + '\n');
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(responsesForTurn(restarted.entries, 'turn-1')).toHaveLength(1);
+    expect(restarted.entries.find(entry => entry['event.name'] === 'llm.request')).toMatchObject({
+      'gen_ai.context.version': version, 'gen_ai.conversation.compacted': true,
+    });
+    await restarted.stateStore.save();
+    await restarted.input.stop();
+    const closed = await readDisk();
+    expectNoContent(closed.raw);
+    expect(closed.checkpoint.activeTurn).toBeNull();
+    expect(closed.checkpoint.compactedContext).toEqual({
+      ...metadata, contentAvailability: 'partial',
+      hash: expect.any(String), sourceSpanIds: expect.arrayContaining(metadata.sourceSpanIds!),
+    });
+
+    const next = await createDormantInput(root, false);
+    await processTranscriptOnce(next.input, transcript);
+    expect(next.entries).toHaveLength(0);
+    await fs.appendFile(transcript, lines.slice(1)
+      .map(line => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:')).join('\n') + '\n');
+    await processTranscriptOnce(next.input, transcript);
+    expect(responsesForTurn(next.entries, 'turn-2')).toHaveLength(3);
+    expect(next.entries.find(entry => entry['event.name'] === 'llm.request')).toMatchObject({
+      'gen_ai.context.version': version, 'gen_ai.conversation.compacted': true,
+    });
+    await next.stateStore.save();
+    expectNoContent((await readDisk()).raw);
+    await next.input.stop();
+  });
+
+  it('collects same-turn native compaction once across partial writes and restart, then continues with reset context', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-inline-compaction-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const transcript = await writeTranscript(first.sessionDir, lines.slice(0, 8).join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-1')).toHaveLength(1);
+    const compaction = (id: string, start: string, end: string) => [
+      record(end, 'compacted', { window_id: id, message: '',
+        replacement_history: [{ type: 'compaction', encrypted_content: 'private-encrypted-summary' }],
+        latest_token_usage_record: { usage: { input_tokens: 27000, output_tokens: 400 } } }),
+      record(end, 'event_msg', { type: 'token_count', info: {
+        total_token_usage: { total_tokens: 110 }, model_context_window: 950000,
+        last_token_usage: { input_tokens: 0, output_tokens: 0, total_tokens: 18000 },
+      } }),
+      record(end, 'event_msg', { type: 'item_completed', turn_id: 'turn-1',
+        item: { type: 'ContextCompaction', id },
+        started_at_ms: Date.parse(start), completed_at_ms: Date.parse(end) }),
+    ];
+    const compact1 = compaction('compact-1', '2026-06-24T06:00:06.100Z', '2026-06-24T06:00:06.900Z');
+    await fs.appendFile(transcript, compact1.slice(0, 2).join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress')).toHaveLength(0);
+    await fs.appendFile(transcript, compact1[2] + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    await processTranscriptOnce(first.input, transcript);
+    expect(first.entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress')).toHaveLength(1);
+    await first.stateStore.save();
+    await first.input.stop();
+    const restarted = await createDormantInput(root);
+    await processTranscriptOnce(restarted.input, transcript);
+    expect(restarted.entries).toHaveLength(0);
+    await fs.appendFile(transcript, [
+      ...lines.slice(8, 12),
+      ...compaction('compact-2', '2026-06-24T06:00:09.100Z', '2026-06-24T06:00:09.900Z'),
+      ...lines.slice(12),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(restarted.input, transcript);
+    await restarted.input.stop();
+    const entries = [...first.entries, ...restarted.entries];
+    expect(new Set(entries.map(entry => entry.trace_id)).size).toBe(1);
+    expect(new Set(entries.map(entry => entry['gen_ai.turn.id'])).size).toBe(1);
+    expect(new Set(entries.map(entry => entry['event.id'])).size).toBe(entries.length);
+    const compressed = entries.filter(entry => entry['event.name'] === 'gen_ai.context.compress');
+    expect(compressed).toHaveLength(2);
+    expect(compressed[0]).toMatchObject({ 'gen_ai.context.compress.duration': 0.8,
+      'gen_ai.context.tokens_after': 18000, 'agent.codex.compaction.input_tokens': 27000,
+      'agent.codex.compaction.output_tokens': 400 });
+    expect(compressed[0]['gen_ai.context.tokens_before']).toBeUndefined();
+    const requests = entries.filter(entry => entry['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(3);
+    expect(entryTimestampMs(requests[1])).toBe(Date.parse('2026-06-24T06:00:06.900Z'));
+    expect(entryTimestampMs(requests[2])).toBe(Date.parse('2026-06-24T06:00:09.900Z'));
+    expect(requests.slice(1).every(entry => entry['gen_ai.conversation.compacted'] === true)).toBe(true);
+    expect(requests.slice(1).every(entry => Array.isArray(entry['gen_ai.input.messages']))).toBe(true);
+    expect(requests.slice(1).map(entry => entry['gen_ai.context.version'])).toEqual(['compact-1', 'compact-2']);
+    expect(requests[2]['gen_ai.context.previous_version']).toBe('compact-1');
+    const firstSourceIds = compressed[0]['gen_ai.context.source_span_ids'] as string[];
+    expect(firstSourceIds).toContain(requests[0].span_id);
+    const secondSourceIds = compressed[1]['gen_ai.context.source_span_ids'] as string[];
+    expect(secondSourceIds).toContain(requests[1].span_id);
+    expect(secondSourceIds).not.toContain(requests[0].span_id);
+    expect(JSON.stringify(entries)).not.toContain('private-encrypted-summary');
+    expect(responsesForTurn(entries, 'turn-1').map(entry => entry['gen_ai.usage.input_tokens'])).toEqual([100, 120, 130]);
+    await restarted.stateStore.save();
+    const nextTurn = await createDormantInput(root);
+    await fs.appendFile(transcript, [
+      record('2026-06-24T06:00:12.000Z', 'event_msg', { type: 'task_started', turn_id: 'turn-2' }),
+      record('2026-06-24T06:00:12.100Z', 'response_item', { type: 'message', role: 'user',
+        content: [{ type: 'input_text', text: 'Continue from the summary' }] }),
+      record('2026-06-24T06:00:13.000Z', 'response_item', { type: 'message', role: 'assistant',
+        content: [{ type: 'output_text', text: 'continued' }] }),
+      record('2026-06-24T06:00:13.100Z', 'event_msg', tokenUsage(20, 2)),
+      record('2026-06-24T06:00:14.000Z', 'event_msg', { type: 'task_complete', turn_id: 'turn-2', last_agent_message: 'continued' }),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(nextTurn.input, transcript);
+    await nextTurn.input.stop();
+    const nextRequest = nextTurn.entries.find(entry => entry['event.name'] === 'llm.request')!;
+    expect(nextRequest['gen_ai.context.version']).toBe('compact-2');
+    expect(nextRequest['gen_ai.conversation.compacted']).toBe(true);
+    expect(JSON.stringify(nextRequest['gen_ai.input.messages'])).toContain('compaction');
+    expect(JSON.stringify(nextRequest['gen_ai.input.messages_delta'])).toContain('Continue from the summary');
+  });
+
+  it.each(['abort', 'inferred'])('keeps the new compaction across a terminal-only %s and restart', async boundary => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-compaction-terminal-'));
+    tempDirs.push(root);
+    const first = await createDormantInput(root);
+    const lines = completedTurn().trimEnd().split('\n');
+    const forTurn = (line: string, minute: number) =>
+      line.replaceAll('turn-1', `turn-${minute + 1}`).replaceAll('06:00:', `06:0${minute}:`);
+    const compaction = (minute: number, version: string) => forTurn(record(
+      '2026-06-24T06:00:06.900Z', 'compacted', { window_id: version, replacement_history: [
+        { type: 'compaction', id: version, content: `summary for ${version}` },
+      ] },
+    ), minute);
+    const transcript = await writeTranscript(first.sessionDir, [
+      ...lines.slice(0, 8), compaction(0, 'window-1'), ...lines.slice(8),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(transcriptCheckpoint(first.stateStore, transcript).compactedContext).toMatchObject({ version: 'window-1' });
+
+    await fs.appendFile(transcript, [
+      ...lines.slice(1, 8).map(line => forTurn(line, 1)), compaction(1, 'window-2'),
+      ...lines.slice(8, 12).map(line => forTurn(line, 1)),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-2')).toHaveLength(2);
+    expect(transcriptCheckpoint(first.stateStore, transcript).activeTurn).toMatchObject({
+      startOffset: (await fs.stat(transcript)).size, inputContext: { version: 'window-2', compacted: true },
+    });
+
+    await fs.appendFile(transcript, (boundary === 'abort'
+      ? record('2026-06-24T06:01:10.000Z', 'event_msg', { type: 'turn_aborted', turn_id: 'turn-2' })
+      : forTurn(lines[2]!, 2)) + '\n');
+    await processTranscriptOnce(first.input, transcript);
+    expect(responsesForTurn(first.entries, 'turn-2')).toHaveLength(2);
+    await first.stateStore.save();
+    await first.input.stop();
+
+    const resumed = await createDormantInput(root);
+    expect(transcriptCheckpoint(resumed.stateStore, transcript).compactedContext).toMatchObject({
+      version: 'window-2', compacted: true,
+    });
+    await fs.appendFile(transcript, [
+      ...(boundary === 'abort' ? [forTurn(lines[2]!, 2)] : []),
+      ...lines.slice(3).map(line => forTurn(line, 2)),
+    ].join('\n') + '\n');
+    await processTranscriptOnce(resumed.input, transcript);
+    const request = resumed.entries.find(entry => entry['event.name'] === 'llm.request');
+    expect(request).toMatchObject({ 'gen_ai.context.version': 'window-2', 'gen_ai.conversation.compacted': true });
+    const messages = JSON.stringify(request?.['gen_ai.input.messages']);
+    expect(messages).toContain('summary for window-2');
+    expect(messages).not.toContain('summary for window-1');
+    expect(responsesForTurn(resumed.entries, 'turn-2')).toHaveLength(0);
+  });
+
+  it.each([true, false])('assigns steering input to the next request across poll boundaries (compacted=%s)', async compacted => {
+    const lines = completedTurn().trimEnd().split('\n');
+    const firstTurn = [
+      ...lines.slice(0, 8),
+      ...(compacted ? [record('2026-06-24T06:00:06.900Z', 'compacted', { window_id: 'window-1',
+        replacement_history: [{ type: 'compaction', content: 'retained summary' }] })] : []),
+      ...lines.slice(8),
+    ];
+    const followup = (line: string) => line.replaceAll('turn-1', 'turn-2').replaceAll('06:00:', '06:01:');
+    const run = async (split: boolean) => {
+      const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-compaction-steering-'));
+      tempDirs.push(root);
+      const source = await createDormantInput(root);
+      const transcript = await writeTranscript(source.sessionDir, firstTurn.join('\n') + '\n');
+      await processTranscriptOnce(source.input, transcript);
+      await fs.appendFile(transcript, lines.slice(1, 8).map(followup).join('\n') + '\n');
+      if (split) {
+        await processTranscriptOnce(source.input, transcript);
+        expect(responsesForTurn(source.entries, 'turn-2')).toHaveLength(1);
+      }
+      await fs.appendFile(transcript, [
+        record('2026-06-24T06:01:06.100Z', 'response_item', {
+          type: 'message', role: 'user', content: [{ type: 'input_text', text: 'steer after tool' }],
+        }),
+        record('2026-06-24T06:01:06.100Z', 'event_msg', { type: 'user_message', message: 'steer after tool' }),
+        record('2026-06-24T06:01:06.200Z', 'response_item', {
+          type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'injected after tool' }],
+        }),
+        ...lines.slice(8).map(followup),
+      ].join('\n') + '\n');
+      await processTranscriptOnce(source.input, transcript);
+      return source.entries.filter(entry => entry['event.name'] === 'llm.request'
+        && entry['agent.codex.transcript_turn_id'] === 'turn-2').map(entry => ({
+        id: entry.span_id,
+        messages: entry['gen_ai.input.messages'],
+        delta: entry['gen_ai.input.messages_delta'],
+        hash: entry['gen_ai.input.messages_hash'],
+        version: entry['gen_ai.context.version'],
+      }));
+    };
+    const single = await run(false);
+    const split = await run(true);
+    expect(single).toHaveLength(3);
+    expect(new Set(single.map(step => step.version)).size).toBe(1);
+    if (compacted) expect(single[0]!.version).toBe('window-1');
+    const first = JSON.stringify(single[0]!.messages);
+    expect(first).not.toContain('steer after tool');
+    expect(first).not.toContain('injected after tool');
+    if (compacted) expect(first).toContain('retained summary');
+    const second = JSON.stringify(single[1]!.messages);
+    expect(second.match(/steer after tool/g)).toHaveLength(1);
+    expect(second.match(/injected after tool/g)).toHaveLength(1);
+    expect(single[1]!.delta).toEqual([
+      expect.objectContaining({ role: 'assistant' }),
+      expect.objectContaining({ role: 'tool' }),
+      { role: 'user', parts: [{ type: 'text', content: 'steer after tool' }] },
+      { role: 'developer', parts: [{ type: 'text', content: 'injected after tool' }] },
+    ]);
+    expect(single).toEqual(split);
+  });
+
   it('collects a known session terminal and all tool waves from an actual wakeup without a full rescan', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-real-wakeup-'));
     tempDirs.push(root);

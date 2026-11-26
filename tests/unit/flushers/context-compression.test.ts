@@ -1,0 +1,297 @@
+import { describe, expect, it } from 'vitest';
+import { ExportResultCode } from '@opentelemetry/core';
+import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
+import { OtlpTraceFlusher } from '../../../src/flushers/otlp-trace-flusher.js';
+import { hasActiveCompression } from '../../../src/flushers/context-compression.js';
+import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
+import { newState, transformDshRecord } from '../../../src/inputs/dsh/dsh-event-transform.js';
+import { ClientType, type AgentActivityEntry } from '../../../src/types/index.js';
+import { extractCodexPartialTurn } from '../../../src/inputs/codex-transcript/codex-transcript-extractor.js';
+import { buildCodexTranscriptSegment } from '../../../src/inputs/codex-transcript/codex-transcript-builder.js';
+
+const base = { 'gen_ai.agent.type': 'pi-coding-agent', 'gen_ai.session.id': 'session',
+  'gen_ai.turn.id': 'compress-1', 'gen_ai.context.compress.id': 'attempt',
+  'user.id': 'tester', trace_id: '1234567890abcdef1234567890abcdef' };
+const start = Date.now() - 6000;
+function event(name: string, offset: number, extra = {}) {
+  return buildAgentActivityEntry({ ...base, 'event.name': name, 'event.id': `${name}-${offset}`,
+    time_unix_nano: String(BigInt(start + offset) * 1_000_000n), ...extra });
+}
+async function flush(records: AgentActivityEntry[], captureMessageContent = true, splitAt?: number) {
+  const spans: ReadableSpan[] = [];
+  const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'compression-test',
+    captureMessageContent, protocol: 'http/protobuf',
+    endpoints: [{ endpoint: 'http://localhost:4318/v1/traces' }] }, undefined,
+  () => ({ export(batch, done) { spans.push(...batch); done({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }));
+  try {
+    if (splitAt !== undefined) {
+      await flusher.sendBatch(records.slice(0, splitAt));
+      expect(spans).toHaveLength(0);
+    }
+    await flusher.sendBatch(records.slice(splitAt ?? 0));
+    await flusher.flush();
+    return spans;
+  }
+  finally { await flusher.shutdown(); }
+}
+
+describe('context compression through the real flusher and SDK', () => {
+  it('places native Codex compaction between ordinary steps in one trace without shifting step identities', async () => {
+    const source = (offset: number, type: string, payload: Record<string, unknown>) => ({
+      timestamp: new Date(start + offset).toISOString(), type, payload,
+    });
+    const tools = [{ type: 'namespace', name: 'example', tools: [
+      { type: 'function', name: 'inspect', parameters: { type: 'object', properties: { verbose: { type: 'boolean' } } }, strict: true },
+      { type: 'custom', name: 'read', format: { type: 'grammar', syntax: 'lark', definition: 'start: "read"' } },
+    ] }];
+    const declaration = { type: 'additional_tools', id: 'at_original', role: 'developer', tools };
+    const records = [
+      source(0, 'event_msg', { type: 'task_started', turn_id: 'turn' }),
+      source(1, 'response_item', declaration),
+      source(1, 'response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'read and continue' }] }),
+      source(1, 'event_msg', { type: 'user_message', message: 'read and continue' }),
+      source(100, 'response_item', { type: 'function_call', call_id: 'call', name: 'exec_command', arguments: '{}' }),
+      source(200, 'response_item', { type: 'function_call_output', call_id: 'call', output: 'large result' }),
+      source(201, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 100, output_tokens: 10 } } }),
+      source(3000, 'compacted', { window_id: 'window', replacement_history: [
+        { ...declaration, id: 'at_replacement' },
+        { type: 'message', role: 'developer', content: [{ type: 'input_text', text: 'Retained instruction' }] },
+        { type: 'compaction', id: 'compacted_block', encrypted_content: 'private' },
+      ] }),
+      source(3001, 'event_msg', { type: 'item_completed', turn_id: 'turn', item: { type: 'ContextCompaction', id: 'compact' },
+        started_at_ms: start + 300, completed_at_ms: start + 3001 }),
+      source(4000, 'response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'done' }] }),
+      source(4001, 'event_msg', { type: 'token_count', info: { last_token_usage: { input_tokens: 50, output_tokens: 5 } } }),
+      source(4100, 'event_msg', { type: 'task_complete', turn_id: 'turn', last_agent_message: 'done' }),
+    ];
+    const turn = extractCodexPartialTurn(records, null, 'session', 'turn')!;
+    const built = buildCodexTranscriptSegment(turn);
+    expect(built.nextInputContext.compacted).toBe(true);
+    const spans = await flush(built.entries);
+    const agent = spans.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT')!;
+    const compression = spans.find(s => s.name === 'gen_ai.context.compress')!;
+    const steps = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(steps.map(s => s.attributes['gen_ai.step.id'])).toEqual(['session:turn:s1', 'session:turn:s2']);
+    expect(compression.parentSpanId).toBe(agent.spanContext().spanId);
+    expect(compression.attributes['gen_ai.agent.name']).toBe('codex');
+    expect(new Set(spans.map(s => s.spanContext().traceId)).size).toBe(1);
+    expect(compression.duration).toEqual([2, 701000000]);
+    const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'TOOL')).toHaveLength(1);
+    expect(JSON.parse(String(llms[0].attributes['gen_ai.input.messages']))).toEqual([
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', id: 'at_original', tools }] },
+      { role: 'user', parts: [{ type: 'text', content: 'read and continue' }] },
+    ]);
+    expect(llms[1].startTime).toEqual([Math.floor((start + 3001) / 1000), ((start + 3001) % 1000) * 1000000]);
+    expect(llms[1].attributes['gen_ai.conversation.compacted']).toBe(true);
+    expect(JSON.parse(String(llms[1].attributes['gen_ai.input.messages']))).toEqual([
+      { role: 'developer', parts: [{ type: 'openai.additional_tools', id: 'at_replacement', tools }] },
+      { role: 'developer', parts: [{ type: 'text', content: 'Retained instruction' }] },
+      { role: 'user', parts: [{ type: 'compaction', id: 'compacted_block' }] },
+    ]);
+    expect(llms[1].attributes['gen_ai.context.version']).toBe('window');
+    expect(llms[1].attributes['gen_ai.context.content.availability']).toBe('opaque');
+    expect(llms.map(s => s.attributes['gen_ai.usage.input_tokens'])).toEqual([100, 50]);
+  });
+
+  it('exports one timed INTERNAL child and preserves source counts without charging LLM tokens', async () => {
+    const records = [event('gen_ai.context.compress.start', 0),
+      event('gen_ai.context.compress', 1234, { 'gen_ai.context.compress.status': 'success',
+        'gen_ai.context.compress.standalone': true, 'gen_ai.context.tokens_before': 10000,
+        'gen_ai.context.tokens_after': 2500, 'gen_ai.context.compression_ratio': 0.25 })];
+    const spans = await flush([...records, records[1]]);
+    const compression = spans.filter(s => s.name === 'gen_ai.context.compress');
+    expect(compression).toHaveLength(1);
+    expect(compression[0].kind).toBe(0);
+    expect(compression[0].duration).toEqual([1, 234000000]);
+    expect(compression[0].attributes).toMatchObject({ 'gen_ai.span.kind': 'COMPRESSION',
+      'gen_ai.context.tokens_before': 10000, 'gen_ai.context.tokens_after': 2500,
+      'gen_ai.context.compress.duration': 1.234 });
+    const agent = spans.find(s => s.attributes['gen_ai.span.kind'] === 'AGENT')!;
+    expect(compression[0].parentSpanId).toBe(agent.spanContext().spanId);
+    expect(spans.find(s => s.attributes['gen_ai.span.kind'] === 'ENTRY')?.parentSpanId).toBeUndefined();
+    expect(agent.attributes['gen_ai.usage.input_tokens']).toBeUndefined();
+    expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(0);
+  });
+
+  it.each([false, true])('keeps response-ID-free Pi request context only when the start is unambiguous (overlap=%s)', async overlap => {
+    const request = (index: number, offset: number) => event('llm.request', offset, {
+      'event.id': `request-${index}`, 'gen_ai.step.id': `step-${index}`, 'gen_ai.request.model': 'fixture-model',
+      'gen_ai.context.version': `window-${index}`, 'gen_ai.conversation.compacted': true,
+    });
+    const response = (index: number, offset: number) => event('llm.response', offset, {
+      'gen_ai.step.id': `step-${index}`, 'gen_ai.response.model': 'fixture-model',
+      'gen_ai.response.finish_reasons': [index === 1 ? 'tool_call' : 'stop'],
+      'gen_ai.usage.input_tokens': 100, 'gen_ai.usage.output_tokens': 10,
+    });
+    const spans = await flush([
+      event('other', 0, { 'gen_ai.turn.start': true }),
+      request(1, 100), response(1, 200), request(2, overlap ? 100 : 300), response(2, 400),
+    ]);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms.every(span => span.attributes['gen_ai.response.id'] === undefined)).toBe(true);
+    expect(llms.map(span => span.attributes['gen_ai.context.version']))
+      .toEqual(overlap ? [undefined, undefined] : ['window-1', 'window-2']);
+    expect(llms.map(span => span.attributes['gen_ai.conversation.compacted']))
+      .toEqual(overlap ? [undefined, undefined] : [true, true]);
+  });
+
+  it('retains completion-only evidence in logs without fabricating a timed trace', async () => {
+    const spans = await flush([event('gen_ai.context.compress', 1000)]);
+    expect(spans).toHaveLength(0);
+  });
+
+  it('reconstructs the source interval from seconds and omits private summary content', async () => {
+    const spans = await flush([event('gen_ai.context.compress', 3000,
+      { 'gen_ai.context.compress.duration': 2, 'gen_ai.context.compress.status': 'error',
+        'gen_ai.context.compress.standalone': true, 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'private summary' }] }] })], false);
+    const compression = spans.find(s => s.name === 'gen_ai.context.compress')!;
+    expect(compression.duration).toEqual([2, 0]);
+    expect(compression.status.code).toBe(2);
+    expect(JSON.stringify(spans.map(s => s.attributes))).not.toContain('private summary');
+  });
+
+  it('delays idle sealing only while a bounded attempt is active', () => {
+    const record = event('gen_ai.context.compress.start', 0);
+    expect(hasActiveCompression([record], start + 120000)).toBe(true);
+    expect(hasActiveCompression([record, event('gen_ai.context.compress', 1234)], start + 120000)).toBe(false);
+    expect(hasActiveCompression([record], start + 3600001)).toBe(false);
+  });
+
+  it('keeps an active long compression after an LLM stop and accepts later completion', async () => {
+    const spans: ReadableSpan[] = [];
+    const flusher = new OtlpTraceFlusher({ enabled: true, serviceName: 'compression-live',
+      protocol: 'http/protobuf', turnIdleTimeoutMs: 1,
+      endpoints: [{ endpoint: 'http://localhost:4318/v1/traces' }] }, undefined,
+    () => ({ export(batch, done) { spans.push(...batch); done({ code: ExportResultCode.SUCCESS }); }, shutdown: async () => {} }));
+    try {
+      await flusher.sendBatch([event('gen_ai.context.compress.start', 0),
+        event('llm.request', 1, { 'gen_ai.step.id': 's1', 'gen_ai.request.model': 'test', 'gen_ai.provider.name': 'qwen' }),
+        event('llm.response', 100, { 'gen_ai.step.id': 's1', 'gen_ai.request.model': 'test', 'gen_ai.provider.name': 'qwen',
+          'gen_ai.response.finish_reasons': ['stop'] })]);
+      (flusher as unknown as { tickIdleTimeout(): void }).tickIdleTimeout();
+      expect(spans).toHaveLength(0);
+      await flusher.sendBatch([event('gen_ai.context.compress', 3000, { 'gen_ai.context.compress.status': 'success' })]);
+      expect(spans.filter(s => s.name === 'gen_ai.context.compress')).toHaveLength(1);
+      expect(spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM')).toHaveLength(1);
+    } finally { await flusher.shutdown(); }
+  });
+
+  it('keeps a DSH manual transaction independent from the previous numbered turn', async () => {
+    const state = newState();
+    state.currentTurn = 7;
+    const first = transformDshRecord({ sid: 'dsh-session', type: 'compaction/start', time: start,
+      data: { compactionId: 'c1', turn: null } }, ClientType.Dsh, state)!;
+    const last = transformDshRecord({ sid: 'dsh-session', type: 'compaction/end', time: start + 2500,
+      data: { compactionId: 'c1', turn: null, error: 'model failed' } }, ClientType.Dsh, state)!;
+    expect(first['gen_ai.turn.id']).toBe('dsh-session:compression:c1');
+    expect(last['gen_ai.context.compress.duration']).toBe(2.5);
+    expect(last['gen_ai.context.compress.status']).toBe('error');
+    expect((await flush([first, last])).filter(s => s.name === 'gen_ai.context.compress')).toHaveLength(1);
+  });
+
+  it('uses each DSH admitted snapshot and links its installed context version', async () => {
+    const state = newState();
+    let offset = 0;
+    const records: AgentActivityEntry[] = [];
+    const transform = (type: string, data: Record<string, unknown>, extra = {}) => {
+      const result = transformDshRecord({ sid: 'dsh-session', type, time: start + offset++ * 100,
+        data: { turn: 1, ...data }, ...extra }, ClientType.Dsh, state);
+      if (result) records.push(result);
+    };
+    transform('turn/start', {});
+    transform('request/header', { header: { config: { provider: 'qwen', model: 'qwen-plus' } } });
+    transform('user/message', { content: [{ type: 'text', text: 'replaced history' }] });
+    transform('assistant/chunk', { step: 1, chunk: { type: 'text-delta' } });
+    transform('assistant/message', { step: 1, message: { id: 'before',
+      content: [{ type: 'text', text: 'continue' }] } });
+    for (const [step, id] of [[2, 'cp1'], [3, 'cp2']] as const) {
+      const summary = { role: 'user', source: { kind: 'compact-checkpoint', compactionId: id },
+        content: [{ type: 'text', text: id + ' summary' }] };
+      transform('compaction/start', { compactionId: id });
+      transform('user/message', summary, { surfaceOp: { op: 'replace', startSeq: 1, endSeq: 2 } });
+      transform('compaction/end', { compactionId: id });
+      transform('loongsuite-pilot/request-context', { step, compactionId: id, messages: [
+        summary, { role: 'developer', content: [{ type: 'text', text: 'retained directives' }] },
+      ] });
+      transform('assistant/chunk', { step, chunk: { type: 'text-delta' } });
+      transform('assistant/message', { step, message: { id, content: [{ type: 'text', text: 'continue' }] } });
+    }
+    const spans = await flush(records);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(3);
+    for (const [index, id] of [[1, 'cp1'], [2, 'cp2']] as const) {
+      const operation = spans.find(span => span.attributes['gen_ai.context.compress.id'] === id
+        && span.attributes['gen_ai.span.kind'] === 'COMPRESSION')!;
+      const attrs = llms[index].attributes;
+      expect(attrs['gen_ai.context.version']).toBe(operation.attributes['gen_ai.context.version']);
+      expect(attrs['gen_ai.context.previous_version']).toBe(llms[index - 1].attributes['gen_ai.context.version']);
+      expect(JSON.parse(String(attrs['gen_ai.input.messages']))).toEqual([
+        { role: 'user', parts: [{ type: 'compaction', id, content: id + ' summary' }] },
+        { role: 'developer', parts: [{ type: 'text', content: 'retained directives' }] },
+      ]);
+    }
+  });
+
+  it('keeps the OpenClaw turn open across a compaction attempt and suppresses stale input', async () => {
+    const agentType = { 'gen_ai.agent.type': 'openclaw' };
+    const step = (ordinal: number) => ({ ...agentType, 'gen_ai.step.id': `run:model:${ordinal}`,
+      'gen_ai.provider.name': 'qwen', 'gen_ai.request.model': 'qwen-plus' });
+    const spans = await flush([
+      event('llm.request', 0, { ...step(1), 'gen_ai.input.messages_delta': [{ role: 'user',
+        parts: [{ type: 'text', content: 'stale history' }] }] }),
+      event('llm.response', 50, { ...step(1), 'gen_ai.response.id': 'before' }),
+      event('gen_ai.context.compress.start', 100, agentType),
+      event('llm.request', 150, step(2)),
+      event('gen_ai.context.compress', 1000, { ...agentType, 'gen_ai.context.compress.status': 'success' }),
+      event('other', 1001, { ...agentType, 'agent.openclaw.hook': 'llm_output', 'gen_ai.turn.end': false }),
+      event('llm.request', 1100, { ...step(3), 'gen_ai.conversation.compacted': true,
+        'gen_ai.context.content.availability': 'unavailable' }),
+      event('llm.response', 1200, { ...step(3), 'gen_ai.response.id': 'after' }),
+      event('other', 1201, { ...agentType, 'agent.openclaw.hook': 'llm_output', 'gen_ai.turn.end': true }),
+    ], true, 6);
+    const rounds = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(rounds.map(span => span.attributes['gen_ai.react.round'])).toEqual([1, 2]);
+    const llms = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms[1].attributes['gen_ai.input.messages']).toBeUndefined();
+  });
+
+  it('drops stale DSH full context after a top-level surface rewrite', () => {
+    const state = newState();
+    const transform = (type: string, data = {}, extra = {}) => transformDshRecord({
+      sid: 'dsh-session', type, time: start, data: { turn: 1, step: 1, ...data }, ...extra,
+    }, ClientType.Dsh, state);
+    transform('turn/start');
+    transform('user/message', { content: 'original context' });
+    transform('user/message', { content: 'compressed summary' }, { surfaceOp: { op: 'replace' } });
+    const request = transform('assistant/chunk', { chunk: { type: 'text-delta', delta: 'answer' } });
+    expect(request?.['event.name']).toBe('llm.request');
+    expect(request?.['gen_ai.input.messages']).toBeUndefined();
+    expect(request?.['gen_ai.input.messages_delta']).toBeUndefined();
+  });
+
+  it('keeps compacted context attributes local to the matched LLM request', async () => {
+    const spans = await flush([
+      event('llm.request', 0, { 'gen_ai.step.id': 's1', 'gen_ai.request.model': 'test',
+        'gen_ai.provider.name': 'qwen', 'gen_ai.context.tokens_used': 100,
+        'gen_ai.context.window_size': 1000, 'gen_ai.context.window_usage_pct': 0.1,
+        'gen_ai.conversation.compacted': true }),
+      event('llm.response', 100, { 'gen_ai.step.id': 's1', 'gen_ai.request.model': 'test',
+        'gen_ai.provider.name': 'qwen', 'gen_ai.response.id': 'r1', 'gen_ai.response.finish_reasons': ['tool_calls'] }),
+      event('llm.request', 101, { 'gen_ai.step.id': 's2', 'gen_ai.request.model': 'test', 'gen_ai.provider.name': 'qwen' }),
+      event('llm.response', 200, { 'gen_ai.step.id': 's2', 'gen_ai.request.model': 'test',
+        'gen_ai.provider.name': 'qwen', 'gen_ai.response.id': 'r2', 'gen_ai.response.finish_reasons': ['stop'] }),
+    ]);
+    const llms = spans.filter(s => s.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(llms).toHaveLength(2);
+    expect(llms.find(s => s.attributes['gen_ai.response.id'] === 'r1')?.attributes).toMatchObject({
+      'gen_ai.context.tokens_used': 100, 'gen_ai.context.window_size': 1000,
+      'gen_ai.context.window_usage_pct': 0.1, 'gen_ai.conversation.compacted': true,
+    });
+    expect(llms.find(s => s.attributes['gen_ai.response.id'] === 'r2')?.attributes)
+      .not.toHaveProperty('gen_ai.conversation.compacted');
+  });
+});

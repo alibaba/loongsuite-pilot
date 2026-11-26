@@ -13,6 +13,7 @@ import {
 import { loadHookRuntimeConfig } from '../agent-event-normalizer.mjs';
 import { qoderWakeupRoot, qoderSourceKey, canonicalSourcePath, MAX_WAKEUP_BYTES, withQoderWakeupLock } from './hook-wakeup.mjs';
 import { QoderSubagentLinks, QODER_DELEGATIONS_KEY, qoderTurnId, qoderDigest, qoderTaskNotification } from './subagent-links.mjs';
+import { qoderCompressionRecord } from './context-compression.mjs';
 
 // Native background delivery starts a model turn without a new human prompt.
 // Require the runtime's origin + meta markers before accepting its envelope.
@@ -1076,6 +1077,18 @@ export class QoderTranscriptCollector {
     const boundaries = buildLlmBoundaries([], content);
     const records = buildEventsFromBoundaries(boundaries, content, value.rows, turnId,
       source.sessionId, this.agentId, config, context.cwd ?? source.cwd);
+    for (const row of value.rows) {
+      const compression = qoderCompressionRecord(row, {
+        trace_id: records[0]?.trace_id, 'user.id': records[0]?.['user.id'] ?? config.userId,
+        'gen_ai.agent.name': records[0]?.['gen_ai.agent.name'],
+        ...(context.cwd ?? source.cwd ? { 'agent.qoder.cwd': context.cwd ?? source.cwd } : {}),
+        'gen_ai.session.id': source.sessionId, 'gen_ai.turn.id': turnId,
+        'gen_ai.agent.type': this.agentId === 'qoder' ? 'qoder-cli' : 'qoder-cn' });
+      if (compression) {
+        const next = records.findIndex(record => BigInt(record.time_unix_nano) > BigInt(compression.time_unix_nano));
+        records.splice(next < 0 ? records.length : next, 0, compression);
+      }
+    }
     // Prefer the native user row's requestSetId. SQLite-proven initial ownership
     // is a fallback; a Hook watermark alone cannot establish prompt ownership.
     const promptRequestId = checkpoint.activeRequestSetId;
@@ -1084,13 +1097,16 @@ export class QoderTranscriptCollector {
       && !firstRequest['agent.pilot.interceptor.correlation'].requestId) {
       firstRequest['agent.pilot.interceptor.correlation'].requestId = crypto.createHash('sha256').update(promptRequestId).digest('hex');
     }
-    for (let index = 0; index < records.length; index++) {
-      const record = records[index];
+    let ordinaryIndex = 0;
+    for (const record of records) {
       // In-process provenance for the IDE adapter. Never serialized to events.
       Object.defineProperty(record, Symbol.for('loongsuite.qoder.native-source'), {
         value: source.transcriptPath,
       });
-      record['event.id'] = digest([turnId, index, record['event.name'], record['gen_ai.tool.call.id']]);
+      if (record['event.name'] !== 'gen_ai.context.compress') {
+        record['event.id'] = digest([turnId, ordinaryIndex, record['event.name'], record['gen_ai.tool.call.id']]);
+        ordinaryIndex++;
+      }
       record['agent.transcript.cursor_mode'] = checkpoint.recoveryReason === 'incremental' ? 'incremental' : 'bootstrap';
       record['agent.transcript.cursor_reason'] = checkpoint.recoveryReason ?? 'incremental';
       record['agent.transcript.cursor_batch_id'] = turnId;
@@ -1257,6 +1273,13 @@ export class QoderTranscriptCollector {
       const row = line.row;
       if (line.quarantine) this.quarantine(source, checkpoint, line, line.quarantine);
       const prompt = row && isRealUserPrompt(row);
+      if (checkpoint.activeStart === null) {
+        const compression = qoderCompressionRecord(row, { 'gen_ai.session.id': source.sessionId,
+          'gen_ai.agent.type': this.agentId === 'qoder' ? 'qoder-cli' : 'qoder-cn',
+          'user.id': source.userIdentity?.id ?? '', 'user.name': source.userIdentity?.name ?? '',
+          ...(source.cwd ? { 'agent.qoder.cwd': source.cwd } : {}) });
+        if (compression) records.push(compression);
+      }
       const contextFloor = Math.max(checkpoint.committedOffset, checkpoint.nativeStopOffset ?? 0);
       if (eventOf(row) === 'Stop') checkpoint.nativeStopOffset = line.end;
       // Hook progress is a completion notification of a command, often late

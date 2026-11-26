@@ -83,7 +83,7 @@ async function createRuntime(config = {}, identity, extensionPath = EXTENSION_PA
     await handler({ type: name, ...event }, ctx);
   }
 
-  return { emit };
+  return { emit, ctx, handlers };
 }
 
 function readRecords() {
@@ -981,5 +981,122 @@ describe('Pi Coding Agent extension', () => {
 
     const errorDir = path.join(tmpDir, 'logs', 'pi-coding-agent');
     expect(fs.readdirSync(errorDir).some(name => name.includes('-error-'))).toBe(true);
+  });
+});
+
+
+describe('Pi compression lifecycle', () => {
+  it('uses the active branch after Pi tree navigation without emitting a new compression', async () => {
+    const runtime = await createRuntime();
+    const kept = { type: 'message', id: 'keep', message: { role: 'user', content: 'keep this' } };
+    const branch = id => [kept, { type: 'compaction', id, firstKeptEntryId: 'keep', summary: `facts from ${id}` }];
+    let active = branch('c1');
+    runtime.ctx.sessionManager.getBranch = () => active;
+    await runtime.emit('session_start');
+
+    const startRequest = async () => {
+      await runtime.emit('before_agent_start', { prompt: 'continue' });
+      await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
+      const summary = active.at(-1).summary;
+      await runtime.emit('context', { messages: [
+        ...(summary ? [{ role: 'compactionSummary', summary }] : []),
+        { role: 'user', content: 'continue' },
+      ] });
+      await runtime.emit('agent_end');
+      return readRecords().findLast(r => r['event.name'] === 'llm.request');
+    };
+    const navigate = async next => {
+      const oldLeafId = active.at(-1).id;
+      active = next;
+      await runtime.handlers.get('session_tree')?.({
+        type: 'session_tree', oldLeafId, newLeafId: active.at(-1).id,
+      }, runtime.ctx);
+    };
+
+    expect(await startRequest()).toMatchObject({ 'gen_ai.context.version': 'c1', 'gen_ai.conversation.compacted': true });
+    await navigate([kept]);
+    const plain = await startRequest();
+    expect(plain['gen_ai.context.version']).toBe('pi-session-1:initial');
+    expect(plain['gen_ai.conversation.compacted']).toBeUndefined();
+    expect(plain['gen_ai.input.messages']).toEqual([{ role: 'user', parts: [{ type: 'text', content: 'continue' }] }]);
+
+    await navigate(branch('c1'));
+    await runtime.emit('session_before_compact', { branchEntries: active });
+    active = branch('c3');
+    await runtime.emit('session_compact', { compactionEntry: active.at(-1) });
+    await navigate(branch('c2'));
+    const request = await startRequest();
+    expect(request).toMatchObject({ 'gen_ai.context.version': 'c2', 'gen_ai.conversation.compacted': true });
+    expect(request['gen_ai.input.messages'][0].parts[0]).toMatchObject({ type: 'compaction', id: 'c2' });
+    expect(request['gen_ai.input.messages'][0].parts[0].content).toContain('facts from c2');
+    expect(request['gen_ai.context.previous_version']).toBeUndefined();
+    expect(request['gen_ai.context.replacement.boundary']).toBeUndefined();
+    expect(request['agent.pi.context.first_kept_entry_id']).toBeUndefined();
+    expect(readRecords().filter(r => r['event.name'] === 'gen_ai.context.compress')).toHaveLength(1);
+  });
+
+  it('counts retained text on the same scope and includes the summary in the next request', async () => {
+    const runtime = await createRuntime();
+    await runtime.emit('session_start');
+    const before = [
+      { type: 'message', id: 'old', message: { role: 'user', content: 'a'.repeat(400) } },
+      { type: 'message', id: 'kept', message: { role: 'user', content: 'b'.repeat(80) } },
+    ];
+    runtime.ctx.sessionManager.getBranch = () => [
+      ...before,
+      { type: 'compaction', id: 'c1', firstKeptEntryId: 'kept', summary: 's'.repeat(40) },
+    ];
+    await runtime.emit('session_before_compact', { branchEntries: before, preparation: { tokensBefore: 200 } });
+    vi.advanceTimersByTime(1000);
+    await runtime.emit('session_compact', { compactionEntry: { id: 'c1', firstKeptEntryId: 'kept', tokensBefore: 200, summary: 's'.repeat(40) } });
+    expect(readRecords().find(r => r['event.name'] === 'gen_ai.context.compress')).toMatchObject({
+      'gen_ai.context.tokens_before': 120,
+      'gen_ai.context.tokens_after': 30,
+      'gen_ai.context.compression_ratio': 0.25,
+      'gen_ai.context.counting.method': 'text_chars_div_4',
+      'gen_ai.context.counting.scope': 'conversation_text',
+      'gen_ai.context.compress.native_tokens_before': 200,
+    });
+    await runtime.emit('before_agent_start', { prompt: 'continue' });
+    await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
+    await runtime.emit('context', { messages: [{ role: 'compactionSummary', summary: 'retained facts' }] });
+    const request = readRecords().findLast(r => r['event.name'] === 'llm.request');
+    expect(request['gen_ai.input.messages'][0].parts[0]).toMatchObject({ type: 'compaction', id: 'c1' });
+    expect(request['gen_ai.input.messages'][0].parts[0].content).toContain('<summary>\nretained facts\n</summary>');
+    expect(request).toMatchObject({ 'gen_ai.context.version': 'c1', 'gen_ai.context.replacement.boundary': 'replace',
+      'agent.pi.context.first_kept_entry_id': 'kept' });
+  });
+
+  it('records a real hook interval, clears the input snapshot and keeps manual work independent', async () => {
+    const runtime = await createRuntime();
+    await runtime.emit('session_start');
+    await startTurn(runtime);
+    await runtime.emit('agent_end');
+    const signal = new AbortController();
+    await runtime.emit('session_before_compact', { preparation: { tokensBefore: 12000 }, signal: signal.signal });
+    vi.advanceTimersByTime(3200);
+    await runtime.emit('session_compact', { compactionEntry: { id: 'c1', tokensBefore: 12000, summary: 'private summary' } });
+    const compression = readRecords().filter(r => r['event.name'] === 'gen_ai.context.compress');
+    expect(compression).toHaveLength(1);
+    expect(compression[0]).toMatchObject({ 'gen_ai.context.compress.duration': 3.2,
+      'gen_ai.context.compress.status': 'success', 'gen_ai.context.compress.standalone': true });
+    expect(JSON.stringify(compression)).not.toContain('private summary');
+    await runtime.emit('session_compact', { compactionEntry: { id: 'c1' } });
+    expect(readRecords().filter(r => r['event.name'] === 'gen_ai.context.compress')).toHaveLength(1);
+    await runtime.emit('before_agent_start', { prompt: 'continue' });
+    await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
+    await runtime.emit('context', { messages: [{ role: 'user', content: 'continue' }] });
+    expect(readRecords().findLast(r => r['event.name'] === 'llm.request')['gen_ai.conversation.compacted']).toBe(true);
+  });
+  it('records cancellation without inventing a success or LLM usage', async () => {
+    const runtime = await createRuntime();
+    await runtime.emit('session_start');
+    const controller = new AbortController();
+    await runtime.emit('session_before_compact', { signal: controller.signal });
+    vi.advanceTimersByTime(1000);
+    controller.abort();
+    const records = readRecords();
+    expect(records.find(r => r['event.name'] === 'gen_ai.context.compress')['gen_ai.context.compress.status']).toBe('cancelled');
+    expect(records.some(r => r['gen_ai.usage.input_tokens'] !== undefined)).toBe(false);
   });
 });

@@ -15,8 +15,11 @@ import type {
   CodexTranscriptStep,
   CodexTranscriptTool,
   CodexTranscriptUsage,
+  CodexTranscriptCompression,
+  CodexContextReplacement,
 } from './codex-transcript-types.js';
 import { timestampMs } from './codex-transcript-utils.js';
+import { codexAdditionalToolsMessage, codexContextReplacement } from './codex-context-replacement.js';
 
 export function extractCodexTranscriptMeta(record: Record<string, unknown>): CodexTranscriptMeta | null {
   if (record.type !== 'session_meta') return null;
@@ -66,6 +69,8 @@ export function extractCodexTranscriptMeta(record: Record<string, unknown>): Cod
     provider: stringValue(payload.model_provider) ?? 'openai',
     ...(baseInstructions ? { baseInstructions } : {}),
     ...(toolDefinitions !== undefined ? { toolDefinitions } : {}),
+    ...(stringValue(asRecord(payload.context_window)?.window_id)
+      ? { contextWindowId: stringValue(asRecord(payload.context_window)?.window_id) } : {}),
   };
 }
 
@@ -185,6 +190,7 @@ function extractCodexTurn(
   let prompt: string | undefined;
   const promptParts: string[] = [];
   const inputMessages: JsonValue[] = [];
+  const initialLegacyPrompts = new Set<string>();
   const stepEnvelopes: StepEnvelope[] = [];
   const unmatchedTokenUsages: CodexTranscriptUsage[] = [];
   const toolSteps = new Map<string, StepEnvelope>();
@@ -194,6 +200,13 @@ function extractCodexTurn(
   let lastUsage: CodexTranscriptUsage | undefined;
   let lastActivityAtMs = opts.nextStepStartedAtMs ?? 0;
   let lastCumulativeTokenTotal = opts.lastCumulativeTokenTotal;
+  const compressions: CodexTranscriptCompression[] = [];
+  let contextResetId: string | undefined;
+  let contextReplacement: CodexContextReplacement | undefined;
+  let additionalInputMessages: JsonValue[] = [];
+  let compactedPayload: Record<string, unknown> | null = null;
+  let contextTokensAfter: number | undefined;
+  let contextWindowSize: number | undefined;
 
   const beginStep = (timestamp: number, source: CodexTranscriptSourceRecord): StepEnvelope => {
     if (!currentStep) {
@@ -207,6 +220,9 @@ function extractCodexTurn(
           completedAtMs: timestamp,
           reasoning: [],
           tools: [],
+          ...(contextResetId ? { contextResetId } : {}),
+          ...(contextReplacement ? { contextReplacement } : {}),
+          ...(additionalInputMessages.length ? { additionalInputMessages } : {}),
         },
         sourceRange: {
           startOffset: source.startOffset,
@@ -215,6 +231,9 @@ function extractCodexTurn(
         llmClosed: false,
         followedByAnotherWave: false,
       };
+      contextResetId = undefined;
+      contextReplacement = undefined;
+      additionalInputMessages = [];
     }
     return currentStep;
   };
@@ -240,6 +259,15 @@ function extractCodexTurn(
   // TypeScript cannot infer mutations made by beginStep/flushCurrentStep through
   // their closures, so read the mutable step through an explicitly typed getter.
   const activeStep = (): StepEnvelope | null => currentStep;
+  const isAdditionalInput = (): boolean => Boolean(
+    contextResetId || activeStep() || stepEnvelopes.length > 0 || opts.nextStepStartedAtMs !== undefined,
+  );
+  const appendInputMessage = (message: JsonValue): void => {
+    // A message is either part of the initial request or input to a later
+    // wave. Putting it in both leaks future input into earlier requests and
+    // re-appends it when resuming from a compacted baseline.
+    (isAdditionalInput() ? additionalInputMessages : inputMessages).push(message);
+  };
   const appendPrompt = (value: string | undefined): void => {
     if (!value || promptParts.includes(value)) return;
     promptParts.push(value);
@@ -279,6 +307,19 @@ function extractCodexTurn(
 
     if (currentTurnId !== expectedTurnId) continue;
 
+    if (record.type === 'compacted') {
+      // This durable rewrite may contain an encrypted compaction item. Preserve
+      // its identity without appending the old tools to the replacement context.
+      flushCurrentStep();
+      compactedPayload = payload;
+      contextResetId = stringValue(payload.window_id) ?? `compacted:${source.startOffset}`;
+      contextReplacement = codexContextReplacement(payload, contextResetId, transcriptInputMessage);
+      additionalInputMessages = [];
+      contextTokensAfter = undefined;
+      markActivity(timestamp);
+      continue;
+    }
+
     if (record.type === 'token_usage_record') {
       const turnId = stringValue(payload.turn_id);
       const responseId = stringValue(payload.response_id);
@@ -291,8 +332,32 @@ function extractCodexTurn(
     }
 
     if (record.type === 'event_msg') {
+      const item = asRecord(payload.item);
+      if (payload.type === 'item_completed' && item?.type === 'ContextCompaction'
+        && stringValue(payload.turn_id) === expectedTurnId) {
+        const id = stringValue(item.id);
+        if (id) {
+          const usage = asRecord(asRecord(compactedPayload?.latest_token_usage_record)?.usage);
+          const completedAtMs = numberValue(payload.completed_at_ms) ?? timestamp;
+          const started = numberValue(payload.started_at_ms);
+          compressions.push({ id, completedAtMs,
+            ...(contextReplacement ? { replacement: contextReplacement } : {}),
+            ...(started !== undefined && started >= 0 && started < completedAtMs ? { startedAtMs: started } : {}),
+            ...(contextTokensAfter !== undefined ? { contextTokensAfter } : {}),
+            ...(contextWindowSize !== undefined ? { windowSize: contextWindowSize } : {}),
+            ...(numberValue(usage?.input_tokens) !== undefined ? { inputTokens: numberValue(usage?.input_tokens) } : {}),
+            ...(numberValue(usage?.output_tokens) !== undefined ? { outputTokens: numberValue(usage?.output_tokens) } : {}),
+          });
+          if (contextReplacement) contextReplacement.operationId = id;
+          markActivity(completedAtMs);
+        }
+        compactedPayload = null;
+        continue;
+      }
       if (payload.type === 'user_message') {
-        appendPrompt(stringValue(payload.message));
+        const message = stringValue(payload.message);
+        appendPrompt(message);
+        if (message && !isAdditionalInput()) initialLegacyPrompts.add(message);
         sawSubmittedUserMessage = true;
         markActivity(timestamp);
         continue;
@@ -345,6 +410,14 @@ function extractCodexTurn(
       if (payload.type === 'token_count') {
         const usage = extractLastTokenUsage(payload.info);
         if (!usage) continue;
+        const info = asRecord(payload.info);
+        if (compactedPayload && usage.inputTokens === 0 && usage.outputTokens === 0) {
+          // recompute_token_usage publishes a context estimate after installation,
+          // with the billing cumulative total unchanged. It is not an LLM wave.
+          contextTokensAfter = usage.totalTokens;
+          contextWindowSize = numberValue(info?.model_context_window);
+          continue;
+        }
         const cumulativeTokenTotal = extractCumulativeTokenTotal(payload.info);
         const repeatedSnapshot = cumulativeTokenTotal !== undefined
           && lastCumulativeTokenTotal !== undefined
@@ -399,6 +472,13 @@ function extractCodexTurn(
 
     if (record.type !== 'response_item') continue;
     const itemType = stringValue(payload.type);
+    if (itemType === 'additional_tools') {
+      const message = codexAdditionalToolsMessage(payload);
+      if (!message) continue;
+      appendInputMessage(message);
+      markActivity(timestamp);
+      continue;
+    }
     if (itemType === 'agent_message' && meta?.threadSource === 'subagent') {
       const recipient = stringValue(payload.recipient);
       const communicationMeta = asRecord(payload.internal_chat_message_metadata_passthrough);
@@ -413,7 +493,7 @@ function extractCodexTurn(
       ) {
         const message = transcriptInputMessage('user', payload.content);
         if (message) {
-          inputMessages.push(message);
+          appendInputMessage(message);
           appendPrompt(extractMessageText(payload.content));
           sawSubmittedUserMessage = true;
           markActivity(timestamp);
@@ -436,6 +516,8 @@ function extractCodexTurn(
         if (message && step.reasoning[step.reasoning.length - 1] !== message) {
           step.reasoning.push(message);
         }
+        const nativeMessage = transcriptInputMessage('assistant', payload.content);
+        if (nativeMessage) (step.nativeAssistantMessages ??= []).push(nativeMessage);
       } else if (role) {
         // Input entry: user / non-assistant roles → gen_ai.input.messages
         const message = transcriptInputMessage(
@@ -446,7 +528,7 @@ function extractCodexTurn(
           source.startOffset,
         );
         if (message) {
-          inputMessages.push(message);
+          appendInputMessage(message);
           if (role === 'user') {
             appendPrompt(extractMessageText(payload.content));
           }
@@ -514,6 +596,7 @@ function extractCodexTurn(
     if (!tool) continue;
     tool.completedAtMs = timestamp;
     tool.output = toolOutput.output;
+    if (typeof payload.output === 'string') tool.nativeOutput = payload.output;
     step.completedAtMs = Math.max(step.completedAtMs, timestamp);
     touchStep(envelope, source);
     markActivity(timestamp);
@@ -524,7 +607,7 @@ function extractCodexTurn(
   const finalActiveStep = activeStep();
   if (finalActiveStep && stepToolsComplete(finalActiveStep.step)) flushCurrentStep();
   if (!status && !opts.requireTerminal) {
-    if (stepEnvelopes.length === 0 && !prompt) return null;
+    if (stepEnvelopes.length === 0 && !prompt && compressions.length === 0) return null;
     terminalAtMs = lastActivityAtMs || startedAtMs || Date.now();
     status = 'completed';
   } else if (status === 'completed') {
@@ -568,12 +651,16 @@ function extractCodexTurn(
     terminalAtMs,
     ...(prompt ? { prompt } : {}),
     promptReady,
-    inputMessages,
+    inputMessages: inputMessages.length || initialLegacyPrompts.size === 0
+      ? inputMessages
+      : [{ role: 'user', parts: [{ type: 'text', content: [...initialLegacyPrompts].join('\n') }] }],
     ...(cwd ? { cwd } : {}),
     ...(developerInstructions ? { developerInstructions } : {}),
     ...(meta?.baseInstructions ? { baseInstructions: meta.baseInstructions } : {}),
     ...(meta?.toolDefinitions !== undefined ? { toolDefinitions: meta.toolDefinitions } : {}),
+    ...(meta?.contextWindowId ? { contextWindowId: meta.contextWindowId } : {}),
     steps,
+    ...(compressions.length > 0 ? { compressions } : {}),
     unmatchedTokenUsages,
   };
   const committedEnvelopes = sawTerminal
@@ -646,6 +733,7 @@ function transcriptToolCall(
     callId,
     name,
     input: normalizeToolInput(name, parseMaybeJson(rawInput)),
+    nativeInput: toJsonValue(parseMaybeJson(rawInput)),
     startedAtMs: timestamp,
   };
 }

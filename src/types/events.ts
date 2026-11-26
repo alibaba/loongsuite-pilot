@@ -22,6 +22,8 @@ export type AgentEventName =
   | 'gen_ai.tool.result'
   | 'gen_ai.agent.invoke'
   | 'gen_ai.agent.result'
+  | 'gen_ai.context.compress.start'
+  | 'gen_ai.context.compress'
   | 'skill.use'
   | 'tool.approve'
   | 'agent.input'
@@ -98,6 +100,22 @@ export interface AgentActivityEntry {
   'gen_ai.usage.cache_read.input_cost'?: number;
   'gen_ai.usage.cache_creation.input_cost'?: number;
   'gen_ai.usage.total_cost'?: number;
+  'gen_ai.context.window_size'?: number;
+  'gen_ai.context.tokens_used'?: number;
+  'gen_ai.context.window_usage_pct'?: number;
+  'gen_ai.conversation.compacted'?: boolean;
+  'gen_ai.context.tokens_before'?: number;
+  'gen_ai.context.tokens_after'?: number;
+  'gen_ai.context.compression_ratio'?: number;
+  /** POC lifecycle fields pending semantic-convention review. */
+  'gen_ai.context.compress.id'?: string;
+  'gen_ai.context.compress.status'?: 'success' | 'error' | 'cancelled' | 'skipped';
+  /** Elapsed source operation time in seconds. */
+  'gen_ai.context.compress.duration'?: number;
+  'gen_ai.context.compress.start_time_unix_nano'?: string;
+  'gen_ai.context.compress.standalone'?: boolean;
+  'gen_ai.context.counting.method'?: string;
+  'gen_ai.context.counting.scope'?: string;
   'gen_ai.input.messages_hash'?: string;
   'gen_ai.input.messages_delta'?: JsonValue;
   'gen_ai.input.messages'?: JsonValue;

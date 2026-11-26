@@ -33,7 +33,14 @@ export interface DshRequestHeader {
   tools?: unknown[];
 }
 
+interface DshContextVersion {
+  id: string;
+  previousVersion?: string;
+  replacementPending: boolean;
+}
+
 export interface DshEventAggregatorState {
+  compressionStarts: Map<string, { time: number; common: Record<string, unknown> }>;
   /** stepKey → finish reason.kind from `assistant/chunk type=finish`. */
   pendingFinish: Map<string, string>;
   /** Most recent turn number from `turn/start` (used for events that
@@ -70,10 +77,13 @@ export interface DshEventAggregatorState {
   lastRequestInputMessageCount: number;
   /** Once true, omit input.messages instead of presenting a truncated history. */
   inputMessagesOverflowed: boolean;
+  contextVersion?: DshContextVersion;
+  requestContext?: { key: string; messages: JsonValue };
 }
 
 export function newState(): DshEventAggregatorState {
   return {
+    compressionStarts: new Map(),
     pendingFinish: new Map(),
     currentTurn: undefined,
     currentStep: undefined,
@@ -100,7 +110,8 @@ function resetTurnState(state: DshEventAggregatorState): void {
   state.toolNames.clear();
   state.inputMessages = [];
   state.lastRequestInputMessageCount = 0;
-  state.inputMessagesOverflowed = false;
+  state.inputMessagesOverflowed = state.contextVersion !== undefined;
+  state.requestContext = undefined;
 }
 
 function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
@@ -236,7 +247,7 @@ function normalizeAssistantParts(content: unknown): unknown[] {
   });
 }
 
-function normalizeUserParts(content: unknown): unknown[] {
+function normalizeUserParts(content: unknown): Record<string, unknown>[] {
   const arr = asArray(content);
   if (!arr) return [];
   return arr.map((part): Record<string, unknown> => {
@@ -256,6 +267,44 @@ function normalizeToolResultParts(content: unknown): unknown[] {
     if (t === 'text') return { type: 'text', content: asString(p.text) ?? '' };
     return { type: 'text', content: JSON.stringify(p) };
   });
+}
+
+function contextVersion(sessionId: string, compactionId?: string): string {
+  return compactionId ? `${sessionId}:compaction:${compactionId}` : `${sessionId}:initial`;
+}
+
+function contextMessages(value: unknown): JsonValue | undefined {
+  const messages = asArray(value);
+  if (!messages || messages.length > MAX_INPUT_MESSAGES) return undefined;
+  return toJsonValue(messages.flatMap((value) => {
+    const message = asObject(value);
+    const role = asString(message?.role);
+    if (!message || !role) return [];
+    const source = asObject(message.source);
+    const compactionId = asString(source?.compactionId);
+    if (role === 'user' && source?.kind === 'compact-checkpoint' && compactionId) {
+      const content = normalizeUserParts(message.content)
+        .flatMap(part => typeof part.content === 'string' ? [part.content] : []).join('');
+      return [{ role, parts: [{ type: 'compaction', id: compactionId, content }] }];
+    }
+    if (role === 'assistant') return [{ role, parts: normalizeAssistantParts(message.content) }];
+    if (role === 'tool') {
+      const callId = asString(message.toolCallId) ?? asString(source?.callId);
+      const content = normalizeToolResultParts(message.content);
+      return [{ role, parts: callId
+        ? [{ type: 'tool_call_response', id: callId, response: content }]
+        : content }];
+    }
+    return [{ role, parts: normalizeUserParts(message.content) }];
+  }));
+}
+
+function contextFields(sessionId: string, context: DshContextVersion, available: boolean) {
+  return {
+    'gen_ai.context.version': contextVersion(sessionId, context.id),
+    'gen_ai.context.compress.id': context.id,
+    'gen_ai.context.content.availability': available ? 'plaintext' : 'unavailable',
+  };
 }
 
 const FINISH_REASON_MAP: Record<string, string> = {
@@ -350,6 +399,9 @@ function emitRequest(
 ): AgentActivityEntry | null {
   if (state.emittedRequest.has(key) || state.emittedRequest.size >= MAX_TURN_CORRELATIONS) return null;
   state.emittedRequest.add(key);
+  const context = state.contextVersion;
+  const compactedMessages = state.requestContext?.key === key ? state.requestContext.messages : undefined;
+  if (state.requestContext?.key === key) state.requestContext = undefined;
   const inputSnapshot = state.inputMessages.slice();
   const inputDelta = inputSnapshot.slice(state.lastRequestInputMessageCount);
   const header = state.currentTurnHeader ?? state.lastKnownHeader;
@@ -363,12 +415,21 @@ function emitRequest(
     'gen_ai.request.model': header?.model,
     'gen_ai.system_instructions': normalizeSystemInstructions(header?.system),
     'gen_ai.tool.definitions': tools && tools.length > 0 ? toJsonValue(tools) : undefined,
-    'gen_ai.input.messages': !state.inputMessagesOverflowed && inputSnapshot.length > 0
-      ? toJsonValue(inputSnapshot) : undefined,
-    'gen_ai.input.messages_delta': !state.inputMessagesOverflowed && inputSnapshot.length > 0
+    'gen_ai.input.messages': context ? compactedMessages
+      : !state.inputMessagesOverflowed && inputSnapshot.length > 0 ? toJsonValue(inputSnapshot) : undefined,
+    'gen_ai.input.messages_delta': !context && !state.inputMessagesOverflowed && inputSnapshot.length > 0
       ? toJsonValue(inputDelta) : undefined,
+    ...(context ? {
+      ...contextFields(common['gen_ai.session.id'], context, compactedMessages !== undefined),
+      'gen_ai.conversation.compacted': true,
+      ...(context.replacementPending ? {
+        'gen_ai.context.previous_version': context.previousVersion,
+        'gen_ai.context.replacement.boundary': 'replace',
+      } : {}),
+    } : { 'gen_ai.context.version': contextVersion(common['gen_ai.session.id']) }),
   });
   state.lastRequestInputMessageCount = inputSnapshot.length;
+  if (context) context.replacementPending = false;
   return entry;
 }
 
@@ -402,9 +463,48 @@ export function transformDshRecord(
 ): AgentActivityEntry | null {
   const context = recordContext(record, agentType, state);
   if (!context) return null;
-  const { type, sid, time, data, turn, step, common } = context;
+  const { type, sid, time, data, turn, step, key, common } = context;
 
   switch (type) {
+    case 'compaction/start': {
+      const id = asString(data.compactionId);
+      if (!id) return null;
+      const standalone = data.turn === null;
+      const fields = { ...common, 'gen_ai.context.compress.id': id,
+        'gen_ai.context.compress.standalone': standalone,
+        ...(standalone ? { 'gen_ai.turn.id': `${sid}:compression:${id}`,
+          trace_id: crypto.createHash('sha256').update(`${sid}:compression:${id}`).digest('hex').slice(0, 32),
+          'gen_ai.step.id': undefined } : {}) };
+      setBounded(state.compressionStarts, id, { time, common: fields });
+      return buildAgentActivityEntry({ ...fields, 'event.id': `${sid}:${id}:start`,
+        'event.name': 'gen_ai.context.compress.start' });
+    }
+    case 'compaction/end': {
+      const id = asString(data.compactionId);
+      if (!id) return null;
+      const start = state.compressionStarts.get(id);
+      state.compressionStarts.delete(id);
+      const installed = state.contextVersion?.id === id && !data.error ? state.contextVersion : undefined;
+      // turn:null must never borrow the previous numbered turn on recovery.
+      const standalone = data.turn === null;
+      return buildAgentActivityEntry({ ...(start?.common ?? common), time_unix_nano: msToNano(time),
+        ...(standalone ? { 'gen_ai.turn.id': `${sid}:compression:${id}`,
+          trace_id: crypto.createHash('sha256').update(`${sid}:compression:${id}`).digest('hex').slice(0, 32),
+          'gen_ai.step.id': undefined } : {}),
+        'event.id': `${sid}:${id}:end`, 'event.name': 'gen_ai.context.compress',
+        'gen_ai.context.compress.id': id, 'gen_ai.context.compress.standalone': standalone,
+        'gen_ai.context.compress.status': data.error ? 'error' : 'success',
+        ...(installed ? {
+          ...contextFields(sid, installed, true),
+          'gen_ai.context.previous_version': installed.previousVersion,
+          'gen_ai.context.replacement.boundary': 'replace',
+        } : {}),
+        ...(start && time >= start.time ? {
+          'gen_ai.context.compress.start_time_unix_nano': msToNano(start.time),
+          'gen_ai.context.compress.duration': (time - start.time) / 1000,
+        } : {}),
+      });
+    }
     case 'session/created':
     case 'permission/preset':
     case 'sandbox/mode':
@@ -439,6 +539,17 @@ export function transformDshRecord(
       if (sid && turn !== undefined && step !== undefined) {
         setBounded(state.requestStartTimes, stepKey(sid, turn, step), time);
       }
+      return null;
+    }
+
+    case 'loongsuite-pilot/request-context': {
+      const id = asString(data.compactionId);
+      if (!sid || !key || !id || state.emittedRequest.has(key)) return null;
+      if (state.contextVersion?.id !== id) {
+        state.contextVersion = { id, replacementPending: false };
+      }
+      const messages = contextMessages(data.messages);
+      state.requestContext = messages === undefined ? undefined : { key, messages };
       return null;
     }
 
@@ -482,10 +593,27 @@ export function transformDshRecord(
     }
 
     case 'user/message': {
+      const source = asObject(data.source);
+      const sourceKind = asString(source?.kind);
+      const id = sourceKind === 'compact-checkpoint' ? asString(source?.compactionId) : undefined;
+      if (id && state.contextVersion?.id !== id) {
+        state.contextVersion = {
+          id,
+          previousVersion: contextVersion(sid, state.contextVersion?.id),
+          replacementPending: true,
+        };
+      }
+      if (id || asObject(record.surfaceOp)?.op === 'replace') {
+        // The current-turn append accumulator cannot reconstruct arbitrary
+        // retained ranges after a native rewrite. Omit stale full context
+        // until a new turn instead of adding the summary to old messages.
+        state.inputMessages = [];
+        state.lastRequestInputMessageCount = 0;
+        state.inputMessagesOverflowed = true;
+      }
       const content = data.content;
       const msgId = asString((asObject(data) ?? {}).id);
       const userParts = normalizeUserParts(content);
-      const sourceKind = asString(asObject(data.source)?.kind);
 
       // Every user-role message is part of the model-visible conversation,
       // including context injected by plugins. Only a native human prompt,
