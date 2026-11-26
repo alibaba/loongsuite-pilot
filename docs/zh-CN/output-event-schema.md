@@ -149,6 +149,8 @@ Codex 子线程始终保留自身 session/turn/step；同 Trace 可以包含多�
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | 缓存读取 token 成本，单位 USD。 |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | 缓存写入 token 成本，单位 USD。 |
 | `gen_ai.usage.total_cost` | double | Recommended | 本次事件总成本，单位 USD。 |
+| `gen_ai.usage.credits.amount` | double | 可获取时 | Qoder 桌面端一轮实际扣减的 Credits，使用该产品的积分单位。 |
+| `gen_ai.usage.credits.billable` | boolean | 可获取时 | 是否计入该轮的积分扣减。 |
 | `gen_ai.input.messages` | json array | 可获取时 | 发送给模型的完整消息，可能包含敏感内容。开启多模态后，图片以 `parts` 中的 `uri` 出现。 |
 | `gen_ai.input.messages_delta` | json array | Recommended | 相比上一条 `llm.request` 新增的输入消息片段。 |
 | `gen_ai.input.messages_hash` | string | Recommended | 完整输入上下文 hash，用于去重和缓存分析。 |
@@ -201,6 +203,15 @@ IDE 委派 transcript 单行及所需工具行合计各有 16 MiB 上限；超�
 子请求的 SQLite 消息元数据通过同一只读快照分页读取，单请求最多 4096 行、归一化元数据最多 4 MiB，单条及全部工具元数据各最多 16 MiB。超过上限时，已确认的委派仍上报 invoke 和已实际交付的 result；子运行保持待定，日志记录原因及相关 ID，并以较低频率重试。源数据恢复到上限内后可继续采集。
 
 工作目录自动采集覆盖 Antigravity（App、新 IDE 和 CLI）、Claude Code、Codex、Cursor / Cursor CLI、Kiro CLI、MiMo Code、OpenClaw、OpenCode、Pi Coding Agent、Qoder 系列、Qoder Work / Qoder Work CN、Qwen Code CLI、Qwen Work CN 和 WorkBuddy。
+
+## Qoder 桌面端轮次积分
+
+Qoder 和 Qoder CN 桌面端的轮次账单可用时，Pilot 将实扣 Credits 记录在
+该轮的 `other` 开始事件和对应的 ENTRY Span。一次用户轮次可能含多次模型
+调用，只有 ENTRY 记录整轮积分。金额保留小数和明确的零，正数实扣记录
+`gen_ai.usage.credits.billable=true`，零金额的计费状态未知时省略。
+Pilot 允许账单在模型回复后短暂落盘，这会延后该轮遥测的发送。期限内没有
+匹配账单时照常上报 Trace，省略积分字段。按各自产品的计费单位汇总积分。
 
 ## System Instructions（系统提示词）
 

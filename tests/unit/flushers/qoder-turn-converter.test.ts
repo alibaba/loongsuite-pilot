@@ -52,6 +52,18 @@ async function flush(input: AgentActivityEntry[]) {
 }
 
 describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flusher and SDK', agentType => {
+  it('exports the turn debit on ENTRY and keeps it off the child spans', async () => {
+    const input = records(agentType);
+    Object.assign(input[0]!, { 'gen_ai.turn.start': true, 'gen_ai.usage.credits.amount': 0.31,
+      'gen_ai.usage.credits.billable': true });
+    const spans = await flush(input);
+    const billed = spans.filter(span => span.attributes['gen_ai.usage.credits.amount'] !== undefined
+      || span.attributes['gen_ai.usage.credits.billable'] !== undefined);
+    expect(billed.map(span => span.attributes['gen_ai.span.kind'])).toEqual(['ENTRY']);
+    expect(billed[0]!.attributes['gen_ai.usage.credits.amount']).toBe(0.31);
+    expect(billed[0]!.attributes['gen_ai.usage.credits.billable']).toBe(true);
+  });
+
   it('exports a complete root without changing source trace, messages, tools or per-LLM tokens', async () => {
     const input = records(agentType);
     const before = structuredClone(input);
@@ -111,6 +123,16 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
 });
 
 describe('Qoder root converter compatibility', () => {
+  it('preserves a known ENTRY billing status when the amount is absent', async () => {
+    const input = records('qoder-cn');
+    Object.assign(input[0]!, { 'gen_ai.turn.start': true, 'gen_ai.usage.credits.billable': false });
+    const spans = await flush(input);
+    const flagged = spans.filter(span => span.attributes['gen_ai.usage.credits.billable'] !== undefined);
+    expect(flagged.map(span => span.attributes['gen_ai.span.kind'])).toEqual(['ENTRY']);
+    expect(flagged[0]!.attributes['gen_ai.usage.credits.billable']).toBe(false);
+    expect(spans.every(span => span.attributes['gen_ai.usage.credits.amount'] === undefined)).toBe(true);
+  });
+
   it('preserves response model evidence across fragments and leaves unreported models absent', async () => {
     const events = records('qoder-app');
     const responses = events.filter(row => row['event.name'] === 'llm.response');

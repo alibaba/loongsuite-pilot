@@ -153,6 +153,8 @@ Required levels follow OpenTelemetry wording:
 | `gen_ai.usage.cache_read.input_cost` | double | Recommended | Cache-read token cost in USD. |
 | `gen_ai.usage.cache_creation.input_cost` | double | Recommended | Cache-creation token cost in USD. |
 | `gen_ai.usage.total_cost` | double | Recommended | Total event cost in USD. |
+| `gen_ai.usage.credits.amount` | double | When available | Actual Credits deducted for one Qoder Desktop turn, in the charging product's units. |
+| `gen_ai.usage.credits.billable` | boolean | When available | Whether the reported amount counts toward the turn's Credits usage. |
 | `gen_ai.input.messages` | json array | When available | Full messages sent to the model. May contain sensitive content. With multimodal enabled, images appear as `uri` parts instead of base64. |
 | `gen_ai.input.messages_delta` | json array | Recommended | Newly added input message fragments compared with the previous `llm.request`. |
 | `gen_ai.input.messages_hash` | string | Recommended | Hash of the full input context for deduplication and cache analysis. |
@@ -222,6 +224,17 @@ so they pass through configured masking rules before event/trace export; disabli
 message content alone does not remove this metadata. All other agent-scoped
 extensions retain their existing JSONL/SLS filtering behavior. This field does
 not automatically create an SLS index or a dedicated ARMS UI column.
+
+## Qoder Desktop turn Credits
+
+When Qoder or Qoder CN Desktop makes its turn billing record available, Pilot
+reports the actual debit on the turn's opening `other` event and the corresponding
+ENTRY span. One turn can contain multiple model calls. The full debit appears on
+ENTRY once. Fractional amounts and explicit zero are preserved. A positive debit
+sets `gen_ai.usage.credits.billable=true`. A zero debit with unknown billing status
+leaves that field unset. Pilot allows a short window for billing to settle after
+the model reply. If a matching record remains unavailable, the trace is exported
+with the Credits fields absent. Aggregate Credits within the charging product.
 
 ## System Instructions
 

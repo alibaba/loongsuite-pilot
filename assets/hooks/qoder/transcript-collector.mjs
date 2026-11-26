@@ -33,6 +33,7 @@ const MAX_DEFERRED_SOURCES = 1024;
 const LEGACY_LOCK_GRACE_MS = 1000;
 const LEGACY_LOCK_AGE_MS = 60_000;
 const MAX_TRAILING_CONTROL_BYTES = 64 * 1024;
+const TURN_CREDITS_SETTLE_MS = 10_000;
 const TERMINAL_CONTEXT_EVENTS = new Set(['Stop', 'SessionEnd']);
 const TERMINAL_CONTEXT_METADATA = new Set(['workspace-directories', 'runtime-config', 'active-leaf']);
 const DEFERRED_CONTENT_ERRORS = new Set([
@@ -106,7 +107,7 @@ export class QoderTranscriptCollector {
   constructor({ dataDir, agentId, scanBytes = QODER_SCAN_BYTES,
     maxTurnBytes = QODER_MAX_TURN_BYTES, cacheBytes = QODER_CACHE_BYTES,
     stableMs = 250, settleMs = 5000, now = Date.now, warn = () => {}, runtime = () => null,
-    resolveInitialPrompt, resolveTraceContext } = {}) {
+    resolveInitialPrompt, resolveTraceContext, resolveTurnCredits } = {}) {
     this.dataDir = dataDir;
     this.agentId = agentId;
     this.root = qoderWakeupRoot(dataDir, agentId);
@@ -120,6 +121,7 @@ export class QoderTranscriptCollector {
     this.runtime = runtime;
     this.resolveInitialPrompt = resolveInitialPrompt;
     this.resolveTraceContext = resolveTraceContext;
+    this.resolveTurnCredits = resolveTurnCredits;
     this.cache = new Map();
     this.cacheSize = 0;
     this.warned = new Map();
@@ -1045,7 +1047,24 @@ export class QoderTranscriptCollector {
     }
   }
 
-  async build(source, contexts, checkpoint, value, endOffset, terminalSource, earlyRecords) {
+  async turnCreditsFor(source, contexts, value) {
+    if (!this.resolveTurnCredits || source.subagentId) return undefined;
+    const prompt = value.rows.find(isRealUserPrompt);
+    if (prompt?.businessIdentity?.product !== 'app' || prompt.isDelegatedTask
+      || prompt.sessionId !== source.sessionId || typeof prompt.requestSetId !== 'string'
+      || !prompt.requestSetId || prompt.requestSetId.length > 512) return undefined;
+    const amount = await this.resolveTurnCredits(source.sessionId, prompt.requestSetId);
+    if (amount !== null) return amount;
+    // Charge lookup can finish several seconds after the native reply. Bound
+    // deferral by the reply or its matching terminal notice across restarts.
+    const reply = value.rows.findLast(row => row.type === 'assistant' && typeof row.timestamp === 'string');
+    const terminal = contexts.findLast(context => TERMINAL_CONTEXT_EVENTS.has(context.event)
+      && context.requestSetId === prompt.requestSetId);
+    const age = this.now() - Math.max(Date.parse(reply?.timestamp ?? '') || 0, terminal?.observedAt ?? 0);
+    return age >= 0 && age < TURN_CREDITS_SETTLE_MS ? null : undefined;
+  }
+
+  async build(source, contexts, checkpoint, value, endOffset, terminalSource, earlyRecords, turnCredits) {
     if (this.stopped) throw new Error('stopped');
     if (!checkpoint.hasUser || !value.rows.length) return [];
     let context = this.contextFor(source, contexts, checkpoint, endOffset);
@@ -1110,6 +1129,13 @@ export class QoderTranscriptCollector {
     if (records.length) {
       records[0]['gen_ai.turn.start'] = true;
       if (!records.some(record => record['gen_ai.turn.end'] === true)) records.at(-1)['gen_ai.turn.end'] = true;
+    }
+    const entry = records[0];
+    if (entry?.['event.name'] === 'other' && typeof turnCredits === 'number') {
+      entry['gen_ai.usage.credits.amount'] = turnCredits;
+      // A positive actual debit counts against quota. A zero debit alone
+      // does not establish the billing status (for example, after discounts).
+      if (turnCredits > 0) entry['gen_ai.usage.credits.billable'] = true;
     }
     return this.links.decorate(source, checkpoint, value.rows, records, true);
   }
@@ -1176,6 +1202,7 @@ export class QoderTranscriptCollector {
     delete checkpoint.parentPendingCall;
     delete checkpoint.parentPendingAgent;
     delete checkpoint.parentPendingVersion;
+    delete checkpoint.pendingCreditClose;
   }
 
   quarantine(source, checkpoint, line, reason) {
@@ -1241,7 +1268,8 @@ export class QoderTranscriptCollector {
     const stable = this.now() - checkpoint.stableAt >= this.stableMs;
     const ready = stable && checkpoint.terminal
       && this.now() - (checkpoint.terminalAt ?? checkpoint.stableAt) >= this.settleMs;
-    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready && !checkpoint.sealedBoundary) {
+    if (checkpoint.offset === stat.size && checkpoint.activeStart !== null && !ready
+      && !checkpoint.sealedBoundary && !checkpoint.pendingCreditClose) {
       // The Hook snapshot can arrive after the native call was scanned. Retry
       // its pending audit even when the transcript itself has not grown.
       if (this.links.hasPendingInvoke(source, checkpoint.turnId)) {
@@ -1253,6 +1281,24 @@ export class QoderTranscriptCollector {
     let value = await this.rowsFor(source, checkpoint);
     if (!value) return records;
     let turns = 0;
+    const finishTurn = async (terminalSource, endOffset = checkpoint.offset) => {
+      const credits = await this.turnCreditsFor(source, contexts, value);
+      if (credits === null) {
+        // Keep the active range and notices replayable. Park only this source;
+        // other sessions can still complete during this collector cycle.
+        checkpoint.pendingCreditClose = terminalSource;
+        this.emitInvokes(source, contexts, checkpoint, value, records, endOffset);
+        this.remember(source.key, value);
+        return false;
+      }
+      records.push(...await this.build(source, contexts, checkpoint, value, endOffset, terminalSource, records, credits));
+      checkpoint.committedOffset = endOffset;
+      this.clearActive(checkpoint);
+      value = { start: null, end: endOffset, rows: [], bytes: 0 };
+      turns++;
+      return true;
+    };
+    if (checkpoint.pendingCreditClose && !await finishTurn(checkpoint.pendingCreditClose)) return records;
     for await (const line of this.lines(source.transcriptPath, checkpoint.offset, stat.size, { allowFinal: stable, checkpoint })) {
       const row = line.row;
       if (line.quarantine) this.quarantine(source, checkpoint, line, line.quarantine);
@@ -1261,13 +1307,7 @@ export class QoderTranscriptCollector {
       if (eventOf(row) === 'Stop') checkpoint.nativeStopOffset = line.end;
       // Hook progress is a completion notification of a command, often late
       // (including third-party commands). Only a real user row owns a new Turn.
-      if (prompt && checkpoint.hasUser) {
-        records.push(...await this.build(source, contexts, checkpoint, value, line.start, 'next-prompt', records));
-        checkpoint.committedOffset = line.start;
-        this.clearActive(checkpoint);
-        value = { start: null, end: line.start, rows: [], bytes: 0 };
-        turns++;
-      }
+      if (prompt && checkpoint.hasUser && !await finishTurn('next-prompt', line.start)) return records;
       if (prompt && checkpoint.activeStart === null) {
         checkpoint.activeStart = line.start;
         checkpoint.contextFloor = contextFloor;
@@ -1297,11 +1337,7 @@ export class QoderTranscriptCollector {
       checkpoint.offset = line.end;
       value.end = line.end;
       if ((row?.type === 'last-prompt' || eventOf(row) === 'SessionEnd') && checkpoint.hasUser) {
-        records.push(...await this.build(source, contexts, checkpoint, value, line.end, row.type === 'last-prompt' ? 'last-prompt' : 'session-end', records));
-        checkpoint.committedOffset = line.end;
-        this.clearActive(checkpoint);
-        value = { start: null, end: line.end, rows: [], bytes: 0 };
-        turns++;
+        if (!await finishTurn(row.type === 'last-prompt' ? 'last-prompt' : 'session-end')) return records;
       }
       if (turns >= MAX_TURNS_PER_CYCLE || records.length >= 4096 || this.stopped) break;
     }
@@ -1319,10 +1355,7 @@ export class QoderTranscriptCollector {
       checkpoint.terminalAt = this.now();
     }
     if (checkpoint.activeStart !== null && checkpoint.sealedBoundary && checkpoint.offset === stat.size) {
-      records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'next-prompt-backfill', records));
-      checkpoint.committedOffset = checkpoint.offset;
-      this.clearActive(checkpoint);
-      value = { start: null, end: checkpoint.offset, rows: [], bytes: 0 };
+      if (!await finishTurn('next-prompt-backfill')) return records;
     }
     if (checkpoint.activeStart !== null && checkpoint.terminal && checkpoint.offset === stat.size) {
       if (checkpoint.stableSize !== stat.size || checkpoint.stableMtime !== stat.mtimeMs) {
@@ -1331,10 +1364,7 @@ export class QoderTranscriptCollector {
         checkpoint.stableAt = this.now();
       } else if (this.now() - checkpoint.stableAt >= this.stableMs
         && this.now() - (checkpoint.terminalAt ?? checkpoint.stableAt) >= this.settleMs) {
-        records.push(...await this.build(source, contexts, checkpoint, value, checkpoint.offset, 'stable-terminal-eof', records));
-        checkpoint.committedOffset = checkpoint.offset;
-        this.clearActive(checkpoint);
-        value = { start: null, end: checkpoint.offset, rows: [], bytes: 0 };
+        if (!await finishTurn('stable-terminal-eof')) return records;
       }
     }
     if (checkpoint.activeStart !== null) this.emitInvokes(source, contexts, checkpoint, value, records, checkpoint.offset);
