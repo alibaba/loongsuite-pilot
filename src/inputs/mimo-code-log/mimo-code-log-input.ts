@@ -1,3 +1,4 @@
+import { INVOCATION_MESSAGE_ID_FIELD } from "../../../assets/hooks/shared/invocation-attributes.mjs";
 import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js';
@@ -29,6 +30,9 @@ export class MimoCodeLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.MimoCode, 'mimo-code');
+    const { 'pilot.invocation.native_message_id': messageId, ...body } = record;
+    const entry = await transformHookRecord(body, ClientType.MimoCode, 'mimo-code');
+    if (entry && typeof messageId === 'string') Object.assign(entry, { [INVOCATION_MESSAGE_ID_FIELD]: messageId });
+    return entry;
   }
 }

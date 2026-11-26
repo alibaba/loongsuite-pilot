@@ -21,7 +21,7 @@ const FIXTURE_PATH = path.resolve(
   './mimo-code/fixtures/plugin_events.jsonl',
 );
 
-async function replayPluginFixture() {
+async function loadPluginCapture() {
   const capture = [];
   vi.resetModules();
   vi.spyOn(fs, 'appendFileSync').mockImplementation((_target, data) => {
@@ -30,6 +30,11 @@ async function replayPluginFixture() {
   vi.spyOn(fs, 'mkdirSync').mockImplementation(() => undefined);
   const plugin = (await import(PLUGIN_PATH)).default;
   const hooks = await plugin.server({ directory: os.tmpdir() }, {});
+  return { capture, hooks };
+}
+
+async function replayPluginFixture() {
+  const { capture, hooks } = await loadPluginCapture();
   const events = fs.readFileSync(FIXTURE_PATH, 'utf8')
     .split('\n')
     .filter(line => line.trim())
@@ -118,6 +123,22 @@ describe('opencode plugin session turnSeq persistence', () => {
   afterEach(() => {
     delete process.env.LOONGSUITE_PILOT_SPAN_ATTRIBUTES;
     vi.restoreAllMocks();
+  });
+
+  it('captures the native user ID, but does not bind overlapping V1 turns in one session', async () => {
+    const { capture, hooks } = await loadPluginCapture();
+    const sessionID = 'ses-invocation';
+    const begin = id => hooks['chat.message'](
+      { sessionID, messageID: 'untrusted-caller-value' },
+      { message: { id }, parts: [{ type: 'text', text: 'Identical input' }] },
+    );
+    await begin('msg_first');
+    expect(capture.at(-1)['pilot.opencode.user_message_id']).toBe('msg_first');
+    await begin('msg_overlapping');
+    expect(capture.at(-1)['pilot.opencode.user_message_id']).toBeUndefined();
+    await hooks.event({ event: { type: 'session.idle', properties: { sessionID } } });
+    await begin('msg_next');
+    expect(capture.at(-1)['pilot.opencode.user_message_id']).toBe('msg_next');
   });
 
   it('restores turnSeq after session.idle clears the session', () => {
