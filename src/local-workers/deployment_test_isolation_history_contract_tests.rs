@@ -9,6 +9,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 #[path = "../../xtask/src/test_environment.rs"]
 mod actual_baseline_environment;
+#[path = "../../tests/fixtures/legacy-migrated-hooks/cursor_resources.rs"]
+mod legacy_cursor_test_assets;
 
 const CHILD_ROOT: &str = "PILOT_TEST_ISOLATION_CHILD_ROOT";
 const EXPECTED_HOME: &str = "PILOT_TEST_ISOLATION_EXPECTED_HOME";
@@ -224,9 +226,10 @@ async fn actual_default_home_deployment_fixture() {
     .unwrap();
     fs::create_dir_all(home.join(".cursor")).unwrap();
     let data = root.join("deployment-data");
+    let pilot = legacy_cursor_test_assets::stage(root);
     let manager = DeploymentManager::new(DeploymentManagerOptions {
         data_dir: data.to_string_lossy().into_owned(),
-        pilot_dir: env!("CARGO_MANIFEST_DIR").into(),
+        pilot_dir: pilot.to_string_lossy().into_owned(),
         builtin_agents_dir: Some(definitions.to_string_lossy().into_owned()),
         installed_by: None,
     });
