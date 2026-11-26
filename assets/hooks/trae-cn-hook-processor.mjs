@@ -269,7 +269,10 @@ function queryVscdbValueSync(keyPattern, vscdbPath) {
 
 // P1-1 vscdb path resolver. Priority: TRAES_USER_DATA_DIR env (exported by
 // start-trae-cn.sh, default /tmp/trae-ubuntu-vnc) → event.user_data_dir
-// (hook payload --user-data-dir) → ~/.trae-cn/User/globalStorage fallback.
+// (hook payload --user-data-dir) → %APPDATA%/Trae CN (Windows standard
+// layout — the home-relative ~/.trae-cn dir only carries hooks/cache, the
+// state.vscdb lives in the roaming user-data dir) → ~/.trae-cn/User/
+// globalStorage fallback.
 // Replaces the prior /tmp/trae-* scan (8 stale dirs) with a deterministic chain.
 //
 // Trae's standard layout puts state.vscdb under
@@ -284,6 +287,8 @@ function resolveVscdbPath(event) {
   for (const d of [
     process.env.TRAES_USER_DATA_DIR,
     event?.user_data_dir,
+    process.platform === 'win32' && process.env.APPDATA
+      ? path.join(process.env.APPDATA, 'Trae CN') : null,
     path.join(os.homedir(), '.trae-cn'),
     process.platform === 'darwin' && !process.env.TRAES_USER_DATA_DIR && !event?.user_data_dir
       && path.join(os.homedir(), 'Library', 'Application Support', 'Trae CN'),

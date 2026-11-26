@@ -135,3 +135,110 @@ it.each([
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it('backfills the model from cache metadata and stamps usage_source=hub', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pilot-trae-model-'));
+  const hub = new HubUsage(root, false);
+  const reply = '1'.repeat(24), session = '2'.repeat(24);
+  const event = (seq: number, type: string, data: Record<string, unknown>) => JSON.stringify({
+    seq, type, data: JSON.stringify({ reply_to_message_id: reply, ...data }),
+  });
+  try {
+    await mkdir(join(root, 'task'));
+    await writeFile(join(root, 'task', reply + '.jsonl'), [
+      event(1, 'metadata', { session_id: session, trace_id: 'a'.repeat(32),
+        model_info: { model_name: 'glm-5.3-flash', display_model_name: 'GLM-5.3-Flash', prompt_max_tokens: 936000 } }),
+      event(2, 'plan_item', { id: 'pi_one', tool_call_info: { meta: { llm_toolcall_id: 'call_example' } } }),
+      event(3, 'token_usage', { prompt_tokens: 300, completion_tokens: 2, total_tokens: 302 }),
+      event(4, 'done', {}),
+    ].join('\n') + '\n');
+    await hub.refresh();
+    const entry = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_example'], 'gen_ai.request.model': 'unknown' } as AgentActivityEntry;
+    hub.enrich(entry);
+    expect(entry['gen_ai.request.model']).toBe('glm-5.3-flash');
+    expect(entry['agent.trae-cn.hub.display_model']).toBe('GLM-5.3-Flash');
+    expect(entry['agent.trae-cn.hub.prompt_max_tokens']).toBe(936000);
+    expect(entry['agent.trae-cn.hub.usage_source']).toBe('hub');
+    expect(entry['agent.trae-cn.hub.usage_received']).toBe(1);
+    expect(entry['gen_ai.usage.total_tokens']).toBe(302);
+    // An explicit model other than 'unknown' is never overwritten.
+    const explicit = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_example'], 'gen_ai.request.model': 'gpt-4o' } as AgentActivityEntry;
+    hub.enrich(explicit);
+    expect(explicit['gen_ai.request.model']).toBe('gpt-4o');
+    expect(explicit['agent.trae-cn.hub.usage_source']).toBe('hub');
+  } finally {
+    await hub.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('falls back to a session-level model and stamps usage_source=hub_empty without token rows', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pilot-trae-empty-'));
+  const hub = new HubUsage(root, false);
+  const reply = '1'.repeat(24), session = '2'.repeat(24);
+  const event = (seq: number, type: string, data: Record<string, unknown>) => JSON.stringify({
+    seq, type, data: JSON.stringify({ reply_to_message_id: reply, ...data }),
+  });
+  try {
+    await mkdir(join(root, 'task'));
+    await writeFile(join(root, 'task', reply + '.jsonl'), [
+      event(1, 'metadata', { session_id: session, trace_id: 'a'.repeat(32),
+        model_info: { model_name: 'doubao-seed-code' } }),
+      event(2, 'plan_item', { id: 'pi_one', tool_call_info: { meta: { llm_toolcall_id: 'call_example' } } }),
+      event(3, 'done', {}),
+    ].join('\n') + '\n');
+    await hub.refresh();
+    const entry = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_example'] } as AgentActivityEntry;
+    hub.enrich(entry);
+    expect(entry['gen_ai.request.model']).toBe('doubao-seed-code');
+    expect(entry['agent.trae-cn.hub.usage_source']).toBe('hub_empty');
+    expect(entry['gen_ai.usage.total_tokens']).toBeUndefined();
+  } finally {
+    await hub.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it('stamps usage_source=unavailable when no cache turn exists and backfills the model per session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'pilot-trae-unavail-'));
+  const hub = new HubUsage(root, false);
+  const reply = '1'.repeat(24), session = '2'.repeat(24), other = '3'.repeat(24);
+  const event = (seq: number, type: string, data: Record<string, unknown>) => JSON.stringify({
+    seq, type, data: JSON.stringify({ reply_to_message_id: reply, ...data }),
+  });
+  try {
+    await mkdir(join(root, 'task'));
+    // Only a foreign session is cached; the target session has no file at all.
+    await writeFile(join(root, 'task', reply + '.jsonl'), [
+      event(1, 'metadata', { session_id: other, trace_id: 'a'.repeat(32),
+        model_info: { model_name: 'qwen3-coder' } }),
+      event(2, 'done', {}),
+    ].join('\n') + '\n');
+    await hub.refresh();
+    const entry = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_example'] } as AgentActivityEntry;
+    hub.enrich(entry);
+    expect(entry['agent.trae-cn.hub.usage_source']).toBe('unavailable');
+    expect(entry['gen_ai.usage.total_tokens']).toBeUndefined();
+    // Same-session turn already in memory backfills the model even after the
+    // cache file is gone (file lifetime covers the whole turn).
+    const secondReply = 'f'.repeat(24);
+    await writeFile(join(root, 'task', secondReply + '.jsonl'), [
+      JSON.stringify({ seq: 1, type: 'metadata', data: JSON.stringify({ reply_to_message_id: secondReply,
+        session_id: session, trace_id: 'b'.repeat(32), model_info: { model_name: 'glm-5.3-flash' } }) }),
+      JSON.stringify({ seq: 2, type: 'done', data: JSON.stringify({ reply_to_message_id: secondReply }) }),
+    ].join('\n') + '\n');
+    await hub.refresh();
+    const next = { 'event.name': 'llm.response', 'gen_ai.session.id': session,
+      'agent.trae-cn.tool_call_ids': ['call_other'] } as AgentActivityEntry;
+    hub.enrich(next);
+    expect(next['gen_ai.request.model']).toBe('glm-5.3-flash');
+    expect(next['agent.trae-cn.hub.usage_source']).toBe('unavailable');
+  } finally {
+    await hub.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

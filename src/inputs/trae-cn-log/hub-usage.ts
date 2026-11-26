@@ -15,9 +15,11 @@ type Turn = {
   todos: Map<string, TodoReceipt | null>;
   plans: Map<string, { seq: number; content: string; call?: string }>;
   lastSeq: number; contiguous: boolean; done: boolean; touched: number;
+  model?: string; displayModel?: string; promptMaxTokens?: number;
 };
 type Cursor = { handle: FileHandle; offset: number; skipping: boolean; turn?: Turn };
 const count = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+const HUB_PREFIX = 'agent.trae-cn.hub.';
 const windowSize = 4 * 1024 * 1024;
 
 // A confirmed commit includes one result per dispatched call. Its timestamp is
@@ -130,6 +132,20 @@ export class HubUsage {
                 !/^[0-9a-f]{32}$/.test(meta.trace_id)) continue;
             cursor.turn = { reply, session: meta.session_id, trace: meta.trace_id, tools: new Set(), reports: new Map(), plans: new Map(), todos: new Map(), timings: new Map(),
               lastSeq: row.seq - 1, contiguous: row.seq === 0 || row.seq === 1, done: false, touched: Date.now() };
+            // model_info is optional per cache producer version; only bounded
+            // strings/counts are kept so a malformed payload cannot poison the turn.
+            const modelInfo = meta.model_info;
+            if (modelInfo && typeof modelInfo === 'object') {
+              if (typeof modelInfo.model_name === 'string' && modelInfo.model_name.length > 0 && modelInfo.model_name.length <= 128) {
+                cursor.turn.model = modelInfo.model_name;
+              }
+              if (typeof modelInfo.display_model_name === 'string' && modelInfo.display_model_name.length > 0 && modelInfo.display_model_name.length <= 128) {
+                cursor.turn.displayModel = modelInfo.display_model_name;
+              }
+              if (count(modelInfo.prompt_max_tokens) && modelInfo.prompt_max_tokens > 0) {
+                cursor.turn.promptMaxTokens = modelInfo.prompt_max_tokens;
+              }
+            }
             this.turns.set(reply, cursor.turn);
           }
           const turn = cursor.turn;
@@ -219,6 +235,30 @@ export class HubUsage {
     const turn = matches.length === 1 ? matches[0] : undefined;
     const evidence = native?.responses(entry['gen_ai.session.id'], ids, turn);
     const rounds = evidence?.rounds;
+
+    // Backfill the model identity from the cache. The hook payload has no
+    // model field, so this is the only source that reflects what actually
+    // served the turn. A precise turn match wins; otherwise fall back to the
+    // session only when every observed turn in that session agrees.
+    const hookModel = entry['gen_ai.request.model'];
+    if (typeof hookModel !== 'string' || hookModel.length === 0 || hookModel === 'unknown') {
+      const apply = (t: Turn) => {
+        if (t.model) entry['gen_ai.request.model'] = t.model;
+        if (t.displayModel) entry[HUB_PREFIX + 'display_model'] ??= t.displayModel;
+        if (t.promptMaxTokens) entry[HUB_PREFIX + 'prompt_max_tokens'] ??= t.promptMaxTokens;
+      };
+      if (turn) apply(turn);
+      else {
+        const models = new Set<string>();
+        for (const t of this.turns.values()) {
+          if (t.session === entry['gen_ai.session.id'] && t.model) models.add(t.model);
+        }
+        if (models.size === 1) {
+          const observed = [...this.turns.values()].find(t => t.session === entry['gen_ai.session.id'] && t.model)!;
+          apply(observed);
+        }
+      }
+    }
     const recovered: AgentActivityEntry[] = [];
     const recoveredCalls = [];
     for (const round of rounds ?? []) {
@@ -242,7 +282,14 @@ export class HubUsage {
       messages.splice(finalAnswer < 0 ? messages.length : finalAnswer, 0, { role: 'assistant', parts: recoveredCalls });
     }
     if (rounds) entry['loongsuite.trae_cn.model_responses'] = rounds;
-    if (!turn || evidence?.matchesHubOwner === false) return recovered;
+    if (!turn || evidence?.matchesHubOwner === false) {
+      // No cache turn was ever observed for this response. Because a cache
+      // file lives for the whole turn, a resident watcher would have drained
+      // it; absence therefore means the producer never created one (route
+      // not bound to the EventCache), not that collection missed it.
+      entry[HUB_PREFIX + 'usage_source'] ??= 'unavailable';
+      return recovered;
+    }
     if (this.captureContent && Array.isArray(messages)) {
       const parts = [...turn.plans].filter(([, plan]) => plan.content).map(([id, plan]) => ({
         type: 'reasoning', content: plan.content, plan_item_id: id,
@@ -275,11 +322,14 @@ export class HubUsage {
       if (r.cached === undefined) allCached = false;
       else cached += r.cached;
     }
-    const prefix = 'agent.trae-cn.hub.';
+    const prefix = HUB_PREFIX;
     entry[prefix + 'trace_id'] = turn.trace;
     entry[prefix + 'usage_event_seqs'] = [...turn.reports.keys()].join(',');
     const expected = native?.expectedSeqs(turn.trace, turn.session, turn.reply);
     entry[prefix + 'usage_received'] = turn.reports.size;
+    // A matched cache turn that carries no token_usage rows means the producer
+    // wrote one but never reported counters — distinct from no file at all.
+    entry[prefix + 'usage_source'] ??= turn.reports.size ? 'hub' : 'hub_empty';
     if (expected) {
       entry[prefix + 'usage_expected'] = expected.size;
       entry[prefix + 'missing_usage_seqs'] = [...expected].filter(seq => !turn.reports.has(seq)).join(',');
