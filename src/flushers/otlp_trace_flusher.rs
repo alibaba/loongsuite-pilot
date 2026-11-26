@@ -2131,6 +2131,7 @@ impl OtlpInner {
             }
         }
         if agent_type == "qwen-work-cn" {
+            preserve_qwen_work_legacy_kinds(&mut spans);
             remove_qwen_request_model_fallback(records, &mut spans);
         }
         if agent_type == "claude-code" {
@@ -3047,17 +3048,16 @@ fn convert_qwen_collaboration(
         .filter(|value| value.is_array())
         .map(Value::to_string);
     for span in &mut result.spans {
-        // Preserve existing CMS queries and the v1.20.0 collaboration Span
-        // contract, while retaining the generic agent_turn event projection.
-        span.kind = match span
-            .attributes
-            .get("gen_ai.span.kind")
-            .and_then(Value::as_str)
-        {
-            Some("ENTRY") => 2, // SERVER
-            Some("AGENT") => 3, // CLIENT
-            _ => continue,
-        };
+        if !matches!(
+            span.attributes
+                .get("gen_ai.span.kind")
+                .and_then(Value::as_str),
+            Some("ENTRY" | "AGENT")
+        ) {
+            continue;
+        }
+        // Retain existing CMS filters alongside the generic agent_turn
+        // event projection.
         span.attributes.insert(
             "loongsuite.qwenworkcn.observation_scope".into(),
             "collaboration_conversation".into(),
@@ -3070,6 +3070,32 @@ fn convert_qwen_collaboration(
         }
     }
     Ok(result)
+}
+
+fn preserve_qwen_work_legacy_kinds(spans: &mut [ReadableSpan]) {
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
+
+    for span in spans {
+        let wire_kind = match span
+            .attributes
+            .get("gen_ai.span.kind")
+            .and_then(Value::as_str)
+        {
+            Some("ENTRY") => SpanKind::Server,
+            Some("AGENT")
+                if span
+                    .attributes
+                    .get("gen_ai.agent.scope")
+                    .and_then(Value::as_str)
+                    != Some("subagent") =>
+            {
+                SpanKind::Client
+            }
+            _ => continue,
+        };
+        // ReadableSpan stores an SDK kind without OTLP's UNSPECIFIED slot.
+        span.kind = wire_kind as i64 - 1;
+    }
 }
 
 fn unique_service_names(inner: &OtlpInner, agent_type: &str) -> Vec<String> {
@@ -4899,6 +4925,62 @@ mod tests {
         }
         flusher.shutdown().await.unwrap();
         assert_eq!(converter.calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn qwen_collaboration_preserves_legacy_kinds_in_otlp_payload() {
+        use opentelemetry_proto::tonic::trace::v1::span::SpanKind;
+
+        let mut records = [
+            json!({"event.id":"start", "gen_ai.turn.start":true, "time_unix_nano":"1795098300000000000",
+                "gen_ai.input.messages_delta":[{"role":"user","parts":[{"type":"text","content":"question"}]}]}),
+            json!({"event.id":"end", "gen_ai.turn.end":true, "time_unix_nano":"1795098301000000000",
+                "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":"answer"}]}]}),
+        ];
+        let records: Vec<_> = records
+            .iter_mut()
+            .map(|r| {
+                r["event.name"] = json!("other");
+                r["gen_ai.agent.type"] = json!("qwen-work-cn");
+                r["gen_ai.session.id"] = json!("space");
+                r["gen_ai.turn.id"] = json!("card");
+                r["agent.source"] = json!("qwen-work-cn-collaboration");
+                r["loongsuite.observation.scope"] = json!("agent_turn");
+                entry(r.take())
+            })
+            .collect();
+        let mut converted = super::route_convert(
+            "qwen-work-cn",
+            &records,
+            &[],
+            &crate::flushers::GenAiEventLogConverter,
+        )
+        .unwrap();
+        super::preserve_qwen_work_legacy_kinds(&mut converted.spans);
+        assert_eq!(converted.spans.len(), 2);
+        assert!(converted
+            .spans
+            .iter()
+            .all(|s| s.attributes["loongsuite.qwenworkcn.observation_scope"]
+                == "collaboration_conversation"));
+        let wire = crate::flushers::otlp_http_exporter::encode_request(&converted.spans).unwrap();
+        let spans: Vec<_> = wire
+            .resource_spans
+            .iter()
+            .flat_map(|r| &r.scope_spans)
+            .flat_map(|s| &s.spans)
+            .collect();
+        let root = spans
+            .iter()
+            .find(|s| s.name == "enter_ai_application_system")
+            .unwrap();
+        let agent = spans
+            .iter()
+            .find(|s| s.name == "invoke_agent qwen-work-cn")
+            .unwrap();
+        assert_eq!(root.kind, SpanKind::Server as i32);
+        assert_eq!(agent.kind, SpanKind::Client as i32);
+        assert_eq!(agent.parent_span_id, root.span_id);
     }
 
     #[tokio::test]
