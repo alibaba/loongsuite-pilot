@@ -34,7 +34,7 @@ Write the following document to `<dataDir>/configs/managed/interceptor.json`. Th
         "events": ["UserPromptSubmit", "PreToolUse", "PostToolUse"],
         "action": "log",
         "match": "substring",
-        "pattern": "RULE_PROBE",
+        "keywords": ["RULE_PROBE", "SECOND_PROBE"],
         "title": "Command rule preview",
         "message": "This operation matches a local rule"
       },
@@ -60,11 +60,13 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 | `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
 | `match` | `substring` or `regex` for a pattern rule. |
+| `keywords` | Required for `substring`: a nonempty array of nonempty strings, each at most 2000 characters. Any keyword matches; case and whitespace are preserved. |
+| `pattern` | Required string for `regex`, at most 2000 characters. Ignored for `substring`. |
 | `shell` | `sh` or `powershell` for a script rule; only the local platform's shell runs. |
 
 Rules match one text assembled in order from user input, tool name, tool input, and tool output. Objects contribute string, number, and boolean leaves. Raw protocol data, session metadata, and rule titles/messages are excluded. The retired `fields` key is accepted and ignored.
 
-Substring matching is literal. Patterns use JavaScript RegExp syntax, rejecting lookahead and lookbehind; matching runs in a dedicated Worker. Its default 200ms budget includes queueing. Timeout ends the task and terminates the thread before a replacement can be created. A failed termination logs a warning and disables further regex execution until the collector restarts. Pattern hits use `[PATTERN_BLOCKED]` as their reason.
+Substring matching checks only `keywords` as case-sensitive literals; move old substring `pattern` values into a single-element `keywords` array. Each rule's keywords are escaped and combined into regex chunks when the rule generation is built. Small lists use one regex; each chunk is limited internally to 2000 source characters. A keyword that expands beyond this budget uses a literal scan inside the Worker. This execution plan imposes no additional list size limit. Regex patterns use JavaScript RegExp syntax, rejecting lookahead and lookbehind. Both match types run in the same dedicated Worker with a default 200ms budget per rule, including queueing, compilation, and worker startup, within the shared 3.5 second request budget. All chunks and literal scans of one rule run in a single job and share that one budget. The Worker reuses compiled expressions in a bounded cache. Timeout ends the task and terminates the thread before a replacement can be created. A failed termination logs a warning and disables further pattern execution until the collector restarts. Pattern hits use `[PATTERN_BLOCKED]` as their reason.
 
 ### Scripts and cache namespaces
 

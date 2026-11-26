@@ -52,7 +52,7 @@ describe('Qoder CN interception', () => {
     const entries: AgentActivityEntry[] = [];
     const engine = new ManagedRuleEngine({ rules: [], runners: {}, config: parseManagedInterceptorConfig({ interceptor: {
       rules: [{ id: 'cn-policy', version: '1', agents: ['qoder-cn', 'qoderclicn'], events: ['UserPromptSubmit'],
-        kind: 'pattern', match: 'substring', pattern: 'secret' }],
+        kind: 'pattern', match: 'substring', keywords: ['secret'] }],
     } }) });
     const options = { port: 0, version: 'test', engine,
       emitBlockedPrompt: (entry: AgentActivityEntry) => { entries.push(entry); } };

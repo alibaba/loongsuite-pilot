@@ -1,5 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { createLogger } from '../../utils/logger.js';
+import type { SubstringMatchPlan } from './config.js';
 
 const logger = createLogger('ManagedRegexRunner');
 
@@ -7,12 +8,43 @@ const logger = createLogger('ManagedRegexRunner');
 export const MANAGED_REGEX_TIMEOUT_MS = 200;
 export const MANAGED_REGEX_SLOW_MS = 50;
 
-const REGEX_WORKER_SOURCE = `
+export const REGEX_CACHE_MAX_ENTRIES = 128;
+export const REGEX_CACHE_MAX_SOURCE_CHARS = 1024 * 1024;
+
+export const REGEX_WORKER_SOURCE = `
 const { parentPort } = require('node:worker_threads');
+const cache = new Map();
+let sourceChars = 0;
+function compiled(pattern) {
+  let regex = cache.get(pattern);
+  if (regex) {
+    cache.delete(pattern);
+    cache.set(pattern, regex);
+    return regex;
+  }
+  regex = new RegExp(pattern);
+  if (pattern.length > ${REGEX_CACHE_MAX_SOURCE_CHARS}) return regex;
+  while (cache.size >= ${REGEX_CACHE_MAX_ENTRIES} || sourceChars + pattern.length > ${REGEX_CACHE_MAX_SOURCE_CHARS}) {
+    const oldest = cache.keys().next().value;
+    sourceChars -= oldest.length;
+    cache.delete(oldest);
+  }
+  cache.set(pattern, regex);
+  sourceChars += pattern.length;
+  return regex;
+}
+function matches(pattern, text) {
+  if (typeof pattern === 'string') return compiled(pattern).test(text);
+  // The whole plan is one job: every step shares the caller's one timer.
+  for (const step of pattern.steps) {
+    if (step.kind === 'literal' ? text.includes(step.text) : compiled(step.source).test(text)) return true;
+  }
+  return false;
+}
 parentPort.on('message', (job) => {
   try {
     const started = performance.now();
-    const matched = new RegExp(job.pattern).test(job.text);
+    const matched = matches(job.pattern, job.text);
     parentPort.postMessage({ id: job.id, matched, executionMs: performance.now() - started });
   } catch (err) {
     parentPort.postMessage({ id: job.id, error: err instanceof Error ? err.message : String(err) });
@@ -53,7 +85,7 @@ export class ManagedRegexRunner {
 
   constructor(private readonly timeoutMs = MANAGED_REGEX_TIMEOUT_MS) {}
 
-  test(pattern: string, text: string, timeoutMs = this.timeoutMs, onExecuted?: (executionMs: number) => void): Promise<boolean> {
+  test(pattern: string | SubstringMatchPlan, text: string, timeoutMs = this.timeoutMs, onExecuted?: (executionMs: number) => void): Promise<boolean> {
     if (this.stopped) return Promise.reject(new ManagedRegexCancelledError());
     // Queue and replacement-thread startup time both count against the request.
     const deadline = Date.now() + Math.max(1, timeoutMs);
@@ -73,7 +105,7 @@ export class ManagedRegexRunner {
     if (this.worker) this.retire(this.worker);
   }
 
-  private runOne(pattern: string, text: string, timeoutMs: number, onExecuted?: (executionMs: number) => void): Promise<boolean> {
+  private runOne(pattern: string | SubstringMatchPlan, text: string, timeoutMs: number, onExecuted?: (executionMs: number) => void): Promise<boolean> {
     return new Promise((resolve, reject) => {
       let worker: Worker | null = null;
       let settled = false;

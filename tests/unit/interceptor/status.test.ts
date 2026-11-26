@@ -47,7 +47,7 @@ describe('interceptor status', () => {
       await writeFile(join(managedScriptsDir(dataDir), 'ready@1.sh'), 'exit 0');
       await writeFile(managedInterceptorPath(dataDir), JSON.stringify({ interceptor: { rules: [
         { ...base, kind: 'pattern', id: 'regex', match: 'regex', pattern: 'x', action: 'log' },
-        { ...base, kind: 'pattern', id: 'substring', match: 'substring', pattern: 'x' },
+        { ...base, kind: 'pattern', id: 'substring', match: 'substring', keywords: ['x'] },
         { ...base, kind: 'script', id: 'ready', shell: 'sh' },
         { ...base, kind: 'script', id: 'pending', shell: 'sh' },
         { ...base, kind: 'script', id: 'foreign', shell: 'powershell' },

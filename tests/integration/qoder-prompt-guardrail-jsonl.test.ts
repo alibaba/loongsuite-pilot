@@ -41,10 +41,10 @@ describe.each(variants)('Qoder prompt audit reaches native JSONL output: $name',
     let service: InterceptorWorkerService | undefined;
     try {
       await mkdir(configDir, { recursive: true });
-      // Exercise audit correlation, not the regex worker's cold-start deadline.
+      // Use a literal keyword to exercise audit correlation.
       await writeFile(join(configDir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
         kind: 'pattern', id: 'synthetic-access-key', version: '7', agents: ['qoder', 'qodercli'],
-        events: ['UserPromptSubmit'], match: 'substring', pattern: syntheticKey, action: 'log',
+        events: ['UserPromptSubmit'], match: 'substring', keywords: [syntheticKey], action: 'log',
       }] } }));
       const workerFile = join(root, 'interceptor-worker.cjs');
       await build({ entryPoints: [resolve('src/interceptor/worker.ts')], outfile: workerFile,

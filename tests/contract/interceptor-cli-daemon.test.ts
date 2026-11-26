@@ -78,12 +78,12 @@ describe('interceptor cli/daemon contract', () => {
     await writeFile(join(dataDir, 'configs', 'managed', 'interceptor.json'), JSON.stringify({ interceptor: { rules: [
       {
         kind: 'pattern', id: 'contract-block', version: '1', agents: ['qoder'],
-        events: ['UserPromptSubmit'], match: 'substring', pattern: 'CONTRACT_BLOCK',
+        events: ['UserPromptSubmit'], match: 'substring', keywords: ['CONTRACT_BLOCK'],
       },
       {
         kind: 'pattern', id: 'workbuddy-block', version: '1', agents: ['workbuddy'],
         events: ['UserPromptSubmit', 'PreToolUse', 'PostToolUse'],
-        match: 'substring', pattern: 'WORKBUDDY_BLOCK', message: '本地策略',
+        match: 'substring', keywords: ['WORKBUDDY_BLOCK'], message: '本地策略',
       },
     ] } }));
 
