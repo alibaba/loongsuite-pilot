@@ -147,6 +147,12 @@ model call in the same turn consumes a matched tool result, its request start ca
 bound the tool span end if the recorded completion is missing or inconsistent.
 Pilot omits `gen_ai.tool.call.duration` when it uses that bound.
 
+An Antigravity model stop does not close the trace if the same native turn
+continues with another model request. Pilot briefly waits for a recent stop to
+settle so a subsequent planner step can join the original trace. Turns
+triggered by a native `SYSTEM_MESSAGE` still report `role: system`, not
+`role: user`.
+
 Codex collection is transcript-backed. Pilot uses the lightweight
 `SessionStart` and `UserPromptSubmit` hooks to discover the effective
 `CODEX_HOME`, including task-scoped homes created by orchestrators, and tails

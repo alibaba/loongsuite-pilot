@@ -124,6 +124,10 @@ Antigravity 优先使用 SQLite 记录的工具执行起点。同一轮次的下
 工具结果时，如果记录的工具结束时间缺失或与调用顺序不一致，Pilot 可以用该模型请求的
 起点作为工具 Span 结束时间的上界，并省略 `gen_ai.tool.call.duration`。
 
+如果同一个 Antigravity 原生轮次还有后续模型调用，单次模型的 `stop` 不会结束整条
+Trace。对刚写入的 `stop`，Pilot 会短暂等待后续步骤，以便将续跑保留在同一条 Trace。
+原生 `SYSTEM_MESSAGE` 触发的轮次仍记录为 `role: system`，不会被改成用户输入。
+
 Codex 使用 transcript 作为采集事实源。Pilot 通过轻量的
 `SessionStart` 和 `UserPromptSubmit` Hook 发现当前实际生效的
 `CODEX_HOME`（包括编排器为单个任务创建的独立目录），并采集该 session
