@@ -200,6 +200,8 @@ export interface CodexTranscriptInputOptions extends InputOptions {
   sessionDir?: string;
   wakeupDir?: string;
   spanContextDir?: string;
+  /** Whether Pilot may persist Codex message content in its checkpoint. */
+  captureMessageContent?: boolean;
   /** Multimodal options (enabled + processor). */
   multimodal?: {
     enabled: boolean;
@@ -216,6 +218,7 @@ export class CodexTranscriptInput extends BaseInput {
   private readonly sessionDir: string;
   private readonly wakeupDir: string;
   private readonly spanContextDir: string;
+  private readonly captureMessageContent: boolean;
   private readonly includeMultimodal: boolean;
   private readonly multimodalUploadMode: MultimodalUploadMode;
   private readonly multimodalProcessor: MultimodalProcessor | null;
@@ -264,6 +267,18 @@ export class CodexTranscriptInput extends BaseInput {
     this.sessionDir = opts.sessionDir ?? resolveHome(DEFAULT_SESSION_DIR);
     this.wakeupDir = opts.wakeupDir ?? defaultWakeupDir();
     this.spanContextDir = opts.spanContextDir ?? defaultSpanContextDir();
+    this.captureMessageContent = opts.captureMessageContent ?? true;
+    if (!this.captureMessageContent) {
+      // A previous run may have checkpointed plaintext. Drop it even for
+      // inactive rollouts without moving their collection cursors.
+      for (const key of this.stateStore.keys()) {
+        if (!key.startsWith(`${this.id}:`)) continue;
+        const checkpoint = this.readCheckpoint(key);
+        if (checkpoint && stripCheckpointContent(checkpoint)) {
+          this.stateStore.update(key, { extra: { codexTranscript: checkpoint } });
+        }
+      }
+    }
     this.includeMultimodal = includeMultimodal;
     this.multimodalUploadMode = opts.multimodal?.uploadMode ?? 'none';
     this.multimodalProcessor = includeMultimodal ? processor : null;
@@ -1434,9 +1449,10 @@ export class CodexTranscriptInput extends BaseInput {
       ? extraction.committedStepRanges[closedStepCount - 1]
       : undefined;
     if (closedStepCount > 0) {
-      activeTurn.inputContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+      const nextContext = persistedInputContext(built.nextInputContext, lastClosedRange, this.captureMessageContent);
+      activeTurn.inputContext = nextContext;
       if (terminal && built.nextInputContext.compacted) {
-        checkpoint.compactedContext = persistedInputContext(built.nextInputContext, lastClosedRange);
+        checkpoint.compactedContext = nextContext;
       }
       if (extraction.nextStepStartedAtMs !== undefined) {
         activeTurn.nextStepStartedAtMs = extraction.nextStepStartedAtMs;
@@ -2737,12 +2753,12 @@ export class CodexTranscriptInput extends BaseInput {
             : {}),
         }
       : null;
+    const compactedContext = parseInputContext(value.compactedContext);
     return {
       inode: value.inode,
       scanOffset: value.scanOffset,
       activeTurn,
-      ...(parseInputContext(value.compactedContext)?.compacted
-        ? { compactedContext: parseInputContext(value.compactedContext) } : {}),
+      ...(compactedContext?.compacted ? { compactedContext } : {}),
       pendingTerminal,
       ...(deferredTerminals.length ? { deferredTerminals } : {}),
       pendingFusion,
@@ -2761,6 +2777,7 @@ export class CodexTranscriptInput extends BaseInput {
   }
 
   private saveCheckpoint(key: string, checkpoint: CodexTranscriptCheckpoint): void {
+    if (!this.captureMessageContent) stripCheckpointContent(checkpoint);
     this.saveDelegationState();
     const current = this.stateStore.get(key);
     this.stateStore.update(key, {
@@ -3818,21 +3835,56 @@ function attachTurnSpanAttributes(
 function persistedInputContext(
   context: CodexTranscriptInputContext,
   sourceRange: CodexTranscriptSourceRange | undefined,
+  captureMessageContent: boolean,
 ): CodexTranscriptInputContext {
-  const delta = context.delta ?? [];
-  const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');
-  return {
+  const metadata: CodexTranscriptInputContext = {
     hash: context.hash,
     ...(context.version ? { version: context.version } : {}),
     ...(context.contentAvailability ? { contentAvailability: context.contentAvailability } : {}),
     ...(context.sourceSpanIds ? { sourceSpanIds: context.sourceSpanIds } : {}),
     ...(context.sourceSpanIdsTruncated ? { sourceSpanIdsTruncated: true } : {}),
     ...(context.compacted === true ? { compacted: true } : {}),
+  };
+  if (!captureMessageContent) return metadata;
+  const delta = context.delta ?? [];
+  const deltaBytes = Buffer.byteLength(JSON.stringify(delta), 'utf8');
+  return {
+    ...metadata,
     ...(context.fullMessages ? { fullMessages: context.fullMessages } : {}),
     ...(deltaBytes <= MAX_PERSISTED_INPUT_CONTEXT_BYTES || !sourceRange
       ? { delta }
       : { deltaRange: sourceRange }),
   };
+}
+
+function stripCheckpointContent(checkpoint: CodexTranscriptCheckpoint): boolean {
+  let changed = stripInputContextContent(checkpoint.compactedContext);
+  const turns = [
+    checkpoint.activeTurn,
+    checkpoint.pendingSubagent?.activeTurn,
+    checkpoint.forkBootstrap?.state === 'baseline-tail' ? checkpoint.forkBootstrap.tailCandidate : undefined,
+    ...(checkpoint.deferredTerminals ?? []).map(terminal => terminal.activeTurn),
+  ];
+  for (const turn of turns) {
+    if (!turn) continue;
+    changed = stripInputContextContent(turn.inputContext) || changed;
+    if (turn.developerInstructions !== undefined) {
+      delete turn.developerInstructions;
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function stripInputContextContent(context: CodexTranscriptInputContext | undefined): boolean {
+  if (!context || (context.fullMessages === undefined && context.delta === undefined && context.deltaRange === undefined)) {
+    return false;
+  }
+  delete context.fullMessages;
+  delete context.delta;
+  // Without message capture there is also no need to re-read a large delta.
+  delete context.deltaRange;
+  return true;
 }
 
 function parseInputContext(value: unknown): CodexTranscriptInputContext | undefined {

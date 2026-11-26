@@ -76,6 +76,8 @@ Codex 在同一 turn 内自动压缩时沿用当前 Trace，压缩 Span 位于�
 加密 checkpoint 保留 `type=compaction` 和可用的块 ID。内容可用性由
 `gen_ai.context.content.availability` 标为 `plaintext`、`opaque`、`partial` 或 `unavailable`。
 替换快照最多保留 1 MiB。未知原生 item 或内容超限会明确降级。历史缺少替换快照时继续记录已知增量。
+当 `agents.codex.captureMessageContent=false` 时，Pilot 的 checkpoint 仍保留上下文版本、游标和关联 ID，
+但不保存替换消息、消息增量或开发者指令；加载已有 checkpoint 时也会移除这些内容，不修改 Codex 原生 rollout。
 安装后上下文计数标为 `native_estimate` / `active_context`。
 摘要请求用量单独记录为 `agent.codex.compaction.input_tokens` / `output_tokens`，与上下文计数分别展示。
 源端没有同范围 before 计数时省略 before 和压缩比例。只有完成时间的旧版记录保留为事件。

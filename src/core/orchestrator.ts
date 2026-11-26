@@ -1739,6 +1739,7 @@ export class Orchestrator extends EventEmitter {
       wakeupDir: codexWakeupDir,
       pollIntervalMs: listenerCfg['codex-transcript']?.pollInterval,
       spanContextDir: codexSpanContextDir,
+      captureMessageContent: codexAgentCfg.captureMessageContent,
       multimodal: {
         enabled: codexMultimodalEnabled,
         uploadMode: codexAgentCfg.multimodal?.uploadMode ?? 'none',
