@@ -25,7 +25,25 @@ describe('Windows worker CLI wrapper', () => {
     expect(checkDeps).toContain('Join-Path $DataDir "node-bin"');
   });
 
-  it.runIf(process.platform === 'win32')('uses separate Unicode data/cache dirs and forwards worker argv unchanged', async () => {
+  it.runIf(process.platform === 'win32').each([
+    { label: 'no subcommand', args: ['worker'] },
+    { label: 'list', args: ['worker', 'list'] },
+    { label: 'status', args: ['worker', 'status'] },
+    { label: 'list --json', args: ['worker', 'list', '--json'] },
+    {
+      label: 'connect with runtime options',
+      args: [
+        'worker',
+        'connect',
+        '--runtime',
+        'fake-runtime',
+        '--json',
+        '--',
+        '--runtime-command',
+        'C:\\Program Files\\Fake Runtime\\runtime.cmd',
+      ],
+    },
+  ])('uses separate Unicode data/cache dirs and forwards $label unchanged', async ({ args }) => {
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'pilot-worker-cli-'));
     const binDir = path.join(tmpDir, '命令 dir');
     const dataDir = path.join(tmpDir, '数据 dir');
@@ -68,14 +86,7 @@ describe('Windows worker CLI wrapper', () => {
       'Bypass',
       '-File',
       script,
-      'worker',
-      'connect',
-      '--runtime',
-      'fake-runtime',
-      '--json',
-      '--',
-      '--runtime-command',
-      'C:\\Program Files\\Fake Runtime\\runtime.cmd',
+      ...args,
     ], {
       env: {
         ...process.env,
@@ -86,16 +97,7 @@ describe('Windows worker CLI wrapper', () => {
     });
 
     expect(JSON.parse(stdout.trim())).toEqual({
-      argv: [
-        'worker',
-        'connect',
-        '--runtime',
-        'fake-runtime',
-        '--json',
-        '--',
-        '--runtime-command',
-        'C:\\Program Files\\Fake Runtime\\runtime.cmd',
-      ],
+      argv: args,
       dataDir,
       cacheDir,
     });
