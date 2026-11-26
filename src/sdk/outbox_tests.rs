@@ -740,3 +740,36 @@ async fn legacy_queue_totals_stay_exact_after_batch_updates_and_failed_ack() {
         store.snapshot_with_revision().1
     );
 }
+
+#[test]
+fn qwen_installer_never_guesses_between_different_durable_source_namespaces() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let queue = Outbox::open(&root, settings()).unwrap();
+    let handoff = LegacyCheckpointHandoff::for_input("qwen-work-cn-trace").unwrap();
+    let old = "a".repeat(64);
+    let other = "b".repeat(64);
+    let cursor =
+        r#"{"qwen-work-cn-trace":{"lastFile":"qwen-work-cn-2026-10-01.jsonl","lastOffset":17}}"#;
+    queue.checkpoint(&old, cursor).unwrap();
+    queue.checkpoint(&other, "{}").unwrap();
+    assert!(matches!(
+        Outbox::drained_shell_checkpoint(&root, None, handoff).unwrap(),
+        ShellCheckpoint::Ready(Some(text)) if text == cursor
+    ));
+
+    queue
+        .checkpoint(&other, &cursor.replace(":17", ":33"))
+        .unwrap();
+    assert!(matches!(
+        Outbox::drained_shell_checkpoint(&root, None, handoff),
+        Err(error) if error.to_string().contains("multiple source checkpoints")
+    ));
+    queue
+        .enqueue_hook(br#"{"event.id":"queued-by-one-source"}"#)
+        .unwrap();
+    assert!(matches!(
+        Outbox::drained_shell_checkpoint(&root, None, handoff).unwrap(),
+        ShellCheckpoint::Pending
+    ));
+}

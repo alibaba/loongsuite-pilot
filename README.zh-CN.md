@@ -62,15 +62,15 @@ Pilot 主要帮助回答这些问题：
 | Claude Code | Hook | No | No | No | No |
 | Codex | Hook | No | No | No | No |
 | GitHub Copilot CLI | 原生插件 + transcript / 原生 OTel | No | No | No | No |
-| Cursor | Hook（macOS arm64） | Yes | Yes | Yes | Yes |
-| Cursor CLI | 复用 Cursor Hook（交互模式，macOS arm64） | Yes | Yes | Yes | Yes |
+| Cursor | Hook | No | No | No | No |
+| Cursor CLI | 复用 Cursor Hook | No | No | No | No |
 | DeepSeek Harness | YAML patch 插件 + 本地 JSONL 轮询 | No | No | No | No |
 | Grok Build | Hook + 本地 session 日志 | No | No | No | No |
 | Hermes Agent | 原生目录插件 | No | No | No | No |
 | Kiro CLI | Hook / session 轮询 | No | No | No | No |
 | MiMo Code | 插件注入 | No | No | No | No |
-| OpenClaw | 插件注入（macOS arm64，Gateway 2026.11.5） | Yes | Yes | Yes | Yes |
-| OpenCode | 插件注入（macOS arm64，1.19.6 和 2.3.2） | Yes | Yes | Yes | Yes |
+| OpenClaw | 插件注入 | No | No | No | No |
+| OpenCode | 插件注入 | No | No | No | No |
 | Pi Coding Agent | Extension 注入 | No | No | No | No |
 | Qoder | Hook | Yes | Yes | Yes | Yes |
 | Qoder CN | Hook | No | No | No | No |
@@ -79,13 +79,11 @@ Pilot 主要帮助回答这些问题：
 | Qoder Work | Hook / 本地数据轮询 | No | No | No | No |
 | Qoder Work CN | Hook / 本地数据轮询 | No | No | No | No |
 | Qwen Code CLI | Hook | No | No | No | No |
-| Qwen Work CN | Hook / 本地数据轮询（macOS arm64） | Yes | Yes | No | Yes |
+| Qwen Work CN | Hook / 本地数据轮询 | No | No | No | No |
 | Wukong | CLI API 轮询 | No | No | No | No |
 | TRAE CN | 原生 Hook / 本地会话数据 | No | No | No | No |
 | WorkBuddy | Hook 唤醒 + 本地 transcript 监听/轮询兜底 | No | No | No | No |
 | [豆包工作（macOS/Windows，实验性）](docs/zh-CN/doubao-work.md) | 只读日志与执行元数据 | No | No | No | No |
-
-千问办公个人会话支持对话和工具调用采集。协作会话采集已完成的 Agent 回合及对话。
 
 维护者可参考 [OpenClaw 兼容性说明](docs/zh-CN/agents.md#openclaw-兼容性与生命周期)、[DeepSeek Harness 采集与生命周期](docs/zh-CN/agents.md#deepseek-harness-采集与生命周期)及[GitHub Copilot CLI 遥测说明](docs/zh-CN/copilot-native-telemetry.md)。
 

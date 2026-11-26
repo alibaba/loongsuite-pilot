@@ -122,6 +122,7 @@ pub(crate) fn append(base: &Path, body: &[u8]) -> anyhow::Result<()> {
     append_with_limit(base, body, SEGMENT_BYTES, None)
 }
 
+#[cfg(test)]
 pub(crate) fn append_diagnostic(base: &Path, body: &[u8]) -> anyhow::Result<()> {
     append_with_limit(base, body, 10 * 1024 * 1024, Some(100 * 1024 * 1024))
 }

@@ -292,11 +292,15 @@ fn package(root: &Path) -> PathBuf {
     ] {
         let destination = package.join(relative);
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
-        fs::copy(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(relative),
-            destination,
-        )
-        .unwrap();
+        let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = if relative.starts_with("assets/hooks/cursor-loongsuite-pilot-hook.") {
+            checkout
+                .join("tests/fixtures/legacy-migrated-hooks")
+                .join(Path::new(relative).file_name().unwrap())
+        } else {
+            checkout.join(relative)
+        };
+        fs::copy(source, destination).unwrap();
         paths.push(relative);
     }
     let manifest = RuntimeManifest {

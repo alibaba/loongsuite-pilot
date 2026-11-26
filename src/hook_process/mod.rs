@@ -63,8 +63,7 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let terminal = std::io::stdin().is_terminal();
     let mut raw = Vec::new();
     if !terminal {
-        let bounded_cursor = agent == "cursor" && args.iter().any(|arg| arg == "--defer-assembly");
-        if bounded_qoder || bounded_cursor || agent == "trae-cn" {
+        if bounded_qoder || agent == "trae-cn" {
             let limit = if agent != "trae-cn" {
                 1024 * 1024
             } else {
@@ -175,12 +174,14 @@ pub(crate) fn dispatch(
         stdout,
     };
     let code = match agent {
+        #[cfg(test)]
         "cursor" => cursor::run(&mut request),
         "claude-code" => claude_code::run(&mut request),
         #[cfg(test)]
         "codex" => codex::run(&mut request),
         "copilot" => copilot::run(&mut request),
         "qwen-code-cli" => qwen_code_cli::run(&mut request),
+        #[cfg(test)]
         "qwen-work-cn" => qwen_work_cn::run(&mut request),
         "grok-build" => grok_build::run(&mut request),
         "qoder" | "qoder-cn" => qoder::run(&mut request),

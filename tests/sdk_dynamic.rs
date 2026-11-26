@@ -1565,52 +1565,16 @@ fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
     host.stop();
     drop(host);
 
-    // The old Hook consumes the same cursor after the SDK has drained.
-    let run_old = || {
-        let mut child = Command::new(bin())
-            .args(["hook-process", "qwen-work-cn", "--agent-id", "qwen-work-cn"])
-            .env("LOONGSUITE_PILOT_DATA_DIR", &old_pilot)
-            .env("LOONGSUITE_PILOT_USER_ID", "sdk-acceptance")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success());
-    };
-    run_old();
-    assert!(!old_pilot.join("logs/qwen-work-cn/history").exists());
-    writeln!(
-        std::fs::OpenOptions::new()
-            .append(true)
-            .open(&transcript)
-            .unwrap(),
-        "{}\n{}",
-        user("rollback-turn"),
-        assistant("rollback-turn")
+    // The pinned Node release uses this cursor format. Verify bytes written
+    // by the SDK, without invoking a retired Rust producer as a Node stand-in.
+    let cursor: Value = serde_json::from_slice(
+        &std::fs::read(old_pilot.join("state/hooks/qwen-work-cn-line-records.json")).unwrap(),
     )
     .unwrap();
-    run_old();
-    let file = std::fs::read_dir(old_pilot.join("logs/qwen-work-cn/history"))
-        .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
-    let rows = std::fs::read_to_string(file).unwrap();
-    assert!(rows
-        .lines()
-        .all(
-            |line| serde_json::from_str::<Value>(line).unwrap()["gen_ai.turn.id"]
-                == "rollback-turn"
-        ));
+    let shadow = &cursor[transcript.to_string_lossy().as_ref()];
+    assert_eq!(shadow["session_id"], "shared-session");
+    assert_eq!(shadow["last_line_count"], 4);
+    assert!(!old_pilot.join("logs/qwen-work-cn/history").exists());
 }
 
 fn qoder_policy(source: &Path) -> Value {

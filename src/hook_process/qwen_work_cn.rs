@@ -8,8 +8,10 @@
 use super::common::{
     data_dir, decode_payload, env_get, filter_workspace_records, hostname, load_runtime_config,
     local_date, local_stamp_seconds, now_unix_nanos, sanitize_value, sha256_hex, with_file_lock,
-    write_empty, Env, HookRequest, Obj,
+    Env, Obj,
 };
+#[cfg(test)]
+use super::common::{write_empty, HookRequest};
 use super::qwen_work_cn_reader::TranscriptReadBudget;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -74,7 +76,8 @@ struct StepArgs<'a> {
     is_last_step: bool,
 }
 
-pub fn run(request: &mut HookRequest<'_>) -> i32 {
+#[cfg(test)]
+pub(super) fn run(request: &mut HookRequest<'_>) -> i32 {
     let Some((agent_id, log_prefix)) = parse_args(request.args) else {
         let _ = writeln!(io::stderr(), "hook-processor: --agent-id is required");
         return 1;
@@ -86,6 +89,7 @@ pub fn run(request: &mut HookRequest<'_>) -> i32 {
     0
 }
 
+#[cfg(test)]
 fn parse_args(args: &[String]) -> Option<(String, String)> {
     let mut agent_id = String::new();
     let mut log_prefix = String::new();
@@ -196,6 +200,7 @@ fn read_payload(env: &Env, agent_id: &str, stdin: &[u8]) -> Option<Payload> {
     })
 }
 
+#[cfg(test)]
 fn consume_transcript(env: &Env, agent_id: &str, log_prefix: &str, payload: &Payload) {
     let _ = consume_transcript_with_limit(
         env,

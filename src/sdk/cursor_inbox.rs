@@ -7,6 +7,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "../hook_process/cursor_capture.rs"]
 mod capture;
+#[path = "../hook_process/cursor_payload.rs"]
+mod cursor_payload;
 #[path = "../hook_process/payload_decoder.rs"]
 mod payload_decoder;
 
@@ -24,7 +26,17 @@ fn regular_directory(path: &Path) -> io::Result<()> {
 
 pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
     let decoded = payload_decoder::decode_for_platform(raw, cfg!(windows));
-    let mut payload: serde_json::Map<String, Value> = serde_json::from_str(decoded.trim())?;
+    let mut payload = cursor_payload::parse(&decoded, || {
+        cfg!(windows)
+            || ["LOONGSUITE_CURSOR_PLATFORM", "LOONGSUITE_PLATFORM", "OS"]
+                .into_iter()
+                .filter_map(|key| std::env::var(key).ok())
+                .any(|platform| {
+                    ["win32", "windows", "Windows_NT"]
+                        .iter()
+                        .any(|name| name.eq_ignore_ascii_case(platform.trim()))
+                })
+    })?;
     let explicit = std::env::var_os("AGENT_DATA_COLLECTION_CONFIG").filter(|path| !path.is_empty());
     let implicit = explicit.is_none();
     let config_path = explicit

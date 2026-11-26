@@ -64,15 +64,15 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Claude Code | Hook | No | No | No | No |
 | Codex | Hook | No | No | No | No |
 | GitHub Copilot CLI | Native plugin + transcript / native OTel | No | No | No | No |
-| Cursor | Hook (macOS arm64) | Yes | Yes | Yes | Yes |
-| Cursor CLI | Shared Cursor hook (interactive, macOS arm64) | Yes | Yes | Yes | Yes |
+| Cursor | Hook | No | No | No | No |
+| Cursor CLI | Shared Cursor hook | No | No | No | No |
 | DeepSeek Harness | YAML patch plugin + local JSONL polling | No | No | No | No |
 | Grok Build | Hook + local session logs | No | No | No | No |
 | Hermes Agent | Native directory plugin | No | No | No | No |
 | Kiro CLI | Hook / session polling | No | No | No | No |
 | MiMo Code | Plugin injection | No | No | No | No |
-| OpenClaw | Plugin injection (macOS arm64, Gateway 2026.11.5) | Yes | Yes | Yes | Yes |
-| OpenCode | Plugin injection (macOS arm64, 1.19.6 and 2.3.2) | Yes | Yes | Yes | Yes |
+| OpenClaw | Plugin injection | No | No | No | No |
+| OpenCode | Plugin injection | No | No | No | No |
 | Pi Coding Agent | Extension injection | No | No | No | No |
 | Qoder         | Hook                      | Yes          | Yes        | Yes         | Yes                       |
 | Qoder CN | Hook | No | No | No | No |
@@ -81,13 +81,11 @@ CloudShell SDK supports Qoder collection and interception. Full Pilot uses the s
 | Qoder Work | Hook / local data polling | No | No | No | No |
 | Qoder Work CN | Hook / local data polling | No | No | No | No |
 | Qwen Code CLI | Hook | No | No | No | No |
-| Qwen Work CN | Hook / local data polling (macOS arm64) | Yes | Yes | No | Yes |
+| Qwen Work CN | Hook / local data polling | No | No | No | No |
 | Wukong | CLI API polling | No | No | No | No |
 | TRAE CN | Native Hook / local session data | No | No | No | No |
 | WorkBuddy | Hook wakeup + local transcript watch/poll fallback | No | No | No | No |
 | [Doubao Work (macOS/Windows, experimental)](docs/doubao-work.md) | Read-only logs + execution metadata | No | No | No | No |
-
-Qwen Work CN exports conversation and tool telemetry for personal sessions. Collaboration exports conversation telemetry for completed Agent turns.
 
 Integration references for maintainers include [OpenClaw compatibility](docs/agents.md#openclaw-compatibility-and-lifecycle), [DeepSeek Harness collection and lifecycle](docs/agents.md#deepseek-harness-collection-and-lifecycle), and [GitHub Copilot CLI telemetry](docs/zh-CN/copilot-native-telemetry.md).
 

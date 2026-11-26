@@ -361,11 +361,7 @@ fn original(line: u64) -> Vec<Vec<Value>> {
 fn binding(root: &Path) -> PathBuf {
     let hooks = root.join("hooks");
     std::fs::create_dir_all(hooks.join("shared")).unwrap();
-    for name in [
-        "qoder-loongsuite-pilot-hook.sh",
-        "cursor-loongsuite-pilot-hook.sh",
-        "shared/native.sh",
-    ] {
+    for name in ["qoder-loongsuite-pilot-hook.sh", "shared/native.sh"] {
         std::fs::copy(
             Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets/hooks")
@@ -442,14 +438,6 @@ async fn invoke(
         String::from_utf8_lossy(&out.stderr)
     );
     out
-}
-#[cfg(unix)]
-fn disk_rows(logs: &Path, prefix: &str) -> Vec<Value> {
-    std::fs::read_to_string(history(logs, prefix))
-        .unwrap()
-        .lines()
-        .map(|s| serde_json::from_str(s).unwrap())
-        .collect()
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -613,42 +601,4 @@ async fn l713_legacy_qoder_wakeup_real_transcript_cursor_preserves_two_distinct_
         rows[1]["gen_ai.input.messages_delta"],
         json!([{"role":"user","parts":[{"type":"text","content":"完成力扣第143题"}]}])
     );
-}
-#[cfg(unix)]
-#[tokio::test]
-async fn l856_bound_cursor_shell_bad_json_failopens_with_hashed_parse_diagnostic() {
-    let root = root();
-    let hooks = binding(root.path());
-    let data = root.path().join("data");
-    let out = invoke(root.path(), &hooks, "cursor", &data, "not-json", false).await;
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "{}");
-    assert!(!history(&data.join("logs/cursor/history"), "cursor").exists());
-    let rows = disk_rows(&data.join("logs/cursor/errors"), "cursor-error");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["stage"], "parse");
-    assert_eq!(rows[0]["error.type"], "invalid_json");
-    assert!(rows[0]["input_bytes"].as_u64().unwrap() > 0);
-    let hash = rows[0]["input_sha256"].as_str().unwrap();
-    assert_eq!(hash.len(), 64);
-    assert!(hash
-        .bytes()
-        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-}
-#[cfg(unix)]
-#[tokio::test]
-async fn l874_bound_cursor_shell_unwritable_data_path_retains_json_failopen_protocol() {
-    let root = root();
-    let hooks = binding(root.path());
-    let bad = root.path().join("not-a-dir");
-    std::fs::write(&bad, "x").unwrap();
-    let out = invoke(
-        root.path(),
-        &hooks,
-        "cursor",
-        &bad,
-        &json!({"hook_event_name":"postToolUse","text":"hello"}).to_string(),
-        false,
-    )
-    .await;
-    assert_eq!(String::from_utf8(out.stdout).unwrap().trim(), "{}");
 }

@@ -7,12 +7,14 @@
 //! post-assembly skill reads. Windows transcript recovery runs when the host,
 //! hook environment, or transcript path identifies Windows.
 
-#[cfg(test)]
-use super::common::Env;
 use super::common::{
-    agent_name_patch, collect_resource_attributes, data_dir, decode_payload,
-    filter_workspace_records, finite_f64, iso_now, json_number, load_runtime_config, local_date,
-    put_str, sha256_hex, write_empty, HookRequest, Obj,
+    agent_name_patch, filter_workspace_records, finite_f64, iso_now, json_number,
+    load_runtime_config, local_date, put_str, Obj,
+};
+#[cfg(test)]
+use super::common::{
+    collect_resource_attributes, data_dir, decode_payload, sha256_hex, write_empty, Env,
+    HookRequest,
 };
 use super::cursor_policy::{self, Policy};
 use serde_json::Value;
@@ -32,7 +34,8 @@ pub(crate) use deferred::DeferredCursor;
 pub const JOURNAL_LOCK_TIMEOUT_MS: u64 = 3000;
 pub const JOURNAL_LOCK_STALE_MS: u64 = 2000;
 
-pub fn run(request: &mut HookRequest<'_>) -> i32 {
+#[cfg(test)]
+pub(super) fn run(request: &mut HookRequest<'_>) -> i32 {
     let root = data_dir(request.env);
     let raw = decode_payload(request.stdin);
     if raw.trim().is_empty() {
@@ -786,6 +789,7 @@ pub struct Journal {
 }
 
 impl Journal {
+    #[cfg(test)]
     pub fn open(data_dir: &Path) -> Self {
         Self {
             dir: data_dir.join("state").join("cursor"),
@@ -1057,6 +1061,7 @@ fn remove_stale_lock(path: &Path) {
     }
 }
 
+#[cfg(test)]
 fn append_error(
     root: &Path,
     now: &str,
@@ -1094,6 +1099,7 @@ fn append_error(
     }
 }
 
+#[cfg(test)]
 fn append_jsonl(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;

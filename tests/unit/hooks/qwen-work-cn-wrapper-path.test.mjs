@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const shell = readFileSync(resolve('assets/hooks/qwenworkcn-loongsuite-pilot-hook.sh'), 'utf-8');
-const powershell = readFileSync(resolve('assets/hooks/qwenworkcn-loongsuite-pilot-hook.ps1'), 'utf-8');
+const shell = readFileSync(resolve('tests/fixtures/legacy-migrated-hooks/node-v1.20.0/qwenworkcn-loongsuite-pilot-hook.sh'), 'utf-8');
+const powershell = readFileSync(resolve('tests/fixtures/legacy-migrated-hooks/node-v1.20.0/qwenworkcn-loongsuite-pilot-hook.ps1'), 'utf-8');
 const qoderShell = readFileSync(resolve('assets/hooks/qoderwork-loongsuite-pilot-hook.sh'), 'utf-8');
 const qoderPowershell = readFileSync(resolve('assets/hooks/qoderwork-loongsuite-pilot-hook.ps1'), 'utf-8');
 const commonPowershell = readFileSync(resolve('assets/hooks/shared/common.ps1'), 'utf-8');

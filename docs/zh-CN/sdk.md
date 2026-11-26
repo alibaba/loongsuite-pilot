@@ -121,7 +121,7 @@ The development profile `openclaw_plugin_v1` accepts one authorized `hook_jsonl`
 
 The development profile `cursor_hook_v1` accepts one authorized `hook_jsonl` directory. The full Pilot uses the SDK collector for the ordinary Cursor history path, including activity emitted by Cursor CLI.
 
-For local validation, start a new Cursor session with `LOONGSUITE_PILOT_CURSOR_DEFER_ASSEMBLY=1` and the full Pilot SDK listener running against the same Pilot data directory. The Hook can then reply after appending one bounded event to Pilot's private inbox. The collector imports it into a durable journal and assembles the turn in the background. This mode uses Hook events as its source. Native transcript, skill recovery, and Windows install behavior require their own validation before enabling this mode more broadly. Use the regular Hook for deployments that need those paths.
+The installed command is `loongsuite-pilot-sdk-hook sdk-hook --agent cursor --channel observe`. It returns after staging one bounded event in Pilot's private inbox. The selected collector imports it into a durable journal and assembles the turn in the background. The old wrapper paths in the agent definition identify registrations to replace or clean up; the Rust package does not ship or invoke those wrappers. Node rollback uses the selected Node package's own assets.
 
 ### 千问办公普通会话和协作会话
 
@@ -133,7 +133,17 @@ For local validation, start a new Cursor session with `LOONGSUITE_PILOT_CURSOR_D
 loongsuite-pilot-sdk-hook sdk-hook --agent qwen-work-cn --event Stop --channel observe --data-dir /path/to/sdk-instance
 ```
 
-完整 Pilot 的当前默认 Hook 负责维护 history，既有同步拦截由相应入口处理。启用上游关联或多模态时沿用完整 Pilot 的原生采集。原生会话单轮读盘预算和协作快照大小仍需按实际负载验证。切换生产者时停用旧入口，避免双方推进同一个会话。
+完整 Pilot 的 Stop 观察入口只唤醒，采集器读取并组装 history。启用本地裁决后，UserPromptSubmit 和工具事件走原生 Hook 的 local 通道；未启用裁决时保留空操作的 UserPromptSubmit，供客户端写入提示。普通和协作实例分别保存队列与游标；回滚到 Node 前两路均需排空并交接，不能用一个实例状态推断另一个。
+
+### Runtime compatibility and retirement
+
+| Retained path | Caller and selection | Retirement condition |
+| --- | --- | --- |
+| OpenClaw legacy loopback and `INTERCEPTOR_CLI` | The existing Gateway plug-in's compatibility path. A selected native SDK command owns the decision; an unavailable SDK endpoint fails open, not through a second service. Without a selected native SDK path, an active legacy runtime can handle the async HTTP path and the sync path via a usable CLI, including an explicitly configured legacy JS adapter. | Remove after supported legacy plug-in hosts and explicitly configured legacy CLI consumers migrate; do not remove compatibility from prior installed packages. |
+| Shell-hosted OpenClaw and Cursor history | Full Pilot in a non-standalone mode, or with upstream correlation or the Agent's supported multimodal handling selected. The SDK-backed standalone path and the shell history collector do not run concurrently on the same Pilot source. | Remove only after matching host metadata, multimodal and upstream correlation in SDK modes, with checkpoint and deployment coverage. |
+| Shell-hosted Qwen Work CN trace and collaboration | Same host-only mode selection, including supported multimodal on the personal history path. The separate SQLite fallback is selected only when the trace listener is off and the SQLite listener is enabled. | Remove after the SDK covers the remaining host modes and the corresponding source and checkpoint contracts. |
+
+OpenCode's default history collector is the SDK-backed one; there is no parallel legacy history registration.
 
 ## 活动、监控与背压
 

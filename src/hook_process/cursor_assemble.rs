@@ -59,12 +59,6 @@ static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").expect(
 static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("whitespace"));
 static THOUGHT_SUFFIX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+)-(\d+)-([a-z0-9]{4,})$").expect("thought suffix"));
-static WINDOWS_JSON_COMMA_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?,"#).expect("windows comma"));
-static WINDOWS_JSON_OBJECT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?}"#).expect("windows object"));
-static WINDOWS_JSON_ARRAY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?]"#).expect("windows array"));
 
 pub(super) struct TurnOptions<'a> {
     pub user_id: &'a str,
@@ -172,18 +166,16 @@ pub(super) fn windows_context(env: &Env, path_hint: &str) -> bool {
     cfg!(windows) || env_says_windows(env) || path_says_windows(path_hint)
 }
 
+#[cfg(test)]
+#[path = "cursor_payload.rs"]
+mod cursor_payload;
+
+#[cfg(test)]
 pub(super) fn repaired_windows_object(raw: &str, env: &Env) -> Option<Obj> {
     if !windows_context(env, raw) {
         return None;
     }
-    let repaired = repair_windows_json(raw);
-    if repaired == raw {
-        return None;
-    }
-    match serde_json::from_str::<Value>(repaired.trim()) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+    cursor_payload::parse(raw, || true).ok()
 }
 
 pub(super) fn assemble_parent_turn(
@@ -3206,12 +3198,6 @@ fn merge_skill_exchange(
         merged.extend(tail);
     }
     Value::Array(merged)
-}
-
-fn repair_windows_json(raw: &str) -> String {
-    let step = WINDOWS_JSON_COMMA_RE.replace_all(raw, "\",");
-    let step = WINDOWS_JSON_OBJECT_RE.replace_all(&step, "\"}");
-    WINDOWS_JSON_ARRAY_RE.replace_all(&step, "\"]").into_owned()
 }
 
 fn env_says_windows(env: &Env) -> bool {

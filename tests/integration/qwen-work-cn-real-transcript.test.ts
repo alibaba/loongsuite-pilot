@@ -70,7 +70,12 @@ function deployQwenHooks(hooksDir: string): void {
     'qwen-work-cn-hook-processor.mjs',
     'agent-event-normalizer.mjs',
   ]) {
-    copyFileSync(path.join(sourceDir, file), path.join(hooksDir, file));
+    copyFileSync(path.join(
+      file === 'qwenworkcn-loongsuite-pilot-hook.sh'
+        ? path.resolve('tests', 'fixtures', 'legacy-migrated-hooks', 'node-v1.20.0')
+        : sourceDir,
+      file,
+    ), path.join(hooksDir, file));
   }
   cpSync(path.join(sourceDir, 'shared'), path.join(hooksDir, 'shared'), { recursive: true });
 }

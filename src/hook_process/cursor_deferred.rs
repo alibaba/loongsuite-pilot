@@ -6,7 +6,9 @@ use crate::hook_process::common::Env;
 use serde_json::Value;
 use std::collections::HashSet;
 use std::fs;
-use std::io::{self, Read, Write};
+#[cfg(test)]
+use std::io::Write;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -67,6 +69,7 @@ fn read_deferred_event(path: &Path) -> io::Result<Obj> {
     Ok(event)
 }
 
+#[cfg(test)]
 pub(super) fn enqueue(root: &Path, policy: &Policy, mut event: Obj) -> Result<(), String> {
     if !policy.capture(cursor_policy::variant(event.get("cursor_version"))) {
         cursor_policy::omit_content(&mut event);

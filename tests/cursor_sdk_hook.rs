@@ -193,3 +193,89 @@ fn native_cursor_observe_keeps_a_redacted_turn_signal_while_the_collector_is_dow
     assert_eq!(row["cursor_hook"]["conversation_id"], "session-1");
     assert_eq!(row["cursor_hook"]["generation_id"], "turn-1");
 }
+
+#[test]
+fn cursor_native_hook_recovers_legacy_windows_encoding_only_in_windows_context() {
+    let root = tempfile::tempdir().unwrap();
+    let raw = br#"{"conversation_id":"cursor-session","generation_id":"cursor-turn","prompt":"Recovered?}"#;
+    for (index, platform) in ["Windows_NT", "linux"].into_iter().enumerate() {
+        let data = root.path().join(index.to_string());
+        std::fs::create_dir(&data).unwrap();
+        let data = data.canonicalize().unwrap();
+        let mut hook = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+            .args(["sdk-hook", "--channel", "observe", "--agent", "cursor"])
+            .args(["--event", "beforeSubmitPrompt", "--data-dir"])
+            .arg(&data)
+            .env("LOONGSUITE_CURSOR_PLATFORM", platform)
+            .env_remove("LOONGSUITE_PLATFORM")
+            .env_remove("OS")
+            .env_remove("AGENT_DATA_COLLECTION_CONFIG")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        hook.stdin.take().unwrap().write_all(raw).unwrap();
+        let output = hook.wait_with_output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(&output.stdout, b"{}\n");
+        let inbox = data.join("state/cursor/deferred/inbox");
+        if index == 0 || cfg!(windows) {
+            let entry = std::fs::read_dir(inbox).unwrap().next().unwrap().unwrap();
+            let record: Value =
+                serde_json::from_slice(&std::fs::read(entry.path()).unwrap()).unwrap();
+            assert_eq!(record["cursor_hook"]["prompt"], "Recovered");
+        } else {
+            assert!(!inbox.exists(), "never rewrite invalid Unix input");
+        }
+    }
+}
+
+#[test]
+fn retired_cursor_and_qwen_commands_are_noops() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().canonicalize().unwrap();
+    let transcript = data.join("old-qwen-session.jsonl");
+    std::fs::write(
+        &transcript,
+        r#"{"type":"user","message":{"role":"user","content":"prompt"}}"#,
+    )
+    .unwrap();
+    for (args, payload) in [
+        (
+            &["cursor", "--defer-assembly"][..],
+            json!({"hook_event_name":"stop","conversation_id":"cursor-session",
+                "generation_id":"cursor-turn","status":"completed"}),
+        ),
+        (
+            &[
+                "qwen-work-cn",
+                "--agent-id",
+                "qwen-work-cn",
+                "--log-prefix",
+                "qwen-work-cn",
+            ][..],
+            json!({"hook_event_name":"Stop","transcript_path":transcript,"session_id":"old-qwen-session"}),
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot"))
+            .arg("hook-process")
+            .args(args)
+            .env("HOME", &data)
+            .env("USERPROFILE", &data)
+            .env("LOONGSUITE_PILOT_DATA_DIR", &data)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = serde_json::to_vec(&payload).unwrap();
+        if let Err(error) = child.stdin.take().unwrap().write_all(&input) {
+            assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success(), "{:?}", output);
+        assert_eq!(&output.stdout, b"{}\n");
+    }
+    assert_eq!(std::fs::read_dir(data).unwrap().count(), 1);
+}

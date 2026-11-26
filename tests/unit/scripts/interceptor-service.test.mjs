@@ -56,8 +56,8 @@ describe('interceptor inside the collector process', () => {
   });
 
   it('pins QwenWork interceptor scripts to --agent qwen-work-cn, not qoder-auto', () => {
-    const sh = readFileSync('assets/hooks/interceptor-qwenworkcn-hook.sh', 'utf-8');
-    const ps1 = readFileSync('assets/hooks/interceptor-qwenworkcn-hook.ps1', 'utf-8');
+    const sh = readFileSync('tests/fixtures/legacy-migrated-hooks/interceptor-qwenworkcn-hook.sh', 'utf-8');
+    const ps1 = readFileSync('tests/fixtures/legacy-migrated-hooks/interceptor-qwenworkcn-hook.ps1', 'utf-8');
     expect(sh).toContain('hook --agent qwen-work-cn');
     expect(ps1).toContain('hook --agent qwen-work-cn');
     expect(sh).not.toMatch(/--agent qoder-auto/);
