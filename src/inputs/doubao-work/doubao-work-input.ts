@@ -13,6 +13,7 @@ import { checkpointDraft } from './doubao-work-state.js';
 import { DoubaoWorkBudget, DoubaoWorkDeferred } from './doubao-work-budget.js';
 import { DoubaoWorkNativeReader } from './doubao-work-reader.js';
 import { resolveDoubaoWorkPaths, type DoubaoClient } from '../../utils/doubao-work-paths.js';
+import { DoubaoChatReader } from './doubao-chat-reader.js';
 
 const FILE_PATTERN = /^saman(?:_frontend)?_\d{4}\.\d{4}\.\d+\.log$/;
 const MAX_FILES = 128;
@@ -48,6 +49,8 @@ interface Checkpoint {
 }
 
 export interface DoubaoWorkInputOptions extends InputOptions {
+  inputId?: DoubaoClient;
+  resourceShare?: 1 | 2;
   client?: DoubaoClient;
   logDir?: string; sessionsRoot?: string; snapshotRoot?: string;
   /** Native metadata has no watcher. Limit scans independently of log wakeups. */
@@ -58,8 +61,8 @@ export interface DoubaoWorkInputOptions extends InputOptions {
 
 /** Read-only adapter for observed macOS and Windows client lifecycle logs. */
 export class DoubaoWorkInput extends BaseInput {
-  readonly id = 'doubao-work';
-  readonly agentType = ClientType.DoubaoWork;
+  readonly id: DoubaoClient;
+  readonly agentType: ClientType;
   readonly collectionMethod = CollectionMethod.SessionFilePolling;
   private readonly client: DoubaoClient;
   private readonly logDir: string | undefined;
@@ -78,7 +81,9 @@ export class DoubaoWorkInput extends BaseInput {
   private executionScanCursor: string | undefined;
   private readonly executionDigests = new WeakMap<NativeExecution, string>();
   private readonly nativeReader: DoubaoWorkNativeReader;
+  private readonly chatReader: DoubaoChatReader | undefined;
   private readonly workLimits: DoubaoWorkInputOptions['workBudget'];
+  private readonly resourceShare: number;
   private budget!: DoubaoWorkBudget;
   private readonly cycleGraphs = new Map<string, Promise<NativeGraph | undefined>>();
   private readonly reportedIoErrors = new Set<string>();
@@ -91,7 +96,15 @@ export class DoubaoWorkInput extends BaseInput {
 
   constructor(opts: DoubaoWorkInputOptions) {
     super(opts);
-    this.client = opts.client ?? 'doubao-work';
+    this.id = opts.inputId ?? 'doubao-work';
+    this.client = opts.client ?? this.id;
+    // The legacy listener can read App data under the existing Work policy.
+    this.agentType = this.id === 'doubao' ? ClientType.Doubao : ClientType.DoubaoWork;
+    const legacy = this.stateStore.get('doubao-work');
+    if (this.id === 'doubao' && !this.stateStore.get(this.id).extra?.doubaoWork
+      && (legacy.extra?.doubaoWork as Checkpoint | undefined)?.client === 'doubao') {
+      this.stateStore.set(this.id, { ...legacy, extra: { doubaoWork: legacy.extra!.doubaoWork } });
+    }
     const defaults = resolveDoubaoWorkPaths(this.client);
     this.logDir = opts.logDir ? path.resolve(opts.logDir) : defaults.logDir;
     this.scope = doubaoDigest(this.logDir ?? 'unsupported-platform');
@@ -99,10 +112,15 @@ export class DoubaoWorkInput extends BaseInput {
     this.userDataRoot = defaults.userDataRoot;
     this.snapshotRoot = opts.snapshotRoot ?? defaults.snapshotRoot;
     this.nativeScanIntervalMs = Math.max(0, opts.nativeScanIntervalMs ?? 10_000);
-    this.workLimits = opts.workBudget;
+    this.resourceShare = opts.resourceShare ?? 1;
+    this.workLimits = { bytes: 8 * 1024 * 1024 / this.resourceShare, records: 4096 / this.resourceShare,
+      milliseconds: 50 / this.resourceShare, ...opts.workBudget };
     this.nativeReader = new DoubaoWorkNativeReader({ sessionsRoot: this.sessionsRoot, userDataRoot: this.userDataRoot,
       snapshotRoot: this.snapshotRoot, sessionNamespace: defaults.sessionNamespace,
+      maxCacheBytes: 64 * 1024 * 1024 / this.resourceShare, maxFiles: 512 / this.resourceShare,
       diagnostic: reason => this.logger.warn('Doubao Work bounded native collection degraded', { reason }) });
+    this.chatReader = this.client === 'doubao' && this.userDataRoot
+      ? new DoubaoChatReader(this.userDataRoot, 16 * 1024 * 1024 / this.resourceShare) : undefined;
   }
 
   static defaultLogDir(client?: DoubaoClient): string | undefined {
@@ -151,6 +169,7 @@ export class DoubaoWorkInput extends BaseInput {
     if (this.wakeup) clearTimeout(this.wakeup);
     this.wakeup = undefined;
     this.nativeReader.clear(); this.cycleGraphs.clear();
+    this.chatReader?.clear();
     this.reconstructionJobs.clear();
     this.logSweep = undefined; this.finalizeLogWindow = undefined;
   }
@@ -392,8 +411,15 @@ export class DoubaoWorkInput extends BaseInput {
     if (committed !== saved || this.nativeDeferred || Date.now() >= this.nextCacheDiagnosticsAt) {
       this.nextCacheDiagnosticsAt = Date.now() + 60_000;
       this.logger.debug('Doubao Work native cache statistics', { ...this.nativeReader.stats() });
+      if (this.chatReader) this.logger.debug('Doubao chat native cache statistics', this.chatReader.stats());
     }
-    for (const entry of entries) entry['loongsuite.doubao_work.client'] = this.client;
+    for (const entry of entries) {
+      entry['loongsuite.doubao_work.client'] = this.client;
+      entry['gen_ai.agent.type'] = this.agentType;
+      entry['gen_ai.framework'] = this.agentType;
+      if (entry['gen_ai.agent.id'] === 'doubao-work') entry['gen_ai.agent.id'] = this.agentType;
+      if (entry['gen_ai.agent.name'] === 'Doubao Work' && this.id === 'doubao') entry['gen_ai.agent.name'] = 'Doubao';
+    }
     return entries;
   }
 
@@ -481,6 +507,10 @@ export class DoubaoWorkInput extends BaseInput {
     }
     if (event.selectedSkills !== undefined) pending.selectedSkills = event.selectedSkills;
     if (event.selectedPartners !== undefined) pending.selectedPartners = event.selectedPartners;
+    if (event.modeType !== undefined) pending.modeType = event.modeType;
+    if (event.sendMessageId !== undefined) pending.sendMessageId = event.sendMessageId;
+    if (event.receiveMessageId !== undefined) pending.receiveMessageId = event.receiveMessageId;
+    if (event.name === 'on_message_receiving_end') pending.receiveEndNano = event.timeNano;
   }
 
   private async complete(state: Checkpoint, key: string, pending: PendingTurn, entries: AgentActivityEntry[]): Promise<void> {
@@ -490,7 +520,38 @@ export class DoubaoWorkInput extends BaseInput {
       let complete = buildDoubaoTaskEvents(this.scope, pending, pending.terminal, Date.now(), pairs);
       if (complete.length === 0) return;
       const conversationId = pending.terminal.conversationId ?? pending.conversationId;
-      if (conversationId) {
+      if (this.chatReader && pending.modeType && pending.modeType !== 'work_task') {
+        try {
+          const failed = pending.terminal.clientOutcome === 'cancelled' || pending.terminal.clientOutcome === 'error';
+          const terminalNano = BigInt(pending.terminal.timeNano);
+          const receiveEnd = pending.receiveEndNano;
+          const received = receiveEnd && BigInt(receiveEnd) > BigInt(complete[0].time_unix_nano)
+            && BigInt(receiveEnd) <= terminalNano;
+          const responseEnd = received ? receiveEnd : (failed ? pending.terminal.timeNano : undefined);
+          // The receive event can reach the log after the session ends. Keep the
+          // request pending so the next poll can emit its full trace once.
+          if (!responseEnd) return;
+          const content = await this.chatReader.find(pending.turnId, this.budget);
+          if (!content || (!content.finished && !failed)) return;
+          if (content.conversationId !== conversationId || content.localMessageId !== pending.localMessageId
+            || content.sendMessageId !== pending.sendMessageId || content.receiveMessageId !== pending.receiveMessageId
+            || content.queryMs < pending.queryMs
+            || BigInt(content.queryMs) * 1_000_000n > terminalNano) return;
+          complete[0]['gen_ai.input.messages_delta'] = [{ role: 'user', parts: [{ type: 'text', content: content.input }] }];
+          complete[complete.length - 1]['gen_ai.output.messages'] = [{ role: 'assistant', parts: [{ type: 'text', content: content.output }] }];
+          for (const event of complete) {
+            event['loongsuite.doubao_work.mode'] = 'chat';
+            if (content.modelId) event['loongsuite.doubao_work.native_model_id'] = content.modelId;
+          }
+          complete[0]['agent.doubao_work.chat_response_end'] = responseEnd;
+          complete[0]['agent.doubao_work.chat_response_id'] = content.receiveMessageId;
+          if (!received) complete[0]['agent.doubao_work.chat_response_ended_with_session'] = true;
+        } catch (error) {
+          if (this.defer(error)) return;
+          this.logger.warn('Doubao chat native content unavailable; preserving pending request');
+          return;
+        }
+      } else if (conversationId) {
         try {
           const graph = await this.readConversationGraph(conversationId, true, `request:${key}`);
           if (graph) {
@@ -693,8 +754,9 @@ export class DoubaoWorkInput extends BaseInput {
     if (!job) {
       const assignments = content.assignments[actor] ?? [];
       const bytes = (content.sourceBytes?.[actor] ?? 0) + assignments.reduce((n, value) => n + Buffer.byteLength(value.text) * 2, 0) + 512 * 1024;
-      if (bytes > 32 * 1024 * 1024) { this.logger.warn('Doubao Work reconstruction content exceeds bounded cache', { reason: 'round_cache_capacity' }); return undefined; }
-      if (this.reconstructionJobs.size >= 4 || [...this.reconstructionJobs.values()].reduce((n, value) => n + value.bytes, bytes) > 32 * 1024 * 1024) throw new DoubaoWorkDeferred('round_queue');
+      if (bytes > 32 * 1024 * 1024 / this.resourceShare) { this.logger.warn('Doubao Work reconstruction content exceeds bounded cache', { reason: 'round_cache_capacity' }); return undefined; }
+      if (this.reconstructionJobs.size >= 4 / this.resourceShare
+        || [...this.reconstructionJobs.values()].reduce((n, value) => n + value.bytes, bytes) > 32 * 1024 * 1024 / this.resourceShare) throw new DoubaoWorkDeferred('round_queue');
       const scoped: NativeContent = { calls: Object.fromEntries(Object.entries(content.calls).filter(([, value]) => value.actor === actor).map(([id, value]) => [id, { ...value }])),
         assignments: { [actor]: assignments }, lastAnswers: { [actor]: content.lastAnswers[actor] }, transcripts: { [actor]: content.transcripts?.[actor] ?? [] },
         transcriptOffsets: { [actor]: content.transcriptOffsets?.[actor] ?? 0 },

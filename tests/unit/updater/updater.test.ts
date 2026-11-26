@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AutoUpdateConfig } from '../../../src/types/index.js';
 
@@ -6,6 +7,12 @@ vi.mock('../../../src/utils/logger.js', () => ({
   createLogger: () => ({
     info: vi.fn(), debug: vi.fn(), warn: vi.fn(), error: vi.fn(),
   }),
+}));
+
+const mockHookUpgradeInProgress = vi.fn<[string], Promise<boolean>>();
+vi.mock('../../../src/utils/hook-restore-request.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../../../src/utils/hook-restore-request.js')>(),
+  hookUpgradeInProgress: (dir: string) => mockHookUpgradeInProgress(dir),
 }));
 
 // --- Mock version-utils (we test these separately) ---
@@ -59,6 +66,9 @@ vi.mock('node:fs', () => ({
   writeFileSync: (...args: unknown[]) => mockWriteFileSync(...args),
   renameSync: (...args: unknown[]) => mockRenameSync(...args),
   rmSync: vi.fn(),
+  existsSync: vi.fn(() => false),
+  readFileSync: vi.fn(() => ''),
+  statSync: vi.fn(),
 }));
 
 // --- Mock stream pipeline ---
@@ -70,6 +80,7 @@ vi.mock('node:stream/promises', () => ({
 const mockExecFile = vi.fn();
 vi.mock('node:child_process', () => ({
   execFile: (...args: any[]) => mockExecFile(...args),
+  spawn: vi.fn(),
 }));
 
 // --- Mock node:util promisify to wrap our mockExecFile ---
@@ -179,6 +190,7 @@ describe('Updater', () => {
     vi.useFakeTimers();
     vi.stubGlobal('fetch', mockFetch);
     tmpDir = '/tmp/test-updater';
+    mockHookUpgradeInProgress.mockResolvedValue(false);
 
     // Default fs mocks
     mockFsRm.mockResolvedValue(undefined);
@@ -230,22 +242,44 @@ describe('Updater', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
   });
 
   // ─── LIFECYCLE ─────────────────────────────────────────
 
   describe('lifecycle', () => {
-    it('does not start timer when disabled', () => {
+    it('keeps a publication marker that can still protect a surviving postinstall', () => {
       const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
       updater.start();
-      // No timers should be scheduled (besides the underlying fake timer queue)
-      expect(vi.getTimerCount()).toBe(0);
+      expect(mockFsRm).not.toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+      updater.stop();
+    });
+
+    it('does not read a hook restore request when hook repair is off', async () => {
+      const updater = new Updater(makeConfig({ tamperProtection: false }), tmpDir);
+      await updater.check();
+      expect(mockFsReadFile).not.toHaveBeenCalledWith(
+        expect.stringContaining('hook-restore-request.json'),
+        'utf8',
+      );
+    });
+
+    it('uses the same check timer when version checks are disabled', () => {
+      const updater = new Updater(makeConfig({ enabled: false }), tmpDir);
+      updater.start();
+      // setTimeout (60s) + check interval + heartbeat interval. The check skips version lookup.
+      expect(vi.getTimerCount()).toBe(3);
+      updater.stop();
+      expect(vi.getTimerCount()).toBe(1); // setTimeout remains but interval cleared
     });
 
     it('schedules initial delayed check and interval on start', () => {
       const updater = new Updater(makeConfig(), tmpDir);
       updater.start();
-      // setTimeout (60s) + check interval + heartbeat interval
+      // setTimeout (60s) + check interval + heartbeat interval. Hook repair runs inside check.
       expect(vi.getTimerCount()).toBe(3);
       updater.stop();
     });
@@ -524,6 +558,32 @@ describe('Updater', () => {
       );
     });
 
+    it.each([
+      { layout: 'default', cacheOverride: '', cacheName: '.loongsuite-pilot' },
+      { layout: 'split', cacheOverride: '~/custom-cache', cacheName: 'custom-cache' },
+    ])('uses the bootstrap cache for pointers and hook publication in the $layout layout', async ({
+      cacheOverride, cacheName,
+    }) => {
+      setupForDownload();
+      const home = path.resolve(tmpDir, 'home');
+      const data = path.join(home, 'custom-data');
+      const cache = path.join(home, cacheName);
+      vi.stubEnv('HOME', home);
+      vi.stubEnv('USERPROFILE', home);
+      vi.stubEnv('LOONGSUITE_PILOT_CACHE_DIR', cacheOverride);
+      vi.stubEnv('LOONGSUITE_PILOT_DATA_DIR', data);
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+
+      await new Updater(makeConfig()).check();
+
+      expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'hook-upgrade-in-progress'), expect.any(String));
+      expect(mockFsWriteFile).toHaveBeenCalledWith(path.join(cache, 'current.tmp'), '1.0.2_bbb\n');
+      const postinstall = mockExecFile.mock.calls.find(([, args]) =>
+        Array.isArray(args) && args.some((arg) => String(arg).endsWith('postinstall.js')));
+      expect(postinstall?.[2].env.LOONGSUITE_PILOT_DATA_DIR).toBe(data);
+    });
+
     it('runs the staged package postinstall, pointed at this install data dir', async () => {
       // scripts/postinstall.js is the only thing that fills <dataDir>/{hooks,skills,
       // plugins}, so this call is also how an install broken by the Windows fs.cpSync
@@ -555,6 +615,101 @@ describe('Updater', () => {
       // $HOME/.loongsuite-pilot, which is the wrong one for a custom data dir.
       const env = (call![2] as { env?: Record<string, string> }).env ?? {};
       expect(env.LOONGSUITE_PILOT_DATA_DIR).toBe(tmpDir);
+
+      const fallback = mockExecFile.mock.calls.find((c: unknown[]) => c[0] === 'npm');
+      expect(fallback?.[2]).toMatchObject({
+        env: { LOONGSUITE_PILOT_DATA_DIR: expect.stringContaining('npm-data') },
+      });
+      expect(fallback?.[2].env.LOONGSUITE_PILOT_DATA_DIR).not.toBe(tmpDir);
+
+      const markerWrite = mockFsWriteFile.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      const postinstallCall = mockExecFile.mock.calls.findIndex((c: unknown[]) =>
+        Array.isArray(c[1]) && (c[1] as string[]).some(a => String(a).includes('postinstall.js')));
+      expect(markerWrite).toBeGreaterThanOrEqual(0);
+      expect(mockFsWriteFile.mock.invocationCallOrder[markerWrite]).toBeLessThan(
+        mockExecFile.mock.invocationCallOrder[postinstallCall],
+      );
+      const currentRename = mockFsRename.mock.calls.findIndex(([, dst]) => String(dst).endsWith('/current'));
+      const markerClear = mockFsRm.mock.calls.findIndex(([filePath]) =>
+        String(filePath).endsWith('hook-upgrade-in-progress'));
+      expect(markerClear).toBeGreaterThanOrEqual(0);
+      expect(mockFsRename.mock.invocationCallOrder[currentRename]).toBeLessThan(
+        mockFsRm.mock.invocationCallOrder[markerClear],
+      );
+    });
+
+    it('defers activation while the preceding postinstall marker is still fresh', async () => {
+      setupForDownload();
+      mockHookUpgradeInProgress.mockResolvedValue(true);
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockHookUpgradeInProgress).toHaveBeenCalledWith(tmpDir);
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(expect.stringContaining('current.tmp'), expect.anything());
+      expect(mockFsRm).not.toHaveBeenCalledWith(expect.stringContaining('hook-upgrade-in-progress'), { force: true });
+    });
+
+    it('clears the hook upgrade marker when activation fails', async () => {
+      setupForDownload();
+      mockFsAccess.mockImplementation((p: string) => {
+        if (p.includes('package.json')) return Promise.resolve();
+        if (p.includes('dist/index.js')) return Promise.resolve();
+        if (p.includes('dist/updater/index.js')) return Promise.resolve();
+        if (p.includes('scripts/collector-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/updater-daemon.js')) return Promise.resolve();
+        if (p.includes('scripts/loongsuite-pilot.sh')) return Promise.resolve();
+        if (p.includes('postinstall.js')) return Promise.resolve();
+        return Promise.reject(new Error('ENOENT'));
+      });
+      mockFsRename.mockImplementation((src: string) => {
+        if (String(src).endsWith('.candidate')) return Promise.reject(new Error('rename failed'));
+        return Promise.resolve();
+      });
+
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(mockFsRm).toHaveBeenCalledWith(
+        expect.stringContaining('hook-upgrade-in-progress'),
+        { force: true },
+      );
+      expect(mockFsWriteFile).not.toHaveBeenCalledWith(
+        expect.stringContaining('/current.tmp'),
+        '1.0.2_bbb\n',
+      );
+    });
+
+    it('restores old hook assets and the pointer when activation fails', async () => {
+      setupForDownload();
+      const access = mockFsAccess.getMockImplementation()!;
+      mockFsAccess.mockImplementation((file) => file.endsWith('postinstall.js') ? Promise.resolve() : access(file));
+      const readFile = mockFsReadFile.getMockImplementation()!;
+      mockFsReadFile.mockImplementation((file, encoding) => {
+        if (file.endsWith('/current')) return Promise.resolve('1.0.1_aaa\n');
+        if (file.endsWith('/VERSION')) return Promise.resolve('version=1.0.1\ngit_commit=aaa\n');
+        return readFile(file, encoding);
+      });
+      mockFsCopyFile.mockImplementation((file) => file.includes('1.0.2_bbb')
+        ? Promise.reject(new Error('copy failed'))
+        : Promise.resolve());
+
+      const posts: string[] = [];
+      mockExecFile.mockImplementation(async (_node: string, args: string[]) => {
+        if (args[0]?.endsWith('postinstall.js')) posts.push(args[0]);
+        return { stdout: '', stderr: '' };
+      });
+      const updater = new Updater(makeConfig(), tmpDir);
+      await updater.check();
+
+      expect(posts).toEqual([
+        expect.stringContaining('1.0.2_bbb.candidate'),
+        expect.stringContaining('1.0.1_aaa'),
+      ]);
+      expect(mockFsWriteFile.mock.calls.filter(([file]) => file.endsWith('/current.tmp'))).toEqual([
+        [expect.any(String), '1.0.2_bbb\n'],
+        [expect.any(String), '1.0.1_aaa\n'],
+      ]);
     });
 
     it('adopts the managed node runtime + prebuilt modules and pins node-bin', async () => {
@@ -1408,6 +1563,22 @@ describe('Updater', () => {
       await updater.check();
 
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('fetches the manifest once when two checks overlap', async () => {
+      let releaseFetch: (value: Response) => void = () => {};
+      mockFetch.mockImplementation(() => new Promise((resolve) => {
+        releaseFetch = resolve;
+      }));
+      const updater = new Updater(makeConfig(), tmpDir);
+      const first = updater.check();
+      const second = updater.check();
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      releaseFetch(makeResponseJson(null, 500));
+      await Promise.all([first, second]);
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect((updater as any).checking).toBe(false);
     });
 
     it('resets checking flag after check completes', async () => {

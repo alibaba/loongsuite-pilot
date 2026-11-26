@@ -14,7 +14,7 @@ import { hostBlockDetail } from '../guardrail.js';
 import { interceptorRuntimePath } from '../paths.js';
 import { isInterceptorAgent, type HookRequest, type InterceptorRuntime } from '../types.js';
 import { DaemonClient } from './daemon-client.js';
-import { resolveQoderSurface } from './qoder-surface.js';
+import { resolveQoderCnSurface, resolveQoderSurface } from './qoder-surface.js';
 
 export interface HookCliDeps {
   readStdin: () => Promise<string>;
@@ -22,6 +22,7 @@ export interface HookCliDeps {
   log: (message: string, extra?: Record<string, unknown>) => void;
   runtimePath?: string;
   resolveSurface?: () => ReturnType<typeof resolveQoderSurface>;
+  resolveCnSurface?: () => ReturnType<typeof resolveQoderCnSurface>;
   createClient?: (port: number) => Pick<DaemonClient, 'checkHook' | 'health'>;
   writeAccessLog?: (entry: InterceptorAccessLogEntry) => void;
 }
@@ -64,11 +65,18 @@ export async function runHook(args: string[], deps: HookCliDeps): Promise<number
   const input = accessInputFromPayload(payload);
 
   const agentFlag = flagValue(args, '--agent');
+  const business = payload.parent_business_info;
+  const product = business && typeof business === 'object' && !Array.isArray(business)
+    ? (business as Record<string, unknown>).product : undefined;
   const surface = agentFlag === 'qoder-auto'
     ? (deps.resolveSurface ?? resolveQoderSurface)()
-    : isInterceptorAgent(agentFlag)
-      ? agentFlag
-      : null;
+    : agentFlag === 'qoder-cn-auto'
+      ? product === 'cli' ? 'qoderclicn'
+        : product === 'app' ? 'qoder-cn'
+          : (deps.resolveCnSurface ?? resolveQoderCnSurface)()
+      : isInterceptorAgent(agentFlag)
+        ? agentFlag
+        : null;
   if (!surface) {
     deps.log('hook target is missing or unknown, fail-open');
     recordFailOpen(deps, eventName, input, 'hook target is missing or unknown');

@@ -112,6 +112,10 @@ async function main(): Promise<void> {
   });
   let commands = Promise.resolve();
   port.on('message', (command: InterceptorWorkerCommand) => {
+    if (command.type === 'bind-prompt') {
+      store.merge([command.record]);
+      return;
+    }
     if (command.type === 'ack') {
       if (inflight?.id === command.id) {
         ackedSeq = inflight.seq;

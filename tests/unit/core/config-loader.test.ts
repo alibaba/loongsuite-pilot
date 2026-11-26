@@ -397,6 +397,7 @@ describe('ConfigLoader', () => {
       expect(config.listeners['pi-coding-agent-log']).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000 });
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 10_000 });
     });
 
     it('resolves the passive Doubao source override without changing other listeners', async () => {
@@ -412,7 +413,35 @@ describe('ConfigLoader', () => {
       mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao' } } });
       const config = await loadConfig();
       expect(config.listeners['doubao-work']).toEqual({ enabled: true, pollInterval: 10_000, client: 'doubao' });
+      expect(config.listeners.doubao.enabled).toBe(false);
       expect(config.listeners.workbuddy).toEqual({ enabled: true, pollInterval: 10_000 });
+    });
+
+    it('keeps explicit legacy selection while allowing an independent App listener', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { 'doubao-work': { client: 'doubao-work' },
+        doubao: { enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao).toEqual({ enabled: true, pollInterval: 2000, logDir: '/synthetic/app/logs' });
+      expect(config.listeners['doubao-work'].client).toBe('doubao-work');
+    });
+
+    it.each([false, true])('does not add App to a prior installer selection with Work enabled=%s', async enabled => {
+      mockReadJsonFile.mockResolvedValueOnce({ agents: { 'doubao-work': { enabled } } });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(false);
+    });
+
+    it('honors an explicit App agent selection independently of Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        agents: { 'doubao-work': { enabled: false }, doubao: { enabled: true } },
+      });
+      expect((await loadConfig()).listeners.doubao.enabled).toBe(true);
+    });
+
+    it('does not redirect the independent App listener to Work', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({ listeners: { doubao: { client: 'doubao-work' } } });
+      const config = await loadConfig();
+      expect(config.listeners.doubao.enabled).toBe(false);
+      expect(config.listeners['doubao-work'].enabled).toBe(true);
     });
 
     it('disables only the Doubao listener for an invalid client instead of collecting another product', async () => {
@@ -597,6 +626,7 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
       expect(config.hookWatchdog.intervalMs).toBe(5 * 60_000);
       expect(config.hookWatchdog.repairCooldownMs).toBe(10 * 60_000);
     });
@@ -622,6 +652,48 @@ describe('ConfigLoader', () => {
 
       const config = await loadConfig();
       expect(config.hookWatchdog.enabled).toBe(false);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
+    });
+
+    it.each([
+      [true, true, true],
+      [true, false, false],
+      [false, true, false],
+      [false, false, false],
+    ])('watchdog %s and child %s resolve tamper protection to %s', async (watchdog, child, active) => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: {
+          enabled: watchdog,
+          tamperProtection: { enabled: child },
+        },
+      });
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(watchdog);
+      expect(config.hookWatchdog.tamperProtection).toBe(active);
+      expect(config.autoUpdate?.tamperProtection).toBe(active);
+    });
+
+    it('lets the tamper env override the child switch without turning a disabled watchdog on', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: { enabled: false, tamperProtection: { enabled: false } },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', 'true');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
+      expect(config.autoUpdate?.tamperProtection).toBe(false);
+    });
+
+    it('lets the tamper env turn the child off while the watchdog stays on', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        hookWatchdog: { enabled: true, tamperProtection: { enabled: true } },
+      });
+      vi.stubEnv('LOONGSUITE_PILOT_HOOK_TAMPER_ENABLED', 'false');
+
+      const config = await loadConfig();
+      expect(config.hookWatchdog.enabled).toBe(true);
+      expect(config.hookWatchdog.tamperProtection).toBe(false);
     });
 
     it('LOONGSUITE_PILOT_HOOK_WATCHDOG_INTERVAL_MS overrides interval', async () => {
@@ -2473,6 +2545,28 @@ describe('ConfigLoader', () => {
       const config = await loadConfig();
       expect(config.interceptor).toEqual({ mode: 'none' });
       expect(config.mask).toEqual(mask);
+    });
+  });
+
+  describe('Antigravity family default listeners', () => {
+    it('enables the shared App and IDE listener and the CLI listener with 30-second polling', async () => {
+      mockReadJsonFile.mockResolvedValueOnce(null);
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 30_000 });
+      expect(config.listeners).not.toHaveProperty('antigravity-ide');
+    });
+
+    it('respects per-variant Antigravity listener overrides from config file', async () => {
+      mockReadJsonFile.mockResolvedValueOnce({
+        listeners: {
+          antigravity: { enabled: false },
+          'antigravity-cli': { enabled: true, pollInterval: 5_000 },
+        },
+      });
+      const config = await loadConfig();
+      expect(config.listeners.antigravity).toEqual({ enabled: false, pollInterval: 30_000 });
+      expect(config.listeners['antigravity-cli']).toEqual({ enabled: true, pollInterval: 5_000 });
     });
   });
 });

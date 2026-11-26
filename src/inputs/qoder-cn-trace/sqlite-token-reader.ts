@@ -2,97 +2,15 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { resolveHome } from '../../utils/fs-utils.js';
-import { queryReadonlyPaged } from '../../utils/node-sqlite.js';
-import { createLogger } from '../../utils/logger.js';
-
-const logger = createLogger('QoderCnSqliteTokenReader');
+import { readSqliteTokensFromCandidates, type SqliteTokenResult } from '../qoder-trace/sqlite-token-reader.js';
 
 /** Path tail shared by the standalone-app layouts, appended to an app-support dir name. */
 const DB_PATH_SEGMENTS = ['SharedClientCache', 'cache', 'db', 'local.db'] as const;
 
-export interface SqliteTokenData {
-  sessionId?: string;
-  requestId: string;
-  messageId?: string;
-  gmtCreate: number;
-  inputTokens: number;
-  outputTokens: number;
-  cacheReadTokens: number;
-  model?: string;
-  contextWindow?: number;
-}
-
-export interface SqliteTokenResult {
-  rows: SqliteTokenData[];
-  /** The candidate DB that contained this session. Debug logging only — see resolveQoderCnDbPaths. */
-  matchedDbPath: string | null;
-}
-
 export async function readSqliteTokensForSession(sessionId: string): Promise<SqliteTokenResult> {
-  const dbPaths = resolveQoderCnDbPaths();
-  if (dbPaths.length === 0) return { rows: [], matchedDbPath: null };
-
-  const sql = `
-    SELECT
-      cm.id            AS message_id,
-      cm.session_id    AS session_id,
-      cm.request_id    AS request_id,
-      cm.gmt_create    AS gmt_create,
-      cm.token_info    AS token_info,
-      cm.model_info    AS model_info,
-      cr.extra         AS record_extra
-    FROM chat_message cm
-    LEFT JOIN chat_record cr ON cr.request_id = cm.request_id
-    WHERE cm.session_id = ?
-      AND cm.role = 'assistant'
-      AND cm.token_info IS NOT NULL
-      AND cm.token_info != ''
-      AND json_valid(cm.token_info)
-      AND (? = 0 OR cm.gmt_create > ? OR (cm.gmt_create = ? AND cm.id > ?))
-    ORDER BY cm.gmt_create ASC, cm.id ASC
-  `;
-
-  for (const dbPath of dbPaths) {
-    let rows: Array<{
-      message_id?: string;
-      session_id?: string;
-      request_id: string;
-      gmt_create: number;
-      token_info: string;
-      model_info?: string | null;
-      record_extra?: string | null;
-    }>;
-    try {
-      rows = await queryReadonlyPaged(dbPath, sql, (cursor) => [
-        sessionId, cursor.continued, cursor.sort, cursor.sort, cursor.id,
-      ], (row) => ({ sort: row.gmt_create, id: row.message_id ?? '' }));
-    } catch (err) {
-      logger.debug('sqlite query failed', { sessionId, dbPath, error: String(err) });
-      continue;
-    }
-
-    if (rows.length === 0) continue;
-
-    const results: SqliteTokenData[] = [];
-    for (const row of rows) {
-      const info = parseTokenInfo(row.token_info);
-      if (!info) continue;
-      results.push({
-        sessionId: row.session_id ?? '',
-        requestId: row.request_id ?? '',
-        messageId: row.message_id ?? '',
-        gmtCreate: row.gmt_create,
-        inputTokens: info.promptTokens,
-        outputTokens: info.completionTokens,
-        cacheReadTokens: info.cachedTokens,
-        contextWindow: info.contextWindow,
-        model: parseModelKey(row.model_info) ?? parseRecordModelKey(row.record_extra),
-      });
-    }
-    if (results.length > 0) return { rows: results, matchedDbPath: dbPath };
-  }
-
-  return { rows: [], matchedDbPath: null };
+  // Qoder CN records the selected model in chat_record.extra, including Auto,
+  // and writes the assistant-side model separately in chat_message.model_info.
+  return readSqliteTokensFromCandidates(sessionId, resolveQoderCnDbPaths(), () => true);
 }
 
 /**
@@ -142,42 +60,5 @@ export function resolveQoderCnDbPaths(): string[] {
     }
   }
   return available;
-}
-
-function parseTokenInfo(raw: string): { promptTokens: number; completionTokens: number; cachedTokens: number; contextWindow?: number } | null {
-  try {
-    const obj = JSON.parse(raw);
-    const pt = typeof obj.prompt_tokens === 'number' ? obj.prompt_tokens : 0;
-    const ct = typeof obj.completion_tokens === 'number' ? obj.completion_tokens : 0;
-    const cached = typeof obj.cached_tokens === 'number' ? obj.cached_tokens : 0;
-    if (pt === 0 && ct === 0) return null;
-    return { promptTokens: pt, completionTokens: ct, cachedTokens: cached,
-      ...(Number.isFinite(obj.max_input_tokens) && obj.max_input_tokens > 0 ? { contextWindow: obj.max_input_tokens } : {}) };
-  } catch {
-    return null;
-  }
-}
-
-function parseModelKey(raw: string | null | undefined): string | undefined {
-  if (!raw) return undefined;
-  try {
-    const obj = JSON.parse(raw);
-    return typeof obj.model_key === 'string' && obj.model_key.length > 0
-      ? obj.model_key
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function parseRecordModelKey(raw: string | null | undefined): string | undefined {
-  if (!raw) return undefined;
-  try {
-    const obj = JSON.parse(raw);
-    const key = obj?.modelConfig?.key;
-    return typeof key === 'string' && key.length > 0 ? key : undefined;
-  } catch {
-    return undefined;
-  }
 }
 

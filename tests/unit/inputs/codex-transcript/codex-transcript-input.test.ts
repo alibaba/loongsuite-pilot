@@ -1059,18 +1059,29 @@ describe('CodexTranscriptInput', () => {
     await fs.mkdir(readableDir, { recursive: true });
     const { input, entries, stateStore } = await createDormantInput(root);
     blockedReads.add(path.resolve(blockedDir));
+    // Keep startup strictly before the file's filesystem timestamps. On fast
+    // Linux runners, coarse birthtime/mtime can otherwise classify this new
+    // fixture as pre-startup history (the input deliberately avoids replay).
+    const startupClock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() - 1000);
     try {
       await input.start();
       await runInputCycle(input);
+      startupClock.mockRestore();
+      const transcript = path.join(readableDir, 'rollout-session-new.jsonl');
       await fs.writeFile(
-        path.join(readableDir, 'rollout-session-new.jsonl'),
+        transcript,
         completedTurn().replaceAll('turn-1', 'turn-new'),
         'utf8',
+      );
+      const stat = await fs.stat(transcript);
+      expect(Math.floor(Math.min(...[stat.birthtimeMs, stat.mtimeMs].filter(ms => ms > 0)))).toBeGreaterThan(
+        stateStore.get(input.id).extra?.baselinePendingSince as number,
       );
       await runInputCycle(input);
       expect(stateStore.get(input.id).extra?.isBaselineInit).not.toBe(true);
       expect(responsesForTurn(entries, 'turn-new').length).toBeGreaterThan(0);
     } finally {
+      startupClock.mockRestore();
       await input.stop();
     }
   });

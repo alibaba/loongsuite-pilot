@@ -3,13 +3,17 @@ import type { AgentActivityEntry } from '../../types/index.js';
 import { normalizeFinishReason } from '../../normalization/finish-reason.js';
 import type { InterceptTokenData } from './intercept-token-reader.js';
 import type { SegmentTokenData } from './segment-token-reader.js';
-import type { SqliteTokenData } from './sqlite-token-reader.js';
+import type { SqliteRequestModel, SqliteTokenData } from './sqlite-token-reader.js';
 
 // Outer bound for the nearest-timestamp fallback (Pass B). Nearest match wins;
 // this is only the acceptance ceiling. Widened from 1000ms because the JSONL
 // llm.response time (hook progress clock) drifts from SQLite gmt_create by up to
 // ~1.4s; the accurate agent.qoder.match_ts (when present) matches within a few ms.
 const TIMESTAMP_THRESHOLD_MS = 5000;
+// Matching model-only metadata has no token-row ordering evidence. Use the
+// native assistant clock (usually within a few ms of SQLite), with one request
+// candidate in this window, or an exact request/message ID.
+const IDE_MODEL_MATCH_MS = 5;
 
 // Fallback bound for pairing a segment with the llm.response it describes when
 // the hook did not record agent.client_request_id (older JSONL). gen_ai.response.id
@@ -130,17 +134,19 @@ export function enrichCliFromSegments(
       e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
     );
 
-    // Model is an opportunistic fallback. A concrete Hook value is already
-    // authoritative enough and must not cause segment reads on its own.
-    if (seg.model && seg.model !== 'unknown') {
-      if (isMissingModel(matches[0]['gen_ai.request.model'])) {
-        matches[0]['gen_ai.request.model'] = seg.model;
+    // A segment response can fill gaps, including legacy placeholder values.
+    // A verified selection of Auto is itself a valid request model.
+    if (!isMissingModel(seg.model)) {
+      if (!matches[0]['agent.qoder.selected_request_model']) {
+        if (isMissingModel(matches[0]['gen_ai.request.model'])) {
+          matches[0]['gen_ai.request.model'] = seg.model;
+        }
+        if (req && isMissingModel(req['gen_ai.request.model'])) {
+          req['gen_ai.request.model'] = seg.model;
+        }
       }
       if (isMissingModel(matches[0]['gen_ai.response.model'])) {
         matches[0]['gen_ai.response.model'] = seg.model;
-      }
-      if (req && isMissingModel(req['gen_ai.request.model'])) {
-        req['gen_ai.request.model'] = seg.model;
       }
     }
 
@@ -311,7 +317,20 @@ interface ResponseGroup {
 }
 
 function isMissingModel(value: unknown): boolean {
-  return typeof value !== 'string' || !value || value === 'auto' || value === 'unknown';
+  if (typeof value !== 'string') return true;
+  const key = value.trim().toLowerCase();
+  return !key || key === 'auto' || key === 'unknown' || key === 'custom_model';
+}
+
+/** Older Hook history can contain the custom-model category in place of an ID. */
+export function discardQoderCustomModelPlaceholder(entry: AgentActivityEntry): void {
+  const isCustomPlaceholder = (value: unknown) =>
+    typeof value === 'string' && value.trim().toLowerCase() === 'custom_model';
+  if (isCustomPlaceholder(entry['gen_ai.request.model'])) {
+    delete entry['gen_ai.request.model'];
+    delete entry['agent.qoder.selected_request_model'];
+  }
+  if (isCustomPlaceholder(entry['gen_ai.response.model'])) delete entry['gen_ai.response.model'];
 }
 
 // The CLI's own request id, written by the hook from the transcript's usage
@@ -409,6 +428,61 @@ export function enrichIdeTurn(
   }
 }
 
+export function enrichIdeRequestModels(entries: AgentActivityEntry[], rows: SqliteRequestModel[] = []): void {
+  if (rows.length === 0) return;
+  const byRequest = new Map<string, SqliteRequestModel | null>();
+  const byMessage = new Map<string, SqliteRequestModel | null>();
+  const byTime = new Map<number, SqliteRequestModel | null>();
+  for (const row of rows) {
+    indexModel(byRequest, row.requestId, row);
+    if (row.messageId) indexModel(byMessage, row.messageId, row);
+    if (Number.isSafeInteger(row.gmtCreate)) indexModel(byTime, row.gmtCreate, row);
+  }
+
+  const requestsByStep = new Map<string, AgentActivityEntry>();
+  for (const entry of entries) {
+    const stepId = entry['gen_ai.step.id'];
+    if (entry['event.name'] === 'llm.request' && stepId && !requestsByStep.has(stepId)) {
+      requestsByStep.set(stepId, entry);
+    }
+  }
+  for (const response of entries) {
+    if (response['event.name'] !== 'llm.response' || response['agent.qoder.selected_request_model']) continue;
+    const requestId = response['gen_ai.request.id'];
+    const responseId = response['gen_ai.response.id'];
+    const match = requestId ? byRequest.get(requestId) : responseId ? byMessage.get(responseId) : undefined;
+    const selected = match === undefined && !requestId && !response['agent.qoder.subagent_id']
+      ? matchIdeModelTime(accurateMatchMs(response), byTime) : match;
+    if (!selected) continue;
+    response['gen_ai.request.model'] = selected.model;
+    if (isMissingModel(response['gen_ai.response.model'])) delete response['gen_ai.response.model'];
+    const stepId = response['gen_ai.step.id'];
+    const request = stepId ? requestsByStep.get(stepId) : undefined;
+    if (request) request['gen_ai.request.model'] = selected.model;
+  }
+}
+
+function indexModel<K>(index: Map<K, SqliteRequestModel | null>, key: K, row: SqliteRequestModel): void {
+  const current = index.get(key);
+  if (current === undefined) index.set(key, row);
+  else if (!current || current.requestId !== row.requestId || current.model !== row.model) index.set(key, null);
+}
+
+function matchIdeModelTime(
+  timestamp: number | undefined,
+  byTime: Map<number, SqliteRequestModel | null>,
+): SqliteRequestModel | undefined {
+  if (timestamp === undefined || !Number.isSafeInteger(timestamp)) return undefined;
+  let match: SqliteRequestModel | undefined;
+  for (let delta = -IDE_MODEL_MATCH_MS; delta <= IDE_MODEL_MATCH_MS; delta++) {
+    const row = byTime.get(timestamp + delta);
+    if (row === undefined) continue;
+    if (!row || (match && (row.requestId !== match.requestId || row.model !== match.model))) return undefined;
+    match = row;
+  }
+  return match;
+}
+
 function enrichIdeRegularTurn(
   entries: AgentActivityEntry[],
   sqliteRows: SqliteTokenData[],
@@ -459,9 +533,9 @@ function enrichIdeRegularTurn(
         if (matchedRequest) applyRequestContext(matchedRequest, row);
         (bestEntry as Record<string, unknown>)['agent.request_id'] = requestId;
 
-        if (row.model && row.model !== 'unknown') {
-          bestEntry['gen_ai.request.model'] = row.model;
+        if (!isMissingModel(row.model)) {
           bestEntry['gen_ai.response.model'] = row.model;
+          if (!bestEntry['agent.qoder.selected_request_model']) bestEntry['gen_ai.request.model'] = row.model;
           const stepId = bestEntry['gen_ai.step.id'];
           const req = entries.find(e =>
             e['event.name'] === 'llm.request' && e['gen_ai.step.id'] === stepId,
@@ -469,7 +543,7 @@ function enrichIdeRegularTurn(
           if (req) {
             req['gen_ai.request.id'] = requestId;
             (req as Record<string, unknown>)['agent.request_id'] = requestId;
-            req['gen_ai.request.model'] = row.model;
+            if (!bestEntry['agent.qoder.selected_request_model']) req['gen_ai.request.model'] = row.model;
           }
         }
 
@@ -740,9 +814,9 @@ function applySqliteRowsToIdeResponse(
   (response as Record<string, unknown>)['agent.request_id'] = requestId;
   response['gen_ai.response.id'] = representative.messageId || requestId;
 
-  if (representative.model && representative.model !== 'unknown') {
-    response['gen_ai.request.model'] = representative.model;
+  if (!isMissingModel(representative.model)) {
     response['gen_ai.response.model'] = representative.model;
+    if (!response['agent.qoder.selected_request_model']) response['gen_ai.request.model'] = representative.model;
   }
 
   const request = findStepRequest(allEntries, response) ?? turnEntries.find(e => e['event.name'] === 'llm.request');
@@ -750,7 +824,7 @@ function applySqliteRowsToIdeResponse(
     if (rows.length === 1) applyRequestContext(request, representative);
     request['gen_ai.request.id'] = requestId;
     (request as Record<string, unknown>)['agent.request_id'] = requestId;
-    if (representative.model && representative.model !== 'unknown') {
+    if (!isMissingModel(representative.model) && !response['agent.qoder.selected_request_model']) {
       request['gen_ai.request.model'] = representative.model;
     }
   }

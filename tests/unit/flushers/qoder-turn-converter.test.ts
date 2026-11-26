@@ -111,6 +111,18 @@ describe.each([...QODER_TRANSCRIPT_AGENT_TYPES])('%s roots through the real flus
 });
 
 describe('Qoder root converter compatibility', () => {
+  it('preserves response model evidence across fragments and leaves unreported models absent', async () => {
+    const events = records('qoder-app');
+    const responses = events.filter(row => row['event.name'] === 'llm.response');
+    events.push({ ...responses[1], 'event.id': 'response-fragment', 'gen_ai.response.model': 'routed-model',
+      time_unix_nano: String(BigInt(responses[1].time_unix_nano!) + 1_000_000n) });
+    const spans = await flush(events);
+    const models = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'LLM');
+    expect(models.map(span => span.attributes['gen_ai.request.model'])).toEqual(['test-model', 'test-model']);
+    expect(models.map(span => span.attributes['gen_ai.response.model'])).toEqual([undefined, 'routed-model']);
+    expect(spans.every(span => !('agent.qoder.response_model_recorded' in span.attributes))).toBe(true);
+  });
+
   it.each(['shared', 'missing'])('keeps response-only LLM IDs unique and replay-stable with %s step identity', async shape => {
     const input = records('qoder-cn').filter(record => record['event.name'] === 'llm.response').map(record => {
       const row = { ...record, 'gen_ai.output.messages': [{ role: 'assistant', parts: [{ type: 'text', content: 'response' }] }] };

@@ -60,6 +60,7 @@ const QODER_INTERCEPTOR_AGENT_TYPES = new Set([
   'qoder-cli',
   'qoder-app',
   'qodercli',
+  'qoder-cn',
   'qoder-idea',
   'qoder-jetbrains',
 ]);

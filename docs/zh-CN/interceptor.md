@@ -63,7 +63,7 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 - 源码：`src/interceptor/`
 - 运行态：`~/.loongsuite-pilot/interceptor/{runtime.json,interceptor.pid,logs}`
 - 访问日志：`~/.loongsuite-pilot/interceptor/logs/access.log`（每次 hook 判定一行 JSONL）。单个文件超过 10MB 时切到 `access.log.1` … `access.log.5`，更旧的丢弃。
-- 裁决缓存：工具按 `session id + tool call id + phase` 关联；放行的提示词按 Agent、session、提示词 SHA-256 摘要关联原生 `llm.request`，不在缓存中保存提示词正文。Qoder 和千问办公优先用原生用户记录 `requestSetId` 的 SHA-256 摘要，对应 hook 的 `request_set_id` 精确关联；原始 ID 不附加到事件（包括中间 hook history），仅传递私有缓存键摘要，并在最终输出前移除，不替换 `gen_ai.request.id`。有 ID 但查不到对应裁决时不回退关联其他请求。缺少 ID 时仅接受原生提示词时间前后 5 秒内唯一的同摘要裁决；每个已收到的提示词检查在规则执行前登记，检查中、失败和阻断的轮次也参与歧义判断，避免借用上一轮 log 裁决。内部检查标记随缓存持久化，不作为 guardrail action 输出；重复提示词存在歧义时不回填。两类裁决共用最近 30 分钟、最多 10000 条的容量（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。主线程的副本只供采集关联使用（关联字段见 [输出事件 Schema](output-event-schema.md)）。
+- 裁决缓存：工具按 `session id + tool call id + phase` 关联；放行的提示词关联原生 `llm.request`（见下方“提示词关联与 Agent 身份”），缓存不保存提示词正文。两类裁决共用最近 30 分钟、最多 10000 条的容量（满时淘汰最早写入的记录），checkpoint 为 `~/.loongsuite-pilot/interceptor/tool-verdicts.json`，每 15 秒仅在变化后异步落盘。运行期间 Worker 是唯一写入者，主线程镜像负责采集关联（输出字段见 [输出事件 Schema](output-event-schema.md)）。
 - 构建产物：`dist/interceptor/cli.cjs`、`dist/interceptor/worker.cjs`；`dist/interceptor/daemon.cjs` 保留为独立兼容入口，collector 不再直接调用它。
 - 规则开关：`config.json` 的 `interceptor.mode` 在 collector **启动时读一次**；`configs/managed/interceptor.json` 的本地规则每 3 秒热更新（见 [本地文件规则](#本地文件规则)）
 
@@ -136,6 +136,8 @@ Worker 判定工具调用后，通过 `parentPort.postMessage()` 发送包含原
 Worker 异常退出时，collector 清掉失效的 interceptor runtime，按 1 秒至 30 秒退避重启，并使用主线程镜像与 checkpoint 恢复裁决。恢复前 hook 连接失败继续 fail-open；主线程阻塞时重启和消息处理要等它恢复。Unix sh 规则由一次性 Node guardian 持有进程组，Worker 与 guardian 之间的私有 fd3 管道关闭或独立期限到达时，guardian 回收自己的整组；因此即使脚本 shell 提前退出、后台子进程仍持有 stdout，也能在 Worker 退出后回收。正常完成码通过该管道回传，不改变脚本判定语义；每次 sh 调用会增加一次 Node 启动开销。子进程的启动/关闭控制消息用于父线程兜底清理，父线程只在异步核对仍属本 collector 且命令匹配后回收进程/进程组。此控制流不属于裁决主体批次的背压范围。正常停止先关闭监听、排空请求，再最终落盘并同步镜像；停不下来的 Worker 有超时 terminate 兜底。collector 整个进程退出或进程级内存耗尽时，Worker 也会退出。
 
 CLI 识别 `qoder-auto`，通过祖先进程链区分 Desktop（`qoder`）和 CLI（`qodercli`）。首版覆盖 `UserPromptSubmit`、`PreToolUse` 与 `PostToolUse`。
+
+Qoder CN 通过 `agents.d/qoder-cn.json` 向 `~/.qoder-cn/settings.json` 部署独立拦截 hook，原有采集 hook 保留。CN hook 使用 `--agent qoder-cn-auto`，优先采用宿主 `parent_business_info.product=cli/app`，其次识别 `LOONGSUITE_QODERCLI_FLAVOR=qoderclicn` 和祖先进程：Desktop 为 `qoder-cn`，CLI 为 `qoderclicn`，分别使用下表的 `block` / `deny` 协议；无法识别时按 CN Desktop 处理。托管规则配置 `"agents": ["qoder-cn", "qoderclicn"]` 可覆盖两端。两端的采集事件、被拦提示词和提示词裁决关联均保持 `gen_ai.agent.type=qoder-cn`，不归入国际版或 `qoder-app`。关闭拦截时只移除拦截 hook，保留采集。
 
 拦截时 stdout 必须是单一 JSON 行：
 
@@ -288,7 +290,7 @@ export LOONGSUITE_PILOT_INTERCEPTOR_MODE=all
 
 | 字段 | 取值 |
 |------|------|
-| `agents` | `qoder`、`qodercli`、`openclaw`、`qwen-work-cn` |
+| `agents` | `qoder`、`qodercli`、`qoder-cn`、`qoderclicn`、`openclaw`、`qwen-work-cn` |
 | `events` | `UserPromptSubmit`、`PreToolUse`、`PostToolUse` |
 | `action` | 默认 `block`，命中后拦截并停止；`log` 记录命中后放行，继续检查后续规则，不提示宿主 |
 | `severity` | 可选风险等级字符串，仅用于本地诊断，不上报到采集事件 |
@@ -349,6 +351,18 @@ Windows 启动器不继承 `PSModulePath`，由 PowerShell 5.1 重建自身模�
 采集事件的 action 描述最终代表裁决。例如先命中 log、再命中 block，上报 `block`；仅 log 命中上报 `log`。HTTP 响应仍使用 `allow` / `block` 控制宿主行为。UserPromptSubmit log 在原生请求上报 `gen_ai.guardrail.action: "log"`，不新增请求事件；Qoder block 拦截仍补发 `llm.request`。关联发生在消息内容隐私处理之前，内部关联摘要在输出前移除，因此关闭消息内容采集时仍可关联。
 
 Hook 的 `parent_business_info.product=app` 时，Qoder 被拒 Prompt 使用 `qoder-app` 身份。输出前沿用原生 agent/session 的工作区排除状态，App 与 CLI 即使 session id 相同也分别匹配隐私状态。
+
+### 提示词关联与 Agent 身份
+
+拦截协议的 `agent` 是规则和宿主协议的路由标识，Qoder 使用 `qoder` / `qodercli`；它与事件的 `gen_ai.agent.type` 不要求逐字相同。原生采集根据当前提示词的 `businessIdentity.product` 或该轮 Hook 上下文识别产品，App 保留 `qoder-app`，CLI 保留 `qoder-cli`。拦截记录缺少产品信息时，不把路由 `qoder` 当作已证明的 IDE 身份来排除 App；已明确的 App 与 CLI 身份仍不能相互借用裁决。
+
+提示词关联使用 session、提示词 SHA-256 摘要及请求身份。有可比较的请求 ID 时优先精确匹配；原生 `requestSetId` 和 Hook `request_set_id` 均只传递 SHA-256 摘要，私有关联字段在输出前移除，不改写 `gen_ai.request.id`。两侧都有明确 ID 且不相同时，不回退到其他请求。
+
+新收到的 Qoder Hook 缺少请求 ID 时，缓存会显式记录缺失来源；原生事件即使有 ID，也只能在同 session、兼容产品、同提示词摘要、原生提示词时间前后 5 秒内寻找唯一候选。旧记录不会仅因 ID 看起来像 UUID 就被视为缺失身份。规则执行前登记的检查中、失败和阻断尝试也参与歧义判断。首次成功关联后，匿名裁决绑定到该原生请求，重复输出可重用，其他请求不能复用；绑定通过 IPC 回传唯一写入者并随 checkpoint 恢复。存在歧义时不回填。
+
+正常停机时，collector 先确认所有 Worker 写入者已经退出并排空已接收输出，再独占接管 checkpoint。镜像含提示词绑定时，会异步读取最新磁盘记录、合并镜像并原子保存，保留旧 Worker 已落盘而镜像尚未收到的记录，也覆盖 Worker 崩溃后、重启前才创建的绑定。未确认 Worker 退出时禁止接管；读取、校验或写入失败会使停机操作报错，不会静默丢弃绑定。
+
+如果提示词在提交前被阻止，且 Hook 未提供产品信息，就没有原生提示词或后续 Stop 上下文可用于证明 App/CLI。此时合成阻断事件仍使用既有 `qoder-cli` 回退类型，不能据此认定具体产品；明确 `product=app` 时才使用 `qoder-app`。
 
 ### 升级与回退
 

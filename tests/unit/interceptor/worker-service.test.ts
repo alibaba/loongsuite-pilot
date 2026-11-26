@@ -1,9 +1,11 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startInterceptorWorker, type InterceptorWorkerService, type InterceptorWorkerOptions } from '../../../src/interceptor/worker-service.js';
 import { unavailableInterceptorStatus } from '../../../src/interceptor/status.js';
+import { promptKeyFromRequest, promptHash, promptRequestId } from '../../../src/interceptor/prompt-verdict.js';
+import { ToolVerdictStore } from '../../../src/interceptor/tool-verdict-store.js';
 
 const control = vi.hoisted(() => ({ workers: [] as any[], ready: true, reply: true,
   childCallbacks: [] as Array<(error: Error | null) => void> }));
@@ -56,6 +58,150 @@ afterEach(async () => {
 });
 
 describe('interceptor worker supervisor', () => {
+  function bindPrompt(service: InterceptorWorkerService) {
+    const now = Date.now();
+    const key = promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', prompt: 'probe', raw: {} })!;
+    service.verdictStore.put(key, { action: 'log', ruleId: 'policy' }, new Date(now));
+    const lookup = { sessionId: 's', agentType: 'qoder-app', promptHash: promptHash('probe'), requestId: promptRequestId('A'), at: now };
+    expect(service.verdictStore.getPromptSnapshot(lookup)?.action).toBe('log');
+    return lookup;
+  }
+
+  it('takes over only after live writer termination and retired children finish', async () => {
+    const service = await start(); const worker = control.workers[0];
+    bindPrompt(service);
+    worker.emit('message', { type: 'child', state: {
+      id: 1, pid: 999999, command: 'test-only-managed-child', processGroup: false, running: true,
+    } });
+    const originalTerminate = worker.terminate.bind(worker);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    worker.terminate = vi.fn(async () => { await gate; return originalTerminate(); });
+    const checkpoint = vi.spyOn(service.verdictStore, 'checkpointAfterWriterExit');
+    const stopped = service.stop();
+    await Promise.resolve(); await Promise.resolve();
+    expect(checkpoint).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() => expect(control.childCallbacks).toHaveLength(1));
+    expect(checkpoint).not.toHaveBeenCalled();
+    control.childCallbacks.shift()!(new Error('process already gone'));
+    await stopped;
+    expect(checkpoint).toHaveBeenCalledOnce();
+  });
+
+  it('uses an injected mirror checkpoint path for the exclusive handoff', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'custom-verdict-path-')); dirs.push(root);
+    const file = join(root, 'custom-verdicts.json');
+    const store = new ToolVerdictStore(file);
+    const service = await start({ verdictStore: store });
+    const lookup = bindPrompt(service);
+    await service.stop();
+    const restored = new ToolVerdictStore(file); restored.restore();
+    expect(restored.records()[0]).toHaveProperty('binding.requestId', lookup.requestId);
+    expect(restored.getPromptSnapshot({ ...lookup, requestId: promptRequestId('B') })).toBeNull();
+  });
+
+  it('saves ownership after a timed-out live stop once termination has finished', async () => {
+    const service = await start(); const worker = control.workers[0];
+    const lookup = bindPrompt(service);
+    const file = join(worker.options.workerData.dataDir, 'interceptor', 'tool-verdicts.json');
+    const send = worker.postMessage.bind(worker);
+    worker.postMessage = (message: any) => { if (message.type !== 'stop') send(message); };
+    vi.useFakeTimers();
+    const stopped = service.stop(); const failure = expect(stopped).rejects.toThrow('stop timed out');
+    await vi.advanceTimersByTimeAsync(5001); await failure;
+    vi.useRealTimers();
+    const restored = new ToolVerdictStore(file); restored.restore();
+    expect(restored.records()[0]).toHaveProperty('binding.requestId', lookup.requestId);
+    expect(restored.getPromptSnapshot({ ...lookup, requestId: promptRequestId('B') })).toBeNull();
+    services.splice(services.indexOf(service), 1);
+  });
+
+  it('never takes over when writer termination fails but still closes the event sink', async () => {
+    let delivered = false;
+    const service = await start({ emitBlockedPrompt: async () => { delivered = true; } });
+    bindPrompt(service); const worker = control.workers[0];
+    worker.emit('message', { type: 'events', id: 9, records: [], blockedPrompts: [{ 'event.id': 'blocked' }] });
+    const checkpoint = vi.spyOn(service.verdictStore, 'checkpointAfterWriterExit');
+    const termination = vi.spyOn(worker, 'terminate').mockRejectedValueOnce(new Error('cannot terminate'));
+    try {
+      await expect(service.stop()).rejects.toThrow('cannot terminate');
+      expect(checkpoint).not.toHaveBeenCalled();
+      expect(delivered).toBe(true);
+    } finally {
+      termination.mockRestore(); await worker.terminate();
+      services.splice(services.indexOf(service), 1);
+    }
+  });
+
+  it.each(['unreadable', 'invalid-json', 'invalid-schema', 'invalid-record', 'write-failure'] as const)
+  ('rejects %s checkpoint handoff after releasing the worker and sink', async failure => {
+    let delivered = false;
+    const service = await start({ emitBlockedPrompt: async () => { delivered = true; } });
+    const worker = control.workers[0];
+    const file = join(worker.options.workerData.dataDir, 'interceptor', 'tool-verdicts.json');
+    bindPrompt(service);
+    await mkdir(join(worker.options.workerData.dataDir, 'interceptor'), { recursive: true });
+    if (failure === 'unreadable') await mkdir(file);
+    if (failure === 'invalid-json') await writeFile(file, '{broken');
+    if (failure === 'invalid-schema') await writeFile(file, JSON.stringify({ schema: 2, records: [] }));
+    if (failure === 'invalid-record') await writeFile(file, JSON.stringify({ schema: 1, records: [{}] }));
+    const failedWrite = failure === 'write-failure'
+      ? vi.spyOn(ToolVerdictStore.prototype, 'checkpoint').mockRejectedValueOnce(new Error('disk unavailable')) : undefined;
+    worker.emit('message', { type: 'events', id: 9, records: [], blockedPrompts: [{ 'event.id': 'blocked' }] });
+    const terminate = vi.spyOn(worker, 'terminate');
+    try {
+      await expect(service.stop()).rejects.toThrow();
+      expect(terminate).toHaveBeenCalledOnce();
+      expect(delivered).toBe(true);
+      if (failure === 'invalid-json') expect(await readFile(file, 'utf8')).toBe('{broken');
+      if (failure === 'invalid-schema') expect(JSON.parse(await readFile(file, 'utf8')).schema).toBe(2);
+    } finally {
+      failedWrite?.mockRestore();
+      services.splice(services.indexOf(service), 1);
+    }
+  });
+
+  it('persists ownership acquired after worker exit and retains disk-only verdicts on graceful stop', async () => {
+    const service = await start(); const worker = control.workers[0];
+    const file = join(worker.options.workerData.dataDir, 'interceptor', 'tool-verdicts.json');
+    const now = Date.now();
+    const key = promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 's', prompt: 'probe', raw: {} })!;
+    const disk = new ToolVerdictStore(file);
+    disk.put(key, { action: 'log', ruleId: 'policy' }, new Date(now));
+    disk.put({ toolUseId: 'disk-only', phase: 'PreToolUse' }, { action: 'block', ruleId: 'newer' }, new Date(now));
+    await disk.checkpoint();
+    service.verdictStore.put(key, { action: 'log', ruleId: 'policy' }, new Date(now));
+    worker.emit('exit', 1);
+    const a = { sessionId: 's', agentType: 'qoder-app', promptHash: promptHash('probe'), requestId: promptRequestId('A'), at: now };
+    const b = { ...a, requestId: promptRequestId('B') };
+    expect(service.verdictStore.getPromptSnapshot(a)?.action).toBe('log');
+    expect(service.verdictStore.getPromptSnapshot(b)).toBeNull();
+    const stop = service.stop(); expect(service.stop()).toBe(stop); await stop;
+    const restored = new ToolVerdictStore(file); restored.restore();
+    expect(restored.records().find(record => record.phase === 'UserPromptSubmit')).toHaveProperty('binding.requestId', a.requestId);
+    expect(restored.getPromptSnapshot(b)).toBeNull();
+    expect(restored.getPromptSnapshot(a)?.action).toBe('log');
+    expect(restored.get({ toolUseId: 'disk-only', phase: 'PreToolUse' })).toBe('block');
+    expect(control.workers).toHaveLength(1);
+  });
+
+  it('forwards anonymous prompt ownership to the sole writer before a sync/stop command', async () => {
+    const service = await start();
+    const now = Date.now();
+    const key = promptKeyFromRequest({ agent: 'qoder', event: 'UserPromptSubmit', sessionId: 'session', prompt: 'probe', raw: {} })!;
+    service.verdictStore.put(key, { action: 'log', ruleId: 'policy' }, new Date(now));
+    const lookup = { sessionId: 'session', agentType: 'qoder-app', promptHash: promptHash('probe'),
+      requestId: promptRequestId('native'), at: now };
+    expect(service.verdictStore.getPromptSnapshot(lookup)?.action).toBe('log');
+    await service.syncVerdicts();
+    const commands = control.workers[0].commands;
+    expect(commands[0]).toMatchObject({ type: 'bind-prompt', record: { missingRequestId: true,
+      missingAgentType: true, binding: { requestId: lookup.requestId, agentType: 'qoder-app', at: now } } });
+    expect(commands[1].type).toBe('sync');
+    await service.stop();
+    expect(commands.at(-1).type).toBe('stop');
+  });
   it.each(['none', undefined, 'custom'] as const)('does not create a Worker for startup mode %s, even with cached rules', async mode => {
     const dataDir = await mkdtemp(join(tmpdir(), 'interceptor-worker-disabled-'));
     dirs.push(dataDir);

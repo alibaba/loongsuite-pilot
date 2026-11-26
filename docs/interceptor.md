@@ -55,7 +55,7 @@ Rule IDs must be unique within the document. IDs and versions accept ASCII lette
 
 | Field | Values |
 |-------|--------|
-| `agents` | `qoder`, `qodercli`, `openclaw`, `qwen-work-cn` |
+| `agents` | `qoder`, `qodercli`, `qoder-cn`, `qoderclicn`, `openclaw`, `qwen-work-cn` |
 | `events` | `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
 | `action` | Defaults to `block`: stop at the first blocking hit. `log`: record the hit, allow execution, and continue checking without notifying the host. |
 | `kind` | `pattern` or `script`. `http` is a format placeholder: warn and skip without making a request. |
@@ -90,6 +90,8 @@ Files are checked every three seconds. Invalid documents or scripts not yet read
 
 ## Decisions and telemetry
 
+Qoder CN installs a separate interceptor hook in `~/.qoder-cn/settings.json` while preserving its collection hooks. The `qoder-cn-auto` target prefers the host's `parent_business_info.product=cli/app`, then detects the CN CLI flavor or ancestor process: Desktop uses the `qoder-cn` surface and prompt `decision=block`, while CLI uses `qoderclicn` and `decision=deny`. Unidentified CN hosts default to Desktop. Configure rule `agents: ["qoder-cn", "qoderclicn"]` to cover both. Both surfaces retain `gen_ai.agent.type=qoder-cn` for collected events, blocked prompts and prompt verdict correlation. Disabling interception removes only interceptor hooks.
+
 File rules run in array order. `matches` preserves all known log and block hits. Top-level metadata identifies the final enforcing rule, or the first log hit when allowed. A complete check without hits has `matched=false`; an error without a known result omits it. A known log hit followed by an error can retain both `matched=true` and `failOpen=true`.
 
 Rule hits no longer emit separate `guardrail.evaluation` events. Linked tool events carry the final request decision in `gen_ai.guardrail.*`; denied Qoder user prompts still emit `llm.request`. Individual log/block matches remain in the HTTP response and local access log `matches` array. UserPromptSubmit log does not synthesize a rejected prompt.
@@ -104,6 +106,8 @@ See [Output Event Schema](output-event-schema.md) for the `gen_ai.guardrail.*` f
 
 Qoder hooks identifying `parent_business_info.product=app` emit blocked prompts as `qoder-app`. Workspace filtering uses the corresponding native agent/session identity before output, preserving sticky exclusions without sharing App and CLI privacy state.
 
+The interception `agent` is a protocol and rule route (`qoder` / `qodercli`), while `gen_ai.agent.type` identifies the collected product. Native collection uses the current prompt's `businessIdentity.product` or its owning Hook context to retain `qoder-app` / `qoder-cli`. A Qoder route without product metadata is not treated as proof of IDE identity when linking an App request. Explicit App and CLI identities remain isolated. If a blocked prompt has no product metadata and never reaches a native transcript or Stop Hook, its synthetic event retains the existing `qoder-cli` fallback; that fallback does not prove the product was CLI.
+
 ## Runtime and failure handling
 
 An interceptor Worker inside the collector process owns loopback HTTP, rules, runtime heartbeats, and verdict checkpoints. The main collector thread handles collection and output. Main-thread stalls do not occupy the Worker's event loop, though they delay message delivery and recovery. All threads still share process and machine resources.
@@ -112,7 +116,11 @@ Hook clients perform a 500ms health check followed by a 4 second decision reques
 
 Tool verdicts use session ID, tool call ID, and phase, retaining the original timestamp. The Worker keeps at most 10,000 records for 30 minutes and checkpoints changes asynchronously every 15 seconds. The main-thread mirror waits at most two seconds for accepted verdicts before linking events. Message batches allow one outstanding ACK; event output has bounded item and byte queues. Overflow and stop timeouts are explicitly counted. An ACK means bounded acceptance or a counted drop, not backend persistence.
 
-Prompt verdicts share the same retention, capacity, checkpoint and IPC lifecycle. The cache stores the agent, session, a SHA-256 prompt digest and request identity, without prompt text. Qoder and Qwen Work CN use a SHA-256 digest of the native user row's `requestSetId` to match the hook's `request_set_id`. The native ID is never attached to events, including intermediate hook history; only a private cache key digest is transported and removed before output. This does not change `gen_ai.request.id`. An explicit ID that has no matching verdict never falls back to another request. Without an ID, only one matching digest within five seconds of the native prompt timestamp is accepted. Each received prompt evaluation is registered before checking rules, so pending, failed and blocked attempts also make repeated prompts ambiguous and prevent reuse of an earlier log verdict. These internal attempt markers are checkpointed but never emitted as guardrail actions. Ambiguous repeated prompts remain unannotated.
+Prompt verdicts share the same retention, capacity, checkpoint and IPC lifecycle. The cache stores the agent, session, a SHA-256 prompt digest and request identity, without prompt text. Native `requestSetId` and Hook `request_set_id` values are carried only as private SHA-256 digests and removed before output; this does not change `gen_ai.request.id`. Comparable request identities take precedence, and two explicit, different IDs never fall back to another identified request.
+
+New Qoder Hook observations explicitly record missing request/product metadata. Only an observation marked as missing its request ID can be linked to a native explicit ID through a unique candidate with the same session, compatible product and prompt digest within five seconds of the native prompt timestamp. Old UUID-shaped IDs are not assumed anonymous. Pending, failed and blocked attempts participate in ambiguity checks. The first successful anonymous association binds the verdict to that native request, allowing retries without lending it to a different request. The mirror returns this private binding over IPC to the runtime checkpoint writer; it survives checkpoint restore. Ambiguous prompts remain unannotated, and internal provenance/binding fields are never emitted as guardrail fields.
+
+During normal shutdown, the collector confirms that all Worker writers have exited and drains accepted output before taking exclusive checkpoint ownership. If the mirror has prompt bindings, it asynchronously reads the latest disk checkpoint, merges the mirror and atomically saves it, retaining records only the old Worker had persisted. This also covers bindings created after a Worker crash and before restart. No takeover occurs while a Worker may still write. Read, validation or write failures reject shutdown instead of silently discarding ownership.
 
 Worker failure clears stale runtime and retries with backoff from one to 30 seconds, recovering from checkpoints and the main-thread mirror. Shutdown closes HTTP, drains accepted output for up to five seconds, and reclaims script resources. Access logs use a bounded asynchronous masking and write queue at `interceptor/logs/access.log`.
 
