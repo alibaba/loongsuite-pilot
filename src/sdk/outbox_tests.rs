@@ -573,10 +573,15 @@ fn assert_acknowledged_checkpoint_handoff(input: &str) {
     let queue = Outbox::open(&root, settings()).unwrap();
     let handoff = LegacyCheckpointHandoff::for_input(input).unwrap();
     let source = "fixture-source";
-    let original =
-        json!({(input): {"lastFile":"history-2026-10-01.jsonl","lastOffset":12}}).to_string();
-    let advanced =
-        json!({(input): {"lastFile":"history-2026-10-01.jsonl","lastOffset":36}}).to_string();
+    let cursor = |offset| {
+        if input == "qwen-work-cn-collaboration" {
+            json!({(input): {"extra":{"collaboration":{"version":1,"sinceMs":offset,"completed":{}}}}})
+        } else {
+            json!({(input): {"lastFile":"history-2026-10-01.jsonl","lastOffset":offset}})
+        }.to_string()
+    };
+    let original = cursor(12);
+    let advanced = cursor(36);
     let pending = br#"{"event.id":"pending-qoder","event.name":"llm.request"}"#;
     queue.checkpoint(source, &original).unwrap();
     queue.enqueue_hook(pending).unwrap();
@@ -609,9 +614,7 @@ fn assert_acknowledged_checkpoint_handoff(input: &str) {
 
     Outbox::mark_shell_checkpoint_exported(&root, handoff).unwrap();
     let missing = queue.prepare_shell_checkpoint(source, handoff, || Ok(None));
-    if matches!(handoff, LegacyCheckpointHandoff::HookHistory(agent)
-        if crate::sdk::hook_history::find(agent).is_some())
-    {
+    if handoff.legacy_cursor().is_some() {
         assert!(missing.is_err());
     } else {
         assert_eq!(missing.unwrap().as_deref(), Some(advanced.as_str()));

@@ -158,6 +158,15 @@ struct Checkpoint {
     completed: BTreeMap<String, i64>,
 }
 
+pub(crate) fn has_usable_collaboration_cursor(state: &crate::checkpoints::InputState) -> bool {
+    state
+        .extra()
+        .and_then(|mut extra| {
+            serde_json::from_value::<Checkpoint>(extra.get_mut("collaboration")?.take()).ok()
+        })
+        .is_some_and(|checkpoint| checkpoint.version == 1 && checkpoint.since_ms >= 0)
+}
+
 struct DirectoryScan {
     root: Arc<PathBuf>,
     environments: tokio::fs::ReadDir,

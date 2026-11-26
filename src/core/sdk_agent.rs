@@ -349,19 +349,16 @@ impl Context {
                 // A fresh SDK source may only have imported the Node checkpoint.
                 checkpoint.load().await;
             }
-            let history_profile = match handoff {
-                Some(LegacyCheckpointHandoff::HookHistory(agent)) => {
-                    crate::sdk::hook_history::find(agent)
+            let can_export = if let Some((listener, validate)) =
+                handoff.and_then(LegacyCheckpointHandoff::legacy_cursor)
+            {
+                let usable = validate(&checkpoint.get(listener));
+                if !usable && persisted.as_deref().is_some_and(|text| text != "{}") {
+                    return Err(format!(
+                        "SDK checkpoint for {listener} is invalid; previous Pilot checkpoint retained"
+                    ));
                 }
-                _ => None,
-            };
-            let can_export = if let Some(profile) = history_profile {
-                profile
-                    .can_export_checkpoint(
-                        &checkpoint,
-                        persisted.as_deref().is_some_and(|text| text != "{}"),
-                    )
-                    .map_err(|error| error.to_string())?
+                usable
             } else {
                 true
             };

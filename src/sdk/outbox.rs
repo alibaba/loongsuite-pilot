@@ -47,7 +47,7 @@ impl LegacyCheckpointHandoff {
         }
     }
 
-    pub(super) fn data_dir(self, pilot_dir: &Path, input: &str) -> PathBuf {
+    pub(crate) fn data_dir(self, pilot_dir: &Path, input: &str) -> PathBuf {
         let suffix = match self {
             Self::Qoder => return pilot_dir.join(super::STANDALONE_QODER_DATA),
             Self::Codex => input,
@@ -57,7 +57,25 @@ impl LegacyCheckpointHandoff {
             .join("state")
             .join(format!("standalone-{suffix}-sdk"))
     }
+
+    pub(crate) fn legacy_cursor(self) -> Option<LegacyCursor> {
+        use crate::inputs::rest_support::has_usable_hook_log_cursor;
+        let Self::HookHistory(agent) = self else {
+            return None;
+        };
+        match agent {
+            "qwen-work-cn" => Some(("qwen-work-cn-trace", has_usable_hook_log_cursor)),
+            "qwen-work-cn-collaboration" => Some((
+                "qwen-work-cn-collaboration",
+                crate::inputs::qwen_work_cn::has_usable_collaboration_cursor,
+            )),
+            agent => super::hook_history::find(agent)
+                .map(|profile| (profile.listener, has_usable_hook_log_cursor as _)),
+        }
+    }
 }
+
+type LegacyCursor = (&'static str, fn(&crate::checkpoints::InputState) -> bool);
 
 enum CheckpointImport {
     Existing(Option<String>),
@@ -529,11 +547,18 @@ impl Outbox {
         source: &str,
         handoff: LegacyCheckpointHandoff,
     ) -> anyhow::Result<ShellCheckpoint> {
-        let db = Connection::open_with_flags(
-            Self::database_path(root)?,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        db.busy_timeout(Duration::from_secs(1))?;
+        Self::drained_shell_checkpoint(root, Some(source), handoff)
+    }
+
+    // Qwen uses one standalone SDK instance per input. Its namespace includes
+    // configured source paths that need not be available to the installer.
+    // When no current namespace is known, accept only one durable source.
+    pub(crate) fn drained_shell_checkpoint(
+        root: &Path,
+        source: Option<&str>,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        let db = Self::open_checkpoint_database(root)?;
         let pending: i64 = db.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
         if pending != 0 {
             return Ok(ShellCheckpoint::Pending);
@@ -542,6 +567,25 @@ impl Outbox {
             let has_progress = Self::has_checkpoint_progress(&db, handoff)?;
             return Ok(ShellCheckpoint::Exported { has_progress });
         }
+        let Some(source) = source else {
+            let mut query =
+                db.prepare("SELECT source, json FROM checkpoint WHERE json <> '{}' LIMIT 2")?;
+            let mut rows = query.query([])?;
+            let checkpoint = rows
+                .next()?
+                .map(|row| {
+                    let namespace: String = row.get(0)?;
+                    anyhow::ensure!(
+                        namespace.len() == 64
+                            && namespace.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "invalid SDK source checkpoint namespace"
+                    );
+                    Ok::<String, anyhow::Error>(row.get(1)?)
+                })
+                .transpose()?;
+            anyhow::ensure!(rows.next()?.is_none(), "SDK history has multiple source checkpoints; start it and stop cleanly before retrying");
+            return Ok(ShellCheckpoint::Ready(checkpoint));
+        };
         let checkpoint = Self::find_checkpoint(&db, source)?;
         if checkpoint.is_none() {
             let has_other_checkpoint: bool =
@@ -655,26 +699,20 @@ impl Outbox {
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
-            let history_profile = match handoff {
-                LegacyCheckpointHandoff::HookHistory(agent) => super::hook_history::find(agent),
-                _ => None,
-            };
-            if let Some(profile) = history_profile {
+            if let Some((listener, validate)) = handoff.legacy_cursor() {
                 let decoded = checkpoint
                     .as_deref()
                     .map(serde_json::from_str::<serde_json::Map<String, Value>>)
                     .transpose()?;
                 let empty = decoded.as_ref().is_none_or(serde_json::Map::is_empty);
                 let valid = decoded
-                    .and_then(|mut state| state.remove(profile.listener))
+                    .and_then(|mut state| state.remove(listener))
                     .and_then(crate::checkpoints::InputState::from_json)
-                    .is_some_and(|state| {
-                        crate::inputs::rest_support::has_usable_hook_log_cursor(&state)
-                    });
+                    .is_some_and(|state| validate(&state));
                 anyhow::ensure!(
                     valid || (empty && !Self::has_checkpoint_progress(db, handoff)?),
                     "authoritative legacy checkpoint for {} is missing or invalid; restore it before restarting SDK history",
-                    profile.listener
+                    listener
                 );
             }
             // A missing legacy namespace cannot advance the saved cursor.

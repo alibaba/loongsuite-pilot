@@ -8,6 +8,7 @@ pub(crate) mod hook_history;
 pub(crate) mod host_loader;
 mod monitoring;
 pub(crate) mod policy;
+pub(crate) mod qwen_handoff;
 mod runtime;
 pub(crate) use runtime::configure_qwen_wakeups;
 

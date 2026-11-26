@@ -635,6 +635,139 @@ fn failed_node_switch_restores_current_cursor_hooks_and_retry_retires_only_the_i
 }
 
 #[test]
+fn node_rollback_waits_for_both_qwen_outboxes_and_exports_both_cursors() {
+    let fixture = Fixture::new();
+    fixture.package();
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let current = String::from_utf8(stage.stdout).unwrap();
+    success(&fixture.helper(
+        "publish-package",
+        &fixture.runtime_options(&cache.join("versions").join(current.trim())),
+        true,
+    ));
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(node.join("scripts/loongsuite-pilot.sh"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let service = fixture.root.path().join(if cfg!(windows) {
+        ".local/bin/loongsuite-pilot-service.ps1"
+    } else {
+        ".local/bin/loongsuite-pilot"
+    });
+    let baseline_service = fs::read(&service).unwrap();
+    let baseline_current = fs::read(cache.join("current")).unwrap();
+    let baseline_previous = fs::read(cache.join("previous")).unwrap();
+    let checkpoint = fixture.data.join("logs/input-state.json");
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let original = json!({"unrelated":{"lastOffset":7}});
+    fs::write(&checkpoint, original.to_string()).unwrap();
+    let qwen_trace = json!({"lastFile":"qwen-work-cn-2026-11-26.jsonl","lastOffset":131});
+    let qwen_collab =
+        json!({"extra":{"collaboration":{"version":1,"sinceMs":111,"completed":{"turn":222}}}});
+    let sources = [
+        (
+            "qwen-work-cn-trace",
+            "standalone-qwen-work-cn-sdk",
+            &qwen_trace,
+        ),
+        (
+            "qwen-work-cn-collaboration",
+            "standalone-qwen-work-cn-collaboration-sdk",
+            &qwen_collab,
+        ),
+    ];
+    let outboxes: Vec<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (input, dir, cursor))| {
+            let sdk = fixture.data.join("state").join(dir);
+            fs::create_dir_all(sdk.join("outbox")).unwrap();
+            fs::File::create(sdk.join("collector.lock")).unwrap();
+            let db = rusqlite::Connection::open(sdk.join("outbox/delivery.sqlite")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE queue_size (singleton INTEGER PRIMARY KEY, events INTEGER NOT NULL);
+         INSERT INTO queue_size VALUES (1, 0);
+         CREATE TABLE checkpoint (source TEXT PRIMARY KEY, json TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO checkpoint VALUES (?1, ?2)",
+                (
+                    index.to_string().repeat(64),
+                    json!({(*input): cursor}).to_string(),
+                ),
+            )
+            .unwrap();
+            db
+        })
+        .collect();
+    let rollback = || fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    for (blocked, (input, _, _)) in sources.iter().enumerate() {
+        outboxes[blocked]
+            .execute("UPDATE queue_size SET events = 1", [])
+            .unwrap();
+        let attempt = rollback();
+        assert!(!attempt.status.success());
+        let stderr = String::from_utf8_lossy(&attempt.stderr);
+        assert!(
+            stderr.contains(&format!("{input} SDK activity is still queued")),
+            "{stderr}"
+        );
+        assert_eq!(
+            fs::read(&checkpoint).unwrap(),
+            original.to_string().into_bytes()
+        );
+        assert_eq!(fs::read(cache.join("current")).unwrap(), baseline_current);
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), baseline_previous);
+        assert_eq!(fs::read(&service).unwrap(), baseline_service);
+        for db in &outboxes {
+            assert_eq!(
+                db.query_row("SELECT COUNT(*) FROM checkpoint", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        outboxes[blocked]
+            .execute("UPDATE queue_size SET events = 0", [])
+            .unwrap();
+    }
+    success(&rollback());
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    let transferred: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        transferred,
+        json!({"unrelated":{"lastOffset":7},
+        "qwen-work-cn-trace": qwen_trace, "qwen-work-cn-collaboration": qwen_collab})
+    );
+    for db in &outboxes {
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM checkpoint", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+}
+
+#[test]
 fn failed_node_switch_restores_current_qwen_hooks_and_retry_retires_only_the_installed_hooks() {
     let fixture = Fixture::new();
     let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));

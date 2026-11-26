@@ -352,7 +352,8 @@ async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRo
             profiles.push(profile);
         }
     }
-    if profiles.is_empty() {
+    let qwen = crate::sdk::qwen_handoff::QwenHandoff::installed(&data)?;
+    if profiles.is_empty() && qwen.is_empty() {
         return Ok(ownership);
     }
     let checkpoint_path = data.join("logs/input-state.json");
@@ -362,6 +363,9 @@ async fn lock_legacy_history_for_rollback(data: &Path) -> Result<LegacyHistoryRo
         .load_for_handoff()
         .await
         .context("Could not read the legacy checkpoint; current version retained")?;
+    ownership
+        .sdk_locks
+        .extend(crate::sdk::qwen_handoff::QwenHandoff::export_for_rollback(qwen, &legacy).await?);
     let home = PathBuf::from(crate::utils::resolve_home("~"));
     for profile in profiles {
         match profile.export_checkpoint(&data, &legacy, &home).await
