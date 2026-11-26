@@ -2111,6 +2111,94 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     expect(toolResult['gen_ai.tool.call.duration']).toBe(2037);
   });
 
+  it.each([
+    { name: 'native tool execution before the planner metadata is finalized', start: 2, end: 3, resultIndex: 2, expectedStart: 2, expectedEnd: 3, measured: 1000 },
+    { name: 'a tool result already consumed by the next planner', start: 5, end: 13, resultIndex: 2, expectedStart: 5, expectedEnd: 8 },
+    { name: 'a tool with no completion timestamp and a consuming planner', start: 4, resultIndex: 2, expectedStart: 4, expectedEnd: 8 },
+    { name: 'a tool result delivered across collection cycles', start: 5, end: 13, resultIndex: 2, expectedStart: 4, expectedEnd: 8, pending: true },
+    { name: 'a background tool result after the next planner step', start: 5, end: 13, resultIndex: 4, expectedStart: 5, expectedEnd: 13, measured: 8000 },
+  ])('preserves causal Antigravity tool timing for $name', async (testCase) => {
+    const root = path.join(tmpDir, 'tool-timing');
+    const convDir = path.join(root, 'conversations');
+    const logsDir = path.join(root, 'brain', 'timing', '.system_generated', 'logs');
+    await fs.mkdir(convDir, { recursive: true });
+    await fs.mkdir(logsDir, { recursive: true });
+
+    const baseSec = 1_778_005_100;
+    const callId = 'call-timing';
+    const turn = protoStringField(12, '492c6b8f-0aff-4686-a5a2-d98e74089426');
+    const ts = (offset: number) => new Date((baseSec + offset) * 1000).toISOString();
+    const nativeTime = (field: number, offset: number) => protoBytesField(field, protoTimestamp(baseSec + offset));
+    const usage = (index: number, end: number) => encodeGeneratorMetadata({
+      model: 'Gemini 4 Neon',
+      usage: { inputTokens: 10, totalOutputTokens: 5, responseId: `response-${index}` },
+      timestampSec: baseSec + end,
+      stepIndices: [index],
+    });
+    createConversationDb(path.join(convDir, 'timing.db'), {
+      genRows: [[0, usage(1, 4)], [1, usage(3, 11)]],
+      stepRows: [
+        [0, concatBytes(turn, nativeTime(1, 0))],
+        [1, concatBytes(turn, nativeTime(1, 1), nativeTime(8, 4))],
+        [3, concatBytes(turn, nativeTime(1, 8), nativeTime(8, 11))],
+        [testCase.resultIndex, concatBytes(
+          turn, nativeTime(1, testCase.start), nativeTime(32, testCase.start),
+          ...(testCase.end === undefined ? [] : [nativeTime(8, testCase.end)]),
+          protoBytesField(4, concatBytes(protoStringField(1, callId), protoStringField(2, 'run_command'))),
+        )],
+      ],
+    });
+    const transcriptPath = path.join(logsDir, 'transcript.jsonl');
+    const first = [
+      { step_index: 0, type: 'USER_INPUT', status: 'DONE', created_at: ts(0), content: 'Check the workspace.' },
+      { step_index: 1, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: ts(1), tool_calls: [{ id: callId, name: 'run_command', args: { CommandLine: 'pwd' } }] },
+    ];
+    const followup = [
+      { step_index: testCase.resultIndex, type: 'GENERIC', status: 'DONE', created_at: ts(testCase.start), content: 'Tool output' },
+      { step_index: 3, type: 'PLANNER_RESPONSE', status: 'DONE', created_at: ts(8), content: 'Done.' },
+    ].sort((a, b) => a.step_index - b.step_index);
+    const lines = (steps: object[]) => steps.map(step => JSON.stringify(step)).join('\n') + '\n';
+    await fs.writeFile(transcriptPath, lines(testCase.pending ? first : [...first, ...followup]));
+
+    const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+    const { flusher, spans } = captureTraceSpans();
+    const entries: AgentActivityEntry[] = [];
+    input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+    try {
+      await input.start();
+      await input.stop();
+      await flusher.sendBatch(entries);
+      if (testCase.pending) {
+        expect(entries.some(entry => entry['event.name'] === 'tool.result')).toBe(false);
+        const offset = entries.length;
+        await fs.appendFile(transcriptPath, lines(followup));
+        await input.start();
+        await input.stop();
+        await flusher.sendBatch(entries.slice(offset));
+      }
+      await flusher.flush();
+    } finally {
+      await input.stop();
+      await flusher.shutdown();
+    }
+
+    const actual = entries.filter(entry => entry['gen_ai.tool.call.id'] === callId);
+    expect(actual.map(entry => [entry['event.name'], entry.time_unix_nano])).toEqual([
+      ['tool.call', `${BigInt(baseSec + testCase.expectedStart) * 1_000_000_000n}`],
+      ['tool.result', `${BigInt(baseSec + testCase.expectedEnd) * 1_000_000_000n}`],
+    ]);
+    expect(actual[1]?.['gen_ai.tool.call.duration']).toBe(testCase.measured);
+    const tool = spans.find(span => span.attributes['gen_ai.tool.call.id'] === callId);
+    expect(tool?.startTime).toEqual([baseSec + testCase.expectedStart, 0]);
+    expect(tool?.endTime).toEqual([baseSec + testCase.expectedEnd, 0]);
+    const model = spans.find(span => span.attributes['gen_ai.response.id'] === 'response-3');
+    expect(model?.startTime).toEqual([baseSec + 8, 0]);
+    const steps = spans.filter(span => span.attributes['gen_ai.span.kind'] === 'STEP');
+    expect(steps.map(span => span.endTime).sort((a, b) => a[0] - b[0])).toEqual(
+      [Math.max(4, testCase.expectedEnd), 11].sort((a, b) => a - b).map(second => [baseSec + second, 0]),
+    );
+  });
+
   it('rejects bare file://, root /, Windows drive roots, and remote UNC URIs and prioritizes native workspace fields', () => {
     const bareFile = protoStringField(1, 'file://');
     const rootFile = protoStringField(1, 'file:///');
@@ -3550,6 +3638,120 @@ describe('Antigravity SQLite reader & AntigravityInput', () => {
     const resps2 = c2.filter((e) => e['event.name'] === 'llm.response');
     expect(resps2.map((e) => e['gen_ai.response.id'])).toEqual(['late-zero-1']);
   });
+
+  it.each(['running planner', 'SQLite ahead of transcript', 'fresh stop', 'late stop join'] as const)(
+    'keeps a model stop and the continuing native turn on one trace (%s)',
+    async (source) => {
+      const root = path.join(tmpDir, 'continuing-native-turn');
+      const sid = 'continuing-session';
+      const turn = protoStringField(12, '733b0dd9-c84c-41b9-bc97-69d50423f62a');
+      const dbPath = path.join(root, 'conversations', sid + '.db');
+      const transcriptPath = path.join(root, 'brain', sid, '.system_generated', 'logs', 'transcript.jsonl');
+      await fs.mkdir(path.dirname(dbPath), { recursive: true });
+      await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+      const base = 1_778_024_000;
+      const timestamp = (offset: number) => new Date((base + offset) * 1000).toISOString();
+      const meta = (start: number, end?: number) => concatBytes(
+        turn, protoBytesField(1, protoTimestamp(base + start)),
+        ...(end === undefined ? [] : [protoBytesField(8, protoTimestamp(base + end))]),
+      );
+      const usage = (step: number, id: string, end: number) => encodeGeneratorMetadata({
+        model: 'Gemini 3.8 Flash (High)', usage: { inputTokens: 10, totalOutputTokens: 2, responseId: id },
+        timestampSec: base + end, stepIndices: [step],
+      });
+      const writeSteps = (...steps: Record<string, unknown>[]) =>
+        fs.appendFile(transcriptPath, steps.map(step => JSON.stringify(step)).join('\n') + '\n');
+      const planner = (step_index: number, start: number, fields: Record<string, unknown>) => ({
+        step_index, type: 'PLANNER_RESPONSE', source: 'MODEL', status: 'DONE', created_at: timestamp(start), ...fields,
+      });
+      const intermediate = planner(1, 1, { content: 'Intermediate model output.' });
+      const finalStart = source === 'fresh stop' ? 4 : 42;
+      createConversationDb(dbPath, {
+        stepRows: [[0, meta(0)], [1, meta(1, 3)], ...(source === 'SQLite ahead of transcript'
+          ? [[2, meta(4)] as [number, Uint8Array]] : [])],
+        genRows: [[0, usage(1, 'mid-stop', 3)], ...(source === 'SQLite ahead of transcript'
+          ? [[1, usage(2, 'next-tool-call', 40)] as [number, Uint8Array]] : [])],
+      });
+      await writeSteps({
+        step_index: 0, type: 'USER_INPUT', source: 'USER_EXPLICIT', status: 'DONE',
+        created_at: timestamp(0), content: 'Original user prompt.',
+      });
+      if (source !== 'late stop join') await writeSteps(intermediate);
+      if (source === 'running planner') {
+        await writeSteps(planner(2, 4, { status: 'RUNNING', content: 'Still planning' }));
+      }
+
+      const clock = vi.spyOn(Date, 'now').mockReturnValue((base + (source === 'fresh stop' ? 4 : 39)) * 1000);
+      const { flusher, spans } = captureTraceSpans();
+      const poll = async () => {
+        const input = new AntigravityInput({ stateStore, clientType: ClientType.Antigravity, dataRoot: root, collectHistorical: true });
+        const entries: AgentActivityEntry[] = [];
+        input.on('entries', (batch: AgentActivityEntry[]) => entries.push(...batch));
+        await input.start();
+        await input.stop();
+        await flusher.sendBatch(entries);
+        return entries;
+      };
+      try {
+        const first = await poll();
+        expect(first.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+        expect(spans).toHaveLength(0);
+        if (source === 'late stop join') {
+          await writeSteps(intermediate, planner(2, 4, { status: 'RUNNING' }));
+          const continuation = await poll();
+          expect(continuation.find(entry => entry['agent.antigravity.planner_joined'] === true)).toMatchObject({
+            'gen_ai.turn.end': false, 'gen_ai.response.finish_reasons': ['stop'],
+          });
+          expect(spans).toHaveLength(0);
+        }
+
+        const db = new (loadDatabaseSync()!)(dbPath);
+        try {
+          const add = db.prepare('INSERT OR REPLACE INTO gen_metadata VALUES (?, ?, ?)');
+          const continuing = usage(2, 'next-tool-call', finalStart + 1);
+          const last = usage(4, 'final-stop', finalStart + 5);
+          add.run(1, continuing, continuing.length);
+          add.run(2, last, last.length);
+          const step = db.prepare('INSERT OR REPLACE INTO steps (idx, metadata) VALUES (?, ?)');
+          step.run(2, meta(4, finalStart + 1));
+          step.run(3, concatBytes(meta(finalStart + 2, finalStart + 3),
+            protoBytesField(4, protoStringField(1, 'local-tool-call'))));
+          step.run(4, meta(finalStart + 4, finalStart + 5));
+        } finally { db.close(); }
+        await writeSteps(
+          planner(2, 4, { tool_calls: [{ id: 'local-tool-call', name: 'read_file' }] }),
+          { step_index: 3, type: 'GENERIC', source: 'MODEL', status: 'DONE', created_at: timestamp(finalStart + 2), content: 'Local result.' },
+          planner(4, finalStart + 4, { content: 'Final model output.' }),
+        );
+        clock.mockReturnValue((base + finalStart + 6) * 1000);
+        const beforeQuiet = await poll();
+        expect(beforeQuiet.some(entry => entry['gen_ai.turn.end'] === true)).toBe(false);
+        expect(spans).toHaveLength(0);
+        clock.mockReturnValue((base + finalStart + 8) * 1000);
+        const afterQuiet = await poll(); // No source write is needed to release the final stop.
+        expect(afterQuiet.filter(entry => entry['gen_ai.turn.end'] === true)).toHaveLength(1);
+        await flusher.flush();
+
+        expect(new Set(spans.map(span => span.spanContext().traceId)).size).toBe(1);
+        const kind = (span: ReadableSpan) => span.attributes['gen_ai.span.kind'];
+        const llms = spans.filter(span => kind(span) === 'LLM');
+        expect(llms.map(span => span.attributes['gen_ai.response.id']).sort())
+          .toEqual(['final-stop', 'mid-stop', 'next-tool-call']);
+        expect(spans.filter(span => kind(span) === 'TOOL')).toHaveLength(1);
+        expect(spans.filter(span => kind(span) === 'ENTRY')).toHaveLength(1);
+        for (const span of [...llms, ...spans.filter(span => kind(span) === 'ENTRY' || kind(span) === 'AGENT')]) {
+          const messages = JSON.parse(String(span.attributes['gen_ai.input.messages']));
+          expect(messages.filter((message: { role: string }) => message.role === 'user'))
+            .toEqual([{ role: 'user', parts: [{ type: 'text', content: 'Original user prompt.' }] }]);
+        }
+        expect(spans.find(span => kind(span) === 'AGENT')?.attributes['gen_ai.usage.total_tokens']).toBe(36);
+        expect(await poll()).toEqual([]);
+      } finally {
+        clock.mockRestore();
+        await flusher.shutdown();
+      }
+    },
+  );
 
   it('exports two SQLite-only updates through the same OTLP flusher without a phantom parent', async () => {
     const root = path.join(tmpDir, 'sqlite-only-otlp');
