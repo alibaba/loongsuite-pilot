@@ -11,7 +11,7 @@ SETUP_SCRIPTS_DIR = Path(__file__).resolve().parents[2] / "agentloop-collector-s
 if str(SETUP_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
 
-from util.aliyun import get_logs, get_space, list_spaces
+from util.aliyun import execute_dataset_query, get_logs, get_space, list_spaces
 from util.config_record import (
     DEFAULT_LOGSTORE,
     append_history,
@@ -30,6 +30,7 @@ def parse_args(argv):
     parser.add_argument("--region", default="")
     parser.add_argument("--project", default="")
     parser.add_argument("--logstore", default="")
+    parser.add_argument("--dataset", default="")
     parser.add_argument("--query", default="")
     parser.add_argument("--from", dest="time_from", default="")
     parser.add_argument("--to", dest="time_to", default="")
@@ -43,6 +44,7 @@ def parse_args(argv):
         "region": args.region,
         "project": args.project,
         "logstore": args.logstore,
+        "dataset": args.dataset,
         "query": args.query,
         "from": args.time_from,
         "to": args.time_to,
@@ -133,9 +135,57 @@ def parse_page(values):
     return line, offset
 
 
+def dataset_target(values):
+    """Dataset queries do not bind or inherit the audit Logstore target."""
+    if values["project"] or values["logstore"]:
+        fail("Cannot combine --dataset with --project or --logstore.")
+    if values["list"] or values["list_spaces"]:
+        fail("Cannot combine --dataset with --list or --list-spaces.")
+    missing = [
+        flag for flag, key in (
+            ("--agent-space", "agent_space"),
+            ("--region", "region"),
+            ("--dataset", "dataset"),
+        ) if not values[key]
+    ]
+    if missing:
+        fail(
+            "Dataset query target is incomplete. Missing explicit %s. "
+            "Pass --agent-space, --region, and --dataset together." % ", ".join(missing)
+        )
+    return values["agent_space"], values["region"], values["dataset"]
+
+
+def query_dataset(profile, space, region, dataset, sql, start, end, line, offset):
+    data, err = execute_dataset_query(profile, region, space, dataset, sql, start, end, line, offset)
+    if data is None:
+        fail(err)
+    return data
+
+
 def run(argv):
     values = parse_args(argv)
     profile = require_profile()
+    if values["dataset"]:
+        space, region, dataset = dataset_target(values)
+        if not values["query"]:
+            fail("Missing --query. Search example: * . Stats example: * | SELECT count(*)")
+        start, end = query_window(values)
+        line, offset = parse_page(values)
+        data = query_dataset(profile, space, region, dataset, values["query"], start, end, line, offset)
+        append_history({
+            "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "query": values["query"],
+            "from": start,
+            "to": end,
+            "slsProject": "",
+            "slsLogstore": "",
+            "regionId": region,
+            "agentSpace": space,
+            "datasetName": dataset,
+        })
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return
     if values["list_spaces"]:
         spaces, errors = list_spaces(profile, values["region"])
         for error in errors:

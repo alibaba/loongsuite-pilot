@@ -355,7 +355,7 @@ function Get-HistoryRows {
         } catch {
             continue
         }
-        $rows += @{
+        $row = @{
             at = [string]$item.at
             query = [string]$item.query
             from = $item.from
@@ -364,6 +364,11 @@ function Get-HistoryRows {
             slsLogstore = [string]$item.slsLogstore
             regionId = [string]$item.regionId
         }
+        foreach ($extra in @("agentSpace", "datasetName")) {
+            $value = [string]$item.$extra
+            if ($value) { $row[$extra] = $value }
+        }
+        $rows += $row
     }
     if ($rows.Count -gt $script:HISTORY_LIMIT) {
         $rows = $rows[($rows.Count - $script:HISTORY_LIMIT)..($rows.Count - 1)]
@@ -383,7 +388,14 @@ function Add-HistoryRow($Entry) {
         $toNum = 0
         if ($null -ne $item.from) { $fromNum = [long]$item.from }
         if ($null -ne $item.to) { $toNum = [long]$item.to }
-        $lines += '{"at":"' + (Escape-JsonString ([string]$item.at)) + '","query":"' + (Escape-JsonString ([string]$item.query)) + '","from":' + $fromNum + ',"to":' + $toNum + ',"slsProject":"' + (Escape-JsonString ([string]$item.slsProject)) + '","slsLogstore":"' + (Escape-JsonString ([string]$item.slsLogstore)) + '","regionId":"' + (Escape-JsonString ([string]$item.regionId)) + '"}'
+        $tail = ""
+        if (($item.Keys -contains "agentSpace") -and [string]$item["agentSpace"]) {
+            $tail += ',"agentSpace":"' + (Escape-JsonString ([string]$item["agentSpace"])) + '"'
+        }
+        if (($item.Keys -contains "datasetName") -and [string]$item["datasetName"]) {
+            $tail += ',"datasetName":"' + (Escape-JsonString ([string]$item["datasetName"])) + '"'
+        }
+        $lines += '{"at":"' + (Escape-JsonString ([string]$item.at)) + '","query":"' + (Escape-JsonString ([string]$item.query)) + '","from":' + $fromNum + ',"to":' + $toNum + ',"slsProject":"' + (Escape-JsonString ([string]$item.slsProject)) + '","slsLogstore":"' + (Escape-JsonString ([string]$item.slsLogstore)) + '","regionId":"' + (Escape-JsonString ([string]$item.regionId)) + '"' + $tail + '}'
     }
     $payload = ""
     if ($lines.Count -gt 0) { $payload = ($lines -join "`n") + "`n" }

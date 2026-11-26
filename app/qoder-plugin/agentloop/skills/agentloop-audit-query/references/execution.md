@@ -20,7 +20,19 @@ Project、Region、可用表、组织及账单映射取本次目标的配置。�
 
 脚本有最近一小时的底层默认值，但 Skill 不依赖它。时间未确认时先询问；不得运行任何日志/统计探测。环境元数据检查不等于时间范围授权。
 
-SQL 写法与分页见 [SQL 写作技巧](sql-writing.md)。stdout 为 GetLogsV2 JSON；检查 meta.progress，完成后再交付结果。
+SQL 写法与分页见 [SQL 写作技巧](sql-writing.md)。日志库查询的 stdout 为 GetLogsV2 JSON；检查 meta.progress，完成后再交付结果。
+
+## Dataset 查询
+
+用户给出 AgentSpace 和 Dataset 时使用这条分支。它不读取审计目录、schema 或枚举标签，也不改当前日志库目标。字段以该 Dataset 的 schema 为准。
+
+```bash
+python3 "<agentloop-collector-setup目录>/scripts/run.py" audit --agent-space <agent-space> --region <region> --dataset <dataset> --from <from> --to <to> --query '<SELECT 或 * | SELECT>' --line 100 --offset 0
+```
+
+脚本调用 `aliyun agentloop execute-query --type SQL`，并把 `--dataset` 传成 `--dataset-name`。`--line` 对应 `--length`，上限仍是 100。stdout 是 execute-query JSON，用 `columns` 与 `rows` 按位置对齐，不是 GetLogsV2 的 `data`。检查 `meta.progress`。
+
+身份需要 RAM 动作 `agentloop:ExecuteQuery`，资源为 `acs:agentloop:<region>:<account>:agentspace/<agent-space>/dataset/<dataset>`。OAuth 登录范围是该账号可调用的全部 API。按最小权限创建的 RAM 用户要单独授予这个动作；它不区分只读 SQL 和写入语句。
 
 账户与查询目标切换按 Setup 的[账户与查询目标切换](../../agentloop-collector-setup/references/auth.md)完成。`audit --list-spaces` 返回 `{spaces:[{agentSpace,regionId}]}`，只列空间，不更改 Profile 或目标，可用 `--region` 缩小范围；选定后按上述 AgentSpace 或直接 Project 参数执行 `audit --list` 绑定，成功返回当前上下文 JSON。元数据操作不要求日志时间、不取日志；实际查询才执行上述时间确认流程。
 
@@ -38,6 +50,10 @@ SQL 写法与分页见 [SQL 写作技巧](sql-writing.md)。stdout 为 GetLogsV2
 - `No AgentSpace found`：账号下没有空间。
 - `AgentSpace is missing slsProject or regionId`：选中的空间没有查询要用的字段。
 - `Missing --query. Search example: * . Stats example: * | SELECT count(*)`：没有查询语句。
+- `Cannot combine --dataset with --project or --logstore.`：Dataset 查询只使用 AgentSpace、地域和 Dataset，不要同时传 Project 或 Logstore。
+- `Cannot combine --dataset with --list or --list-spaces.`：`--dataset` 只执行查询，不列举空间，也不改绑定。
+- `Dataset query target is incomplete. Missing explicit --region, --dataset. Pass --agent-space, --region, and --dataset together.`：这是缺项示例。`--dataset` 存在时必须同时给出 `--agent-space`、`--region` 和 `--dataset`，失败不修改原日志库目标。
+- `query returned no columns/rows`：execute-query 没有返回可按位置对齐的 `columns` 与 `rows`。
 - `--from must not be later than --to`、`--line must be greater than 0`、`--line must not exceed 100`、`--offset must not be less than 0`，或参数名后接 `is not a number`：按提示改正参数。
 
 ### 退出码 7

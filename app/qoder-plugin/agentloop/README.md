@@ -79,7 +79,7 @@ npx 更新会重建所安装的 Skill 目录，独立安装时目录内的 CLI �
 
 ### 最小权限
 
-安装与查询可共用以下策略。下例仅覆盖默认 `agent-event`；查询两表合并、意图、风险、实体或运行时时，应为实际访问的各 Logstore 授予 log:GetLogStoreLogs，索引核对另需 log:GetIndex。部门外表同样按实际表授权。仪表盘创建/更新权限按需单独授予，不属于只读查询权限。
+安装与日志库查询可共用以下策略。下例仅覆盖默认 `agent-event`；查询两表合并、意图、风险、实体或运行时时，应为实际访问的各 Logstore 授予 log:GetLogStoreLogs，索引核对另需 log:GetIndex。部门外表同样按实际表授权。仪表盘创建/更新权限按需单独授予，不属于只读查询权限。Dataset 查询另需后面的 `agentloop:ExecuteQuery`；这个动作不区分只读 SQL 和写入语句。
 
 ```json
 {
@@ -120,6 +120,21 @@ npx 更新会重建所安装的 Skill 目录，独立安装时目录内的 CLI �
       "Effect": "Allow",
       "Action": "log:GetLogStoreLogs",
       "Resource": "acs:log:*:*:project/*/logstore/agent-event"
+    }
+  ]
+}
+```
+
+Dataset 查询在上面的策略之外授予：
+
+```json
+{
+  "Version": "1",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "agentloop:ExecuteQuery",
+      "Resource": "acs:agentloop:*:*:agentspace/*/dataset/*"
     }
   ]
 }

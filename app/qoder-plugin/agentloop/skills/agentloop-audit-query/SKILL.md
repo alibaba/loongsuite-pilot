@@ -1,6 +1,6 @@
 ---
 name: agentloop-audit-query
-description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体数据；按用户需求返回实际结果、验证 SQL 或 CLI/SDK 接入材料。仪表盘制作使用 agentloop-audit-dashboard。
+description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体数据，或按 AgentSpace 与 Dataset 执行 execute-query；按用户需求返回实际结果、验证 SQL 或 CLI/SDK 接入材料。仪表盘制作使用 agentloop-audit-dashboard。
 ---
 
 # AgentLoop 审计查询
@@ -15,6 +15,8 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 2. 从 [查询目录](references/catalog.md) 选择参考 SQL，字段和业务口径查 [schema](references/schema.md)，展示标签查 [枚举](references/value-labels.md)。按需求添加筛选与分组。
 3. 适配目标表与索引并执行验证。新写或修改的 SQL 超过一天时，先在目标范围内窄窗验证，再查询完整范围；比较窗口需要额外历史范围时先说明。
 4. 检查完成状态，交付结果或 SQL，说明范围、口径及验证状态。无法执行时标明未执行；敏感内容只展示必要的脱敏摘要。需保存 SQL、结果或接入包时，默认放当前项目的 `output/audit/reports/`，用户指定目录时按其要求。
+
+用户给出 AgentSpace 和 Dataset 时，不查审计目录、schema 或枚举标签。字段以该 Dataset 自己的 schema 为准。执行方式见 [执行说明](references/execution.md) 的 Dataset 查询。
 
 ## 参考资料
 

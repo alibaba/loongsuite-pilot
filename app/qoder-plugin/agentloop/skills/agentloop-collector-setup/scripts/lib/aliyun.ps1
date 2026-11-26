@@ -137,16 +137,16 @@ function Invoke-AliyunApi([string]$Profile, [string]$Region, [string[]]$CliArgs)
         $detail = $ran.Stderr.Trim()
         if (-not $detail) { $detail = $ran.Stdout.Trim() }
         if (-not $detail) { $detail = "aliyun call failed" }
-        return @{ Data = $null; Err = (Explain-ApiError $detail) }
+        return @{ Data = $null; Err = (Explain-ApiError $detail); Text = "" }
     }
     $text = $ran.Stdout.Trim()
-    if (-not $text) { return @{ Data = @{}; Err = "" } }
+    if (-not $text) { return @{ Data = @{}; Err = ""; Text = "" } }
     try {
         $data = $text | ConvertFrom-Json
         if ($text.StartsWith("[")) { $data = @($data) }
-        return @{ Data = $data; Err = "" }
+        return @{ Data = $data; Err = ""; Text = $text }
     } catch {
-        return @{ Data = $null; Err = $text }
+        return @{ Data = $null; Err = $text; Text = $text }
     }
 }
 
@@ -337,4 +337,25 @@ function Get-PilotLogs([string]$Profile, $Context, [string]$Query, [long]$Start,
         $logs = @($logs)
     }
     return (ConvertTo-JsonObject $res.Data "data" $logs 100)
+}
+
+function Invoke-DatasetQuery([string]$Profile, [string]$Space, [string]$Region, [string]$Dataset, [string]$Query, [long]$Start, [long]$End, [long]$Line, [long]$Offset) {
+    # Return the CLI text. ConvertFrom-Json drops brackets on a one-item array.
+    $res = Invoke-AliyunApi $Profile $Region @(
+        "agentloop", "execute-query",
+        "--agent-space", $Space,
+        "--dataset-name", $Dataset,
+        "--type", "SQL",
+        "--query", $Query,
+        "--from", ([string]$Start),
+        "--to", ([string]$End),
+        "--offset", ([string]$Offset),
+        "--length", ([string]$Line)
+    )
+    if ($null -eq $res.Data) { Fail $res.Err }
+    $names = @(Get-JsonPropertyNames $res.Data)
+    if (($names -notcontains "columns") -or ($names -notcontains "rows") -or -not $res.Text) {
+        Fail "query returned no columns/rows"
+    }
+    return [string]$res.Text
 }

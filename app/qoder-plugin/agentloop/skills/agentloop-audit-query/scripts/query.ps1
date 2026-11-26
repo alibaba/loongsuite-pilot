@@ -84,12 +84,35 @@ function Get-QueryPage($Values) {
     return @($line, $offset)
 }
 
-$parsed = Get-CliMap $args @("agent-space", "region", "project", "logstore", "query", "from", "to", "line", "offset") @("list", "list-spaces")
+function Resolve-DatasetTarget($Values) {
+    # Dataset queries do not bind or inherit the audit Logstore target.
+    if ($Values.project -or $Values.logstore) {
+        Fail "Cannot combine --dataset with --project or --logstore."
+    }
+    if ($Values.list -or $Values.list_spaces) {
+        Fail "Cannot combine --dataset with --list or --list-spaces."
+    }
+    $missing = @()
+    foreach ($pair in @(
+        @("--agent-space", "agent_space"),
+        @("--region", "region"),
+        @("--dataset", "dataset")
+    )) {
+        if (-not $Values[$pair[1]]) { $missing += $pair[0] }
+    }
+    if ($missing.Count -gt 0) {
+        Fail ("Dataset query target is incomplete. Missing explicit " + ($missing -join ", ") + ". Pass --agent-space, --region, and --dataset together.")
+    }
+    return @($Values.agent_space, $Values.region, $Values.dataset)
+}
+
+$parsed = Get-CliMap $args @("agent-space", "region", "project", "logstore", "dataset", "query", "from", "to", "line", "offset") @("list", "list-spaces")
 $values = @{
     agent_space = (Get-CliValue $parsed "agent-space")
     region = (Get-CliValue $parsed "region")
     project = (Get-CliValue $parsed "project")
     logstore = (Get-CliValue $parsed "logstore")
+    dataset = (Get-CliValue $parsed "dataset")
     query = (Get-CliValue $parsed "query")
     from = (Get-CliValue $parsed "from")
     to = (Get-CliValue $parsed "to")
@@ -99,6 +122,26 @@ $values = @{
     list_spaces = [bool]($parsed.Switches.Keys -contains "list-spaces")
 }
 $profile = Require-Profile
+if ($values.dataset) {
+    $target = Resolve-DatasetTarget $values
+    if (-not $values.query) { Fail "Missing --query. Search example: * . Stats example: * | SELECT count(*)" }
+    $window = Get-QueryWindow $values
+    $page = Get-QueryPage $values
+    $data = Invoke-DatasetQuery $profile $target[0] $target[1] $target[2] $values.query $window[0] $window[1] $page[0] $page[1]
+    Add-HistoryRow @{
+        at = (Get-Stamp)
+        query = $values.query
+        from = $window[0]
+        to = $window[1]
+        slsProject = ""
+        slsLogstore = ""
+        regionId = $target[1]
+        agentSpace = $target[0]
+        datasetName = $target[2]
+    }
+    Write-Output $data
+    exit 0
+}
 if ($values.list_spaces) {
     $spaces = @(Get-AgentSpaces $profile $values.region)
     foreach ($err in @($script:AgentSpaceListErrors)) {

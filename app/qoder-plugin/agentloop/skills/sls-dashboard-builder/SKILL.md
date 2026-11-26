@@ -129,7 +129,8 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 - SQL 别名应便于运维阅读；不要让 `active_users`、`gt_5_users`、`scene_count` 等裸英文字段名直接成为图例  
 - 指标定义对理解很重要时，通过 `display.documentLinkOption.documentLinks[]` 补充  
 - 同一张大盘上各图指标定义保持一致，尤其活跃、留存、成本、覆盖率等  
-- `tablepro + logstore` 优先显式 `SELECT ...`；schema 或字段需要时用 `scan`  
+- `tablepro + logstore` 优先显式 `SELECT ...`；schema 或字段需要时用 `scan`
+- Dataset 图表使用 `agentloop-dataset`，字段见 [数据源](references/datasources.md)。查询不写 `logstore`。表格、单序列折线、分组折线仍用 `tablepro`、`linepro`、`aggpro` 及现有 `queryOptionMap`  
 - 参考文档按需阅读，只读最少必要部分  
 - **搜索前缀 `((*))` vs `*|`**：跨表 CTE（查询多个 logstore）时用 `*|` 或 `(*)|`；同一 logstore 内的查询用 `*|` 即可。`((*))` 是旧写法，功能等价但可读性差  
 - **预聚合 CTE 的字段可加性**：`sum()`/`count()` 可加；`approx_distinct()` **不可加**——同一实体可能跨多个 GROUP BY 组，对预聚合结果求和会膨胀。需要去重计数时必须在原始事件上 `approx_distinct`  
