@@ -41,9 +41,10 @@ describe.each(variants)('Qoder prompt audit reaches native JSONL output: $name',
     let service: InterceptorWorkerService | undefined;
     try {
       await mkdir(configDir, { recursive: true });
+      // Exercise audit correlation, not the regex worker's cold-start deadline.
       await writeFile(join(configDir, 'interceptor.json'), JSON.stringify({ interceptor: { rules: [{
         kind: 'pattern', id: 'synthetic-access-key', version: '7', agents: ['qoder', 'qodercli'],
-        events: ['UserPromptSubmit'], match: 'regex', pattern: '(?:LTAI|AKIA)[A-Za-z0-9*]{12,30}', action: 'log',
+        events: ['UserPromptSubmit'], match: 'substring', pattern: syntheticKey, action: 'log',
       }] } }));
       const workerFile = join(root, 'interceptor-worker.cjs');
       await build({ entryPoints: [resolve('src/interceptor/worker.ts')], outfile: workerFile,
@@ -62,8 +63,9 @@ describe.each(variants)('Qoder prompt audit reaches native JSONL output: $name',
         expect(response.status).toBe(200);
         return response.json();
       };
-      // Warm the regex thread separately so its first startup is not a timing assertion.
-      expect(await evaluate({ prompt: 'warmup without a key' })).toMatchObject({ action: 'allow', matched: false });
+      expect(await evaluate({ prompt: 'fixture prompt without a key' })).toMatchObject({
+        action: 'allow', matched: false, evaluatedRules: ['synthetic-access-key'],
+      });
       // request_set_id is absent; product may arrive only with the Stop Hook.
       expect(await evaluate({ sessionId, transcriptPath: transcript, cwd: root, prompt,
         raw: { session_id: sessionId, transcript_path: transcript, cwd: root,
