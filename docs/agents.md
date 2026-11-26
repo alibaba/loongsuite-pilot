@@ -188,6 +188,12 @@ the UID running the collector and CLI.
 `--agents cursor-cli` selects the shared Cursor registration. Start new CLI
 processes after installation so they can read the updated policy.
 
+When the Pilot package is delivered on a writable container volume, Cursor
+system onboarding uses a private directory next to the mount for the
+executables and Cursor's local records. The volume permissions are unchanged.
+Start or restart the Collector in the same container after changing scope.
+The Collector's policy file still needs a protected path.
+
 For [official headless CLI runs](https://cursor.com/docs/cli/headless) that omit
 the normal prompt and response hooks, Pilot can recover a completed turn from
 the native transcript referenced by the CLI's `sessionEnd` hook. The transcript

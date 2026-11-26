@@ -2,7 +2,7 @@ import * as path from 'node:path';
 import type { AgentDefinition } from '../types/deployment.js';
 import { SYSTEM_TOML_HOOK_PATHS, systemTomlHooksInstalled, updateSystemTomlHooks } from './system-toml-hooks.js';
 import { cursorSystemHooksInstalled, updateCursorSystemHooks } from './cursor-system-hooks.js';
-import { CURSOR_SYSTEM_HOOK_SCRIPT } from './cursor-system-paths.js';
+import { assertTrustedCursorSystemFile, CURSOR_SYSTEM_HOOK_SCRIPT, cursorSystemCompanionDir, cursorSystemRuntimeDir } from './cursor-system-paths.js';
 
 const SYSTEM_HOOK_PATHS: Record<string, string> = {
   ...SYSTEM_TOML_HOOK_PATHS,
@@ -43,17 +43,27 @@ function managedCursorDefinition(def: AgentDefinition, dataDir: string | undefin
   if (install) assertManagedCursorSystemCommand(def, dataDir);
   // A local definition override must still let uninstall remove the
   // registered command that belongs to this Pilot installation.
-  return { ...def, hook: { ...def.hook, hookCommand: managedCursorCommand(dataDir) } };
+  return { ...def, hook: { ...def.hook, hookCommand: managedCursorCommand(cursorSystemRuntimeDir(dataDir)) } };
 }
 
-export function systemHooksInstalled(def: AgentDefinition, dataDir?: string): Promise<boolean> {
-  return def.id === 'cursor'
-    ? cursorSystemHooksInstalled(managedCursorDefinition(def, dataDir, true))
-    : systemTomlHooksInstalled(def);
+export async function systemHooksInstalled(def: AgentDefinition, dataDir?: string): Promise<boolean> {
+  if (def.id !== 'cursor') return systemTomlHooksInstalled(def);
+  const managed = managedCursorDefinition(def, dataDir, true);
+  return cursorSystemHooksInstalled(managed, otherManagedCursorCommand(managed, dataDir!));
 }
 
-export function updateSystemHooks(def: AgentDefinition, install: boolean, dataDir?: string): Promise<void> {
-  return def.id === 'cursor'
-    ? updateCursorSystemHooks(managedCursorDefinition(def, dataDir, install), install)
-    : updateSystemTomlHooks(def, install);
+export async function updateSystemHooks(def: AgentDefinition, install: boolean, dataDir?: string): Promise<void> {
+  if (def.id !== 'cursor') return updateSystemTomlHooks(def, install);
+  const managed = managedCursorDefinition(def, dataDir, install);
+  if (install && managed.hook!.hookCommand !== managedCursorCommand(dataDir!)) {
+    await assertTrustedCursorSystemFile(managed.hook!.hookCommand);
+  }
+  return updateCursorSystemHooks(managed, install, otherManagedCursorCommand(managed, dataDir!));
+}
+
+function otherManagedCursorCommand(managed: AgentDefinition, dataDir: string): string {
+  const initial = managedCursorCommand(dataDir);
+  return managed.hook!.hookCommand === initial
+    ? managedCursorCommand(cursorSystemCompanionDir(dataDir))
+    : initial;
 }

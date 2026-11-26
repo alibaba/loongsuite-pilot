@@ -8,6 +8,7 @@ import { SLS_FAILURE_LOG_MAX_TOTAL_BYTES } from '../flushers/sls-failure-log-wri
 import { parseOutputSegment } from '../utils/jsonl-output-file.js';
 import { LOCAL_LOG_EMERGENCY_FILE_BYTES, withJsonlFileLock } from '../utils/segmented-jsonl-writer.js';
 import type { StateStore } from '../checkpoints/state-store.js';
+import { assertTrustedCursorSystemDirectory, cursorSystemRuntimeDir } from '../deployment/cursor-system-paths.js';
 
 const logger = createLogger('LogRetention');
 
@@ -76,7 +77,7 @@ export class LogRetentionService {
   private pressureOnlyCleanup = false;
   private deletedBytes = 0;
 
-  constructor(dataDir: string, config: LogRetentionConfig, private readonly stateStore?: StateStore,
+  constructor(private readonly dataDir: string, config: LogRetentionConfig, private readonly stateStore?: StateStore,
     private readonly hasPendingHermesSource?: (sourceToken: string) => boolean) {
     this.logsDir = path.join(dataDir, 'logs');
     this.config = config;
@@ -187,6 +188,17 @@ export class LogRetentionService {
     } catch (err) {
       logger.warn('log retention scan failed', { error: String(err) });
       errors++;
+    }
+
+    if (!pressureOnly) {
+      const cursorRuntime = cursorSystemRuntimeDir(this.dataDir);
+      const cursorLogs = path.join(cursorRuntime, 'logs/cursor');
+      if (cursorRuntime !== this.dataDir && (await safeLstat(cursorLogs))?.isDirectory()
+        && await assertTrustedCursorSystemDirectory(cursorLogs).then(() => true, () => false)) {
+        const result = await this.cleanSubdirectories(cursorLogs, today);
+        deleted += result.deleted;
+        errors += result.errors;
+      }
     }
 
     if (deleted > 0 || errors > 0) {

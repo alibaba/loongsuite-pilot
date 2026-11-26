@@ -7,6 +7,7 @@ import type { AgentDefinition } from '../../../src/types/deployment.js';
 import { systemHookDefinition } from '../../../src/deployment/system-hook-config.js';
 import { cursorSystemHooksInstalled, updateCursorSystemHooks } from '../../../src/deployment/cursor-system-hooks.js';
 import { areSystemHookAssetsHealthy } from '../../../src/deployment/system-hook-assets.js';
+import { cursorSystemRuntimeDir } from '../../../src/deployment/cursor-system-paths.js';
 import { runHookInstall } from '../../../src/deployment/hook-install-service.js';
 import { DeploymentManager } from '../../../src/deployment/deployment-manager.js';
 import { isolateAgentHome } from '../../helpers/isolated-agent-home.js';
@@ -406,6 +407,80 @@ describe('Cursor enterprise system registration', () => {
     expect(latest).toMatchObject({ conversation_id: 'missing-policy', content_omitted: true });
     expect(latest).not.toHaveProperty('prompt');
     await expect(fs.stat(path.join(home, '.loongsuite-pilot'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  async function mountContainerPayload() {
+    await fs.cp(path.join(pilotDir, 'assets/hooks'), path.join(dataDir, 'hooks'), { recursive: true });
+    await fs.mkdir(path.join(dataDir, 'assets'));
+    await fs.symlink('../hooks', path.join(dataDir, 'assets/hooks'));
+    await fs.unlink(path.join(dataDir, 'node-bin'));
+    await fs.mkdir(path.join(dataDir, 'bin'));
+    await fs.copyFile(trustedNode, path.join(dataDir, 'bin/node'), fs.constants.COPYFILE_FICLONE);
+    await fs.chmod(path.join(dataDir, 'bin/node'), 0o755);
+    await fs.chmod(dataDir, 0o777);
+    const config = path.join(root, 'collector-policy.json');
+    await write(config, JSON.stringify({ agents: { 'cursor-cli': { captureMessageContent: false } } }));
+    process.env.AGENT_DATA_COLLECTION_CONFIG = config;
+  }
+
+  it.runIf(process.platform === 'linux')('registers and executes packaged system hooks without changing the writable mount', async () => {
+    await mountContainerPayload();
+    const target = systemHookDefinition({ ...def, hook: { ...def.hook!, events: [...def.hook!.events, 'sessionEnd'] } });
+    const manager = new DeploymentManager({ dataDir, pilotDir: dataDir });
+    const settings = target.hook!.settingsPath;
+    const thirdParty = { version: 1, hooks: { stop: [{ command: 'customer-audit' }] } };
+    await write(settings, JSON.stringify(thirdParty));
+    await updateCursorSystemHooks(target, true); // an older registration that referenced the payload
+    expect((await manager.deployHookScope(target)).success).toBe(true);
+    expect(await areSystemHookAssetsHealthy('cursor', dataDir, dataDir)).toBe(true);
+    expect((await fs.stat(dataDir)).mode & 0o7777).toBe(0o777);
+    const runtime = cursorSystemRuntimeDir(dataDir);
+    expect(path.dirname(runtime)).toBe(path.dirname(dataDir));
+    expect(runtime).not.toBe(dataDir);
+    expect((await fs.stat(runtime)).mode & 0o777).toBe(0o700);
+    const registered = await fs.readFile(settings, 'utf8');
+    const { hooks } = JSON.parse(registered);
+    expect(hooks.sessionEnd).toHaveLength(1);
+    expect(hooks.sessionEnd[0].command).toContain('-cursor-system/hooks/');
+    expect(hooks.stop).toHaveLength(2);
+
+    for (const id of ['existing-a', 'existing-b', 'created-after-install']) {
+      const home = path.join(root, id);
+      const transcript = path.join(home, '.cursor/projects/workspace/agent-transcripts', id, id + '.jsonl');
+      await write(transcript, [
+        { role: 'user', message: { content: [{ type: 'text', text: 'fixture-private-prompt' }] } },
+        { role: 'assistant', message: { content: [{ type: 'text', text: 'fixture-private-reply' }] } },
+        { type: 'turn_ended', status: 'success' },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n');
+      const result = spawnSync('/bin/bash', ['-c', hooks.sessionEnd[0].command], {
+        env: { HOME: home, PATH: '/usr/bin:/bin' }, encoding: 'utf8', timeout: 10_000,
+        input: JSON.stringify({
+          hook_event_name: 'sessionEnd', session_id: id, conversation_id: id, generation_id: id,
+          cursor_version: '2026.09.26-dd393fe', reason: 'completed', duration_ms: 100,
+          transcript_path: transcript, workspace_roots: [home],
+        }),
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(JSON.parse(result.stdout)).toEqual({});
+    }
+    const history = path.join(runtime, 'logs/cursor/history');
+    const files = (await fs.readdir(history)).filter(file => file.endsWith('.jsonl'));
+    expect(files).toHaveLength(1);
+    const output = await fs.readFile(path.join(history, files[0]), 'utf8');
+    const rows = output.trim().split('\n').map(line => JSON.parse(line));
+    expect(new Set(rows.map(row => row['gen_ai.session.id']))).toEqual(new Set(['existing-a', 'existing-b', 'created-after-install']));
+    expect(output).not.toContain('fixture-private-');
+
+    const stagedWrapper = path.join(runtime, 'hooks/cursor-loongsuite-pilot-hook.sh');
+    const before = await fs.readFile(stagedWrapper);
+    await fs.chmod(path.join(dataDir, 'hooks/cursor-loongsuite-pilot-hook.sh'), 0o777);
+    await expect(manager.deployHookScope(target)).rejects.toThrow('Untrusted Cursor container payload');
+    expect(await fs.readFile(stagedWrapper)).toEqual(before);
+    expect(await fs.readFile(settings, 'utf8')).toBe(registered);
+    await fs.rename(runtime, runtime + '.unavailable');
+    expect(await manager.undeployAgent(target)).toBe(true);
+    expect(JSON.parse(await fs.readFile(settings, 'utf8'))).toEqual(thirdParty);
   });
 
   it('refuses an untrusted installed asset, Node pin or executable without using the caller fallback', async () => {
