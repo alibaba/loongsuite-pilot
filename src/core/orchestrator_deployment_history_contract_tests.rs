@@ -1,8 +1,6 @@
 use super::*;
 use serde_json::json;
 
-#[path = "../../tests/fixtures/legacy-migrated-hooks/cursor_resources.rs"]
-mod legacy_cursor_test_assets;
 struct World {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -36,7 +34,7 @@ impl World {
             )
             .unwrap();
         }
-        let pilot = legacy_cursor_test_assets::stage(&root);
+        let pilot = crate::deployment::legacy_cursor_test_assets::stage(&root);
         let manager = Arc::new(DeploymentManager::new(DeploymentManagerOptions {
             data_dir: data.to_string_lossy().into_owned(),
             pilot_dir: pilot.to_string_lossy().into_owned(),

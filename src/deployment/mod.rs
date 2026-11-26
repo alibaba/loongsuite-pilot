@@ -31,6 +31,9 @@ mod inject_command;
 mod installer_config;
 pub(crate) mod installer_helper;
 mod legacy_cli_cleanup;
+#[cfg(test)]
+#[path = "../../tests/fixtures/legacy-migrated-hooks/cursor_resources.rs"]
+pub(crate) mod legacy_cursor_test_assets;
 mod legacy_uninstall;
 mod native_agent_rollback;
 mod native_codex_rollback;
