@@ -28,4 +28,5 @@ export interface WorkBuddyHookEvent {
 export interface WorkBuddyBuildOptions {
   sessionId: string;
   hookEvents?: WorkBuddyHookEvent[];
+  stopAtMs?: number;
 }
