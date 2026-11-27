@@ -2734,16 +2734,23 @@ function Remove-OtelPlugin {
 
     # Clean Claude settings.json hooks
     $claudeSettings = Join-Path $env:USERPROFILE ".claude\settings.json"
-    if ((Test-Path $claudeSettings) -and $script:NODE_BIN) {
-        $content = Get-Content $claudeSettings -Raw -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $claudeSettings) {
+        $content = Get-Content -LiteralPath $claudeSettings -Raw
         if ($content -match "otel-claude-hook|hook-entry") {
-            $prevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-            & $script:NODE_BIN -e @'
+            if (-not $script:NODE_BIN) { throw "Node is unavailable to clean legacy Claude hooks in settings.json" }
+            # Windows PowerShell 5.1 treats redirected native stderr as a PowerShell error.
+            # Restore the caller's preference before checking the cleanup outcome.
+            $prevEAP = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                # A failed launch can leave the previous native command's exit code untouched.
+                $global:LASTEXITCODE = 1
+                & $script:NODE_BIN -e @'
 const fs = require('fs');
 const f = process.argv[1];
 const isOurs = c => c.includes('otel-claude-hook') || c.includes('hook-entry.sh');
 try {
-  const d = JSON.parse(fs.readFileSync(f, 'utf-8'));
+  const d = JSON.parse(fs.readFileSync(f, 'utf-8').replace(/^\uFEFF/, ''));
   if (d && d.hooks) {
     for (const ev of Object.keys(d.hooks)) {
       if (!Array.isArray(d.hooks[ev])) continue;
@@ -2757,9 +2764,13 @@ try {
     if (Object.keys(d.hooks).length === 0) delete d.hooks;
     fs.writeFileSync(f, JSON.stringify(d, null, 2) + '\n');
   }
-} catch {}
+} catch { process.exitCode = 1; }
 '@ $claudeSettings 2>$null
-            $ErrorActionPreference = $prevEAP
+                $cleaned = $LASTEXITCODE -eq 0
+            } finally {
+                $ErrorActionPreference = $prevEAP
+            }
+            if (-not $cleaned) { throw "Could not remove legacy Claude hooks from settings.json" }
             Msg "    ✅ settings.json hooks 已清理" "    ✅ settings.json hooks cleaned"
         }
     }
@@ -2938,6 +2949,11 @@ function Cmd-Upgrade {
 
     Msg "   当前版本: $oldVer" "   Current version: $oldVer"
     Write-Host ""
+
+    # After the "is anything installed" check, so the advice to re-run non-elevated is
+    # only given when there is really an upgrade to re-run; still before Check-Deps,
+    # Download-AndExtract and the start that re-registers the tasks, so Ctrl+C is cheap.
+    Warn-ElevatedInstall -Action "upgrade"
 
     Check-Deps
 
@@ -3342,11 +3358,25 @@ function Test-PilotElevated {
 }
 
 function Warn-ElevatedInstall {
+    # -Action "install" | "upgrade". Upgrade does the same damage: it starts the new
+    # version through the service script, whose start path deletes and re-registers both
+    # tasks unconditionally, so an elevated upgrade rewrites the ownership of tasks an
+    # ordinary session had installed and the next ordinary uninstall is denied again.
+    # It gets one extra line, because nothing about "upgrade" suggests the scheduled
+    # tasks are re-created from scratch.
+    param([string]$Action = "install")
     if (-not (Test-PilotElevated)) { return }
     Msg "⚠️  当前是提权(管理员)会话" "⚠️  This is an elevated (administrator) session"
-    Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
-    Msg "    继续安装的话，卸载(-Uninstall)也必须在提权会话里执行" "    If you continue, uninstall (-Uninstall) will have to run elevated as well"
-    Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
+    if ($Action -eq "upgrade") {
+        Msg "    升级会删除并重新注册计划任务" "    An upgrade deletes and re-registers the scheduled tasks"
+        Msg "    在这里重新注册出来的任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Re-registered from this session they are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
+        Msg "    继续升级的话，也需要在提权 PowerShell 中运行 uninstall 命令" "    If you continue, run the uninstall command from an elevated PowerShell as well"
+        Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新升级" "    To keep uninstall working without elevation: press Ctrl+C and re-run the upgrade from a non-elevated PowerShell"
+    } else {
+        Msg "    这样注册出来的计划任务归 BUILTIN\Administrators，本账号的普通会话之后删不掉" "    Scheduled tasks registered from it are owned by BUILTIN\Administrators, and this account's ordinary sessions cannot delete them afterwards"
+        Msg "    继续安装的话，也需要在提权 PowerShell 中运行 uninstall 命令" "    If you continue, run the uninstall command from an elevated PowerShell as well"
+        Msg "    想让普通会话自己就能卸载：Ctrl+C 退出，在非提权 PowerShell 里重新安装" "    To keep uninstall working without elevation: press Ctrl+C and re-run the install from a non-elevated PowerShell"
+    }
     Write-Host ""
 }
 # <<< pilot-elevation-warning <<<
@@ -3712,7 +3742,12 @@ function Cmd-Uninstall {
     Write-Host ""
 
     Msg "==> 清理 Claude 旧插件..." "==> Cleaning up legacy Claude plugin..."
-    Remove-OtelPlugin
+    try {
+        Remove-OtelPlugin
+    } catch {
+        Msg "    ⚠️  Claude 旧插件清理失败，继续卸载: $($_.Exception.Message)" `
+            "    ⚠️  Legacy Claude plugin cleanup failed; continuing uninstall: $($_.Exception.Message)"
+    }
     Write-Host ""
 
     Msg "==> 清理 OpenCode 插件配置..." "==> Cleaning up OpenCode plugin config..."

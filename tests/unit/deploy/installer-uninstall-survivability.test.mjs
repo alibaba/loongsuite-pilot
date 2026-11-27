@@ -27,7 +27,10 @@
 // (three plus the service wrapper) without editing. The prose form of the native-stderr
 // rule is pinned separately, by whichever repo's AGENTS.md carries that section.
 import { describe, expect, it } from 'vitest';
-import { existsSync, readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 const PS1 = [
   'deploy/installer.ps1',
@@ -87,6 +90,80 @@ describe('Resolve-Node cannot take the caller down with it', () => {
 });
 
 const INSTALLERS = PS1.filter(f => f.startsWith('deploy/installer'));
+const powershell = process.platform === 'win32' ? 'powershell.exe' : 'pwsh';
+const psArgs = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'];
+const hasPowerShell = spawnSync(powershell, [...psArgs, '-Command', 'exit 0']).status === 0;
+
+describe.skipIf(!hasPowerShell)('legacy Claude hook cleanup during a purge', () => {
+  const scenarios = ['valid BOM JSON with stderr', 'invalid JSON', 'missing executable', 'launch failure'];
+  it.each(scenarios)('handles %s before deleting Pilot data', scenario => {
+    const root = mkdtempSync(path.join(tmpdir(), 'pilot-otel-uninstall-'));
+    const installer = read('deploy/installer-opensource.ps1');
+    const settingsPath = path.join(root, '.claude', 'settings.json');
+    const cachePath = path.join(root, '.cache', 'opentelemetry.instrumentation.claude');
+    const dataDir = path.join(root, 'pilot-data');
+    const nativeSettings = { hooks: { Stop: [{ hooks: [
+      { command: 'otel-claude-hook' }, { command: 'unrelated-claude-hook' },
+    ] }] } };
+    const settings = scenario === 'invalid JSON' ? '{"hooks":,"name":"otel-claude-hook"}'
+      : '\uFEFF' + JSON.stringify(nativeSettings);
+    try {
+      mkdirSync(path.dirname(settingsPath), { recursive: true });
+      mkdirSync(cachePath, { recursive: true });
+      mkdirSync(dataDir, { recursive: true });
+      writeFileSync(settingsPath, settings);
+      writeFileSync(path.join(dataDir, 'config.json'), '{}');
+      const noisyNodeProbe = path.join(root, 'emit-warning.cjs');
+      writeFileSync(noisyNodeProbe, 'process.stderr.write("synthetic native warning\\n");');
+      const skippedCleanups = [
+        'Stop-PilotService', 'Remove-PilotScheduledTasks', 'Remove-DshYamlPatch', 'Remove-HermesPlugin',
+        'Remove-OpenClawPlugin', 'Remove-GrokBuildHookConfig', 'Remove-CopilotOtelEnvironment',
+        'Remove-CopilotPlugin', 'Remove-HookConfigs', 'Remove-CodexHookConfig', 'Get-PilotRuntimeOverride',
+        'Remove-OpenCodePlugin', 'Remove-PiCodingAgentExtension', 'Remove-MimoCodePlugin', 'Remove-PilotInstallationFiles',
+      ];
+      const script = path.join(root, 'probe.ps1');
+      writeFileSync(script, '\uFEFF' + `
+$ErrorActionPreference = 'Stop'
+$global:LASTEXITCODE = 0
+$DataDir = $env:PROBE_PILOT_DATA
+$Purge = $true
+$script:NODE_BIN = $env:PROBE_NODE_BIN
+function Msg { param($Zh, $En) Write-Host $En }
+function Assert-SafePilotDirectory { param($Path, $Purpose) return $Path }
+function Remove-PilotPath { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+function Invoke-BrokenNode { throw 'synthetic launch failure' }
+${skippedCleanups.map(name => `function ${name} {}`).join('\n')}
+${funcOf(installer, 'Remove-OtelPlugin')}
+${funcOf(installer, 'Cmd-Uninstall')}
+Cmd-Uninstall
+if ($ErrorActionPreference -ne 'Stop') { throw 'uninstall changed the error preference' }
+`);
+      let nodeBin = process.execPath;
+      if (scenario === 'missing executable') nodeBin = path.join(root, 'missing-node');
+      if (scenario === 'launch failure') nodeBin = 'Invoke-BrokenNode';
+      const run = spawnSync(powershell, [...psArgs, '-File', script], {
+        encoding: 'utf8', timeout: 15_000,
+        env: { ...process.env, USERPROFILE: root, PROBE_PILOT_DATA: dataDir, PROBE_NODE_BIN: nodeBin,
+          NODE_OPTIONS: `--require ${JSON.stringify(noisyNodeProbe)}` },
+      });
+      expect(run.status, run.stderr || String(run.error)).toBe(0);
+      expect(existsSync(dataDir)).toBe(false);
+      if (scenario === 'valid BOM JSON with stderr') {
+        expect(JSON.parse(read(settingsPath))).toEqual({ hooks: { Stop: [{ hooks: [
+          { command: 'unrelated-claude-hook' },
+        ] }] } });
+        expect(existsSync(cachePath)).toBe(false);
+      } else {
+        expect(run.stdout).toContain('Legacy Claude plugin cleanup failed; continuing uninstall');
+        expect(run.stdout).not.toContain('settings.json hooks cleaned');
+        expect(read(settingsPath)).toBe(settings);
+        expect(existsSync(cachePath)).toBe(true);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
 
 describe('uninstall continues when Node cannot be resolved', () => {
   for (const file of INSTALLERS) {
@@ -111,6 +188,38 @@ describe('uninstall continues when Node cannot be resolved', () => {
         if (!body) continue;
         expect(codeOf(body), `${file}: ${fn}`).toMatch(/if \(-not \$script:NODE_BIN\)/);
       }
+    });
+
+    it(`${file}: nothing downstream of the guard resolves Node again`, () => {
+      // The guard above is only worth as much as its narrowest re-entry. One of these
+      // installers answered an empty $NODE_BIN by calling Resolve-Node a second time,
+      // unguarded, from a cleanup step -- so the very error Cmd-Uninstall had just
+      // swallowed came back as a terminating one, from a call site the caller does not
+      // wrap, before the install-directory removal and -Purge. A second call cannot help
+      // in any case: Cmd-Uninstall has already asked, and asking again gets the same
+      // answer or throws.
+      const src = read(file);
+      const seen = new Set(['Cmd-Uninstall']);
+      const queue = ['Cmd-Uninstall'];
+      const offenders = [];
+      while (queue.length) {
+        const body = funcOf(src, queue.shift());
+        if (!body) continue;
+        const code = codeOf(body);
+        for (const name of code.match(/\b[A-Z][a-zA-Z]+-[A-Z][a-zA-Z0-9]+\b/g) || []) {
+          if (seen.has(name) || !funcOf(src, name)) continue;
+          seen.add(name);
+          queue.push(name);
+          // The resolver itself is reached, by the one guarded call in Cmd-Uninstall, and
+          // matches its own name; every other reachable function must not ask again.
+          if (name === 'Resolve-Node') continue;
+          if (codeOf(funcOf(src, name)).includes('Resolve-Node')) offenders.push(name);
+        }
+      }
+      // Reachability, not just the offender: a rename that empties this walk would make
+      // the assertion below pass for the wrong reason.
+      expect(seen.size, `${file}: uninstall call graph came out empty`).toBeGreaterThan(5);
+      expect(offenders, `${file}: reached from Cmd-Uninstall and resolves Node again`).toEqual([]);
     });
   }
 });
@@ -169,6 +278,53 @@ describe('a refusal to unpatch DSH is gated on something actually dangling', () 
   }
 });
 
+describe('a refusal to clean OpenClaw is gated the same way', () => {
+  // Nothing to check in the mirror: its Remove-OpenClawPlugin reports what it skipped and
+  // returns nothing, so it can never block -Purge. The downstream near-copies return
+  // $allClean and Cmd-Uninstall throws on a $false -- which meant that on any machine
+  // carrying an openclaw.json, "no Node" alone was enough to abort the uninstall before
+  // -Purge, exactly the blockage the DSH gate above had just been narrowed to avoid.
+  for (const file of INSTALLERS) {
+    it(`${file}: no Node only blocks the uninstall when the config still points at us`, () => {
+      const src = read(file);
+      const body = funcOf(src, 'Remove-OpenClawPlugin');
+      if (!body) return;
+      const code = codeOf(body);
+      if (!code.includes('$allClean')) return;
+
+      const start = code.indexOf('if (-not $script:NODE_BIN)');
+      expect(start, `${file}: no-Node branch not found`).toBeGreaterThan(-1);
+      const branch = code.slice(start, code.indexOf('continue', start));
+      expect(branch, `${file}: branch does not consult the probe`).toContain('Test-OpenClawStillManaged');
+      expect(branch, `${file}: branch no longer blocks at all`).toContain('$allClean = $false');
+      expect(
+        branch.indexOf('Test-OpenClawStillManaged'),
+        `${file}: blocks before asking whether anything dangles`,
+      ).toBeLessThan(branch.indexOf('$allClean = $false'));
+
+      const probe = funcOf(src, 'Test-OpenClawStillManaged');
+      expect(probe, `${file}: Test-OpenClawStillManaged missing`).toBeTruthy();
+      const probeCode = codeOf(probe);
+      // Reads a file owned by a third-party tool, on the path that would otherwise refuse:
+      // it must not be able to turn a healthy uninstall into a failing one, and when it
+      // cannot tell it has to answer "still managed" -- we cannot prove nothing dangles.
+      expect(probeCode, file).toContain('-ErrorAction SilentlyContinue');
+      expect(probeCode, file).toMatch(/catch\s*\{\s*\n\s*return \$true/);
+      // Separators are compared with both sides flattened, because the managed path is
+      // JSON-escaped inside the config (C:\\Users\\...) and may use / instead.
+      expect(probeCode, file).toMatch(/-replace '\[\\\\\/\]', ''/);
+    });
+  }
+
+  it('the block is byte-identical wherever it exists', () => {
+    const blocks = INSTALLERS
+      .map(f => blockOf(read(f), 'openclaw-unpatch-refusal'))
+      .filter(Boolean);
+    if (!blocks.length) return;
+    expect(new Set(blocks).size).toBe(1);
+  });
+});
+
 describe('the scheduled-task failure reaches the user', () => {
   for (const file of INSTALLERS) {
     it(`${file}: the schtasks call runs at "Continue" and restores in finally`, () => {
@@ -210,6 +366,29 @@ describe('the scheduled-task failure reaches the user', () => {
       expect(code, file).not.toContain('$schtasksOut | Out-String');
       expect(code, file).toContain('$schtasksLine.Exception.Message');
     });
+
+    it(`${file}: the node calls in Remove-OtelPlugin are relaxed and restored in finally`, () => {
+      // Same 5.1 trap, same uninstall path: Remove-OtelPlugin is called bare from
+      // Cmd-Uninstall ahead of the install-directory removal and -Purge, and one of these
+      // installers ran `& node ... 2>$null` there under EAP=Stop with no relax at all, so
+      // a single warning line on node's stderr would have ended the uninstall with
+      // config.json still on disk. Pinned for this function only -- the remaining inline
+      // restores elsewhere in these scripts are a separate mechanical change; the general
+      // rule lives in AGENTS.md.
+      const body = funcOf(read(file), 'Remove-OtelPlugin');
+      if (!body) return;
+      const code = codeOf(body);
+      const calls = (code.match(/& \$script:NODE_BIN/g) || []).length;
+      expect(calls, `${file}: no node invocation in Remove-OtelPlugin`).toBeGreaterThan(0);
+      expect(
+        (code.match(/\$ErrorActionPreference = "Continue"/g) || []).length,
+        `${file}: a node call runs at "Stop"`,
+      ).toBe(calls);
+      expect(
+        (code.match(/\}\s*finally\s*\{\s*\$ErrorActionPreference = \$prevEAP\s*\}/g) || []).length,
+        `${file}: a relax is not restored in finally`,
+      ).toBe(calls);
+    });
   }
 });
 
@@ -236,6 +415,26 @@ describe('an elevated install says what it costs', () => {
         install.indexOf('Warn-ElevatedInstall'),
         `${file}: warning must precede Check-Deps`,
       ).toBeLessThan(install.indexOf('Check-Deps'));
+    });
+
+    it(`${file}: upgrade warns too, and says the tasks get re-registered`, () => {
+      // Upgrade was the hole: it re-registers both tasks through the service script's
+      // start path (schtasks /Delete + Register-PilotTask, unconditional), so an elevated
+      // upgrade converts an ordinary-session install into one whose tasks that session can
+      // no longer delete -- the exact state this warning exists to prevent, reached with
+      // no warning at all. Nothing about the word "upgrade" suggests the tasks are
+      // re-created, hence the extra line rather than the install text verbatim.
+      const src = read(file);
+      const upgrade = codeOf(funcOf(src, 'Cmd-Upgrade'));
+      expect(upgrade, `${file}: Cmd-Upgrade not found`).toBeTruthy();
+      expect(upgrade, file).toContain('Warn-ElevatedInstall -Action "upgrade"');
+      expect(
+        upgrade.indexOf('Warn-ElevatedInstall'),
+        `${file}: warning must precede Check-Deps`,
+      ).toBeLessThan(upgrade.indexOf('Check-Deps'));
+      const block = codeOf(blockOf(src, 'pilot-elevation-warning'));
+      expect(block, file).toContain('param([string]$Action = "install")');
+      expect(block, file).toContain('deletes and re-registers the scheduled tasks');
     });
   }
 
