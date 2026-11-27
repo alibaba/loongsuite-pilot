@@ -40,6 +40,36 @@ export async function assertTrustedCursorSystemNodePin(dataDir: string, options?
   await fs.access(resolved, fs.constants.X_OK);
 }
 
+/** Seed a missing pin from the Node process already running eager injection. */
+export async function initializeCursorSystemNodePin(dataDir: string, nodePath: string): Promise<void> {
+  const options = cursorSystemRuntimePathOptions(dataDir);
+  const pin = path.join(dataDir, 'node-bin');
+  try {
+    await fs.lstat(pin);
+    return; // The normal runtime checks must still reject an untrusted existing pin.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+
+  await assertTrustedCursorSystemDirectory(dataDir, options);
+  const node = await fs.realpath(nodePath);
+  if (!path.isAbsolute(node) || /[\r\n\0]/.test(node)) throw new Error('Cursor system Node pin must contain one absolute path');
+  await assertTrustedCursorSystemFile(node, options);
+  await fs.access(node, fs.constants.X_OK);
+
+  // Publish complete contents without replacing a pin created concurrently.
+  const staging = await fs.mkdtemp(path.join(dataDir, '.cursor-node-pin-'));
+  try {
+    const file = path.join(staging, 'node-bin');
+    await fs.writeFile(file, node + '\n', { mode: 0o644 });
+    await fs.link(file, pin).catch(error => {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    });
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true });
+  }
+}
+
 export async function assertTrustedCursorSystemDirectory(directory: string, options?: CursorSystemPathOptions): Promise<void> {
   const { allowWritableMount = false, bundledHooksRoot } = options ?? {};
   let current = path.resolve(directory);

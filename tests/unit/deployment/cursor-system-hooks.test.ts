@@ -219,6 +219,38 @@ describe('Cursor enterprise system registration', () => {
     });
   }
 
+  it('uses the running eager Node to install on the first attempt without a prior pin', async () => {
+    const builtinAgentsDir = path.join(root, 'agents.d');
+    const cliHome = path.join(root, 'cli-only');
+    await fs.mkdir(cliHome);
+    await write(path.join(builtinAgentsDir, 'cursor.json'), JSON.stringify(def));
+    await write(path.join(builtinAgentsDir, 'cursor-cli.json'), JSON.stringify({
+      ...def, id: 'cursor-cli', detection: { paths: [cliHome], commands: [] },
+      hook: { ...def.hook, events: [], hookCommand: '' },
+    }));
+    const pin = path.join(dataDir, 'node-bin');
+    await fs.unlink(pin);
+    const opts = { dataDir, pilotDir, builtinAgentsDir, agentsFlag: 'cursor-cli',
+      deploymentScope: 'system' as const, writeResult: false };
+    const noRuntime = await runHookInstall(opts);
+    expect(noRuntime.exitCode).toBe(1);
+    await expect(fs.lstat(pin)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(fs.lstat(def.hook!.systemSettingsPath!)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    const installed = await runHookInstall({ ...opts, eagerCursorNodePath: trustedNode });
+    expect(installed.exitCode).toBe(0);
+    expect(installed.report.agents[0]).toMatchObject({ id: 'cursor', hookScope: 'system', runtimeHealthy: true });
+    const pinned = (await fs.realpath(trustedNode)) + '\n';
+    expect(await fs.readFile(pin, 'utf8')).toBe(pinned);
+    expect(await cursorSystemHooksInstalled(systemHookDefinition(def))).toBe(true);
+    await expect(fs.lstat(def.hook!.settingsPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+    // A later eager child must not replace an existing pin.
+    const again = await runHookInstall({ ...opts, eagerCursorNodePath: path.join(root, 'other-node') });
+    expect(again.exitCode).toBe(0);
+    expect(await fs.readFile(pin, 'utf8')).toBe(pinned);
+  });
+
   it('retains default home behavior and supports migrating the CLI alias back to home', async () => {
     const builtin = path.join(root, 'agents.d');
     await write(path.join(builtin, 'cursor.json'), JSON.stringify(def));

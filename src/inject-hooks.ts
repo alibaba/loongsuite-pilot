@@ -37,6 +37,7 @@ import {
 import { readJsonFile, writeJsonFile, resolveHome } from './utils/fs-utils.js';
 import { readConfigAgentsGate, resolveDataDir } from './utils/data-dir.js';
 import { resolveHookInstallScope } from './deployment/hook-scope.js';
+import { cursorSystemRuntimePathOptions } from './deployment/cursor-system-paths.js';
 import { prepareRootTriggerLogDirs } from './utils/producer-log-dir.js';
 import { resolveDeployInterceptorHooks } from './interceptor/config.js';
 import type { AgentDefinition, DeployedAgentsState } from './types/deployment.js';
@@ -222,6 +223,11 @@ export async function runEagerInjection(): Promise<number> {
       agentsFlag: args.agents.length ? args.agents.join(',') : undefined,
       envAgents: args.agents.length ? undefined : process.env.LOONGSUITE_PILOT_AGENTS,
       deploymentScope: scope,
+      // The preload can only pin its chosen binary after spawnSync returns.
+      // This child already proved it runs as Node, so Cursor can pin it before
+      // the first system registration checks the runtime. Leave HOME alone.
+      eagerCursorNodePath: scope === 'system' && cursorSystemRuntimePathOptions(dataDir).allowWritableMount
+        && !('bun' in process.versions) ? process.execPath : undefined,
       deployModes: new Set([...EAGER_DEPLOY_MODES, 'dsh-yaml-patch']),
       enabled: id => isGateEnabled(gate, id),
       // This is only the eager-safe subset. Publishing it as a named install

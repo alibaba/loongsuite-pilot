@@ -12,6 +12,7 @@ import { resolveDeployInterceptorHooks } from '../interceptor/config.js';
 import { postAlarm } from '../internal/post-alarm.js';
 import { systemHookDefinition, supportsSystemHooks } from './system-hook-config.js';
 import { areSystemHookAssetsHealthy } from './system-hook-assets.js';
+import { initializeCursorSystemNodePin } from './cursor-system-paths.js';
 
 const logger = createLogger('HookInstall');
 
@@ -226,6 +227,8 @@ export interface HookInstallRunOptions {
   writeResult: boolean;
   /** Restrict which deploy modes run. Eager injection keeps hook and plugin-inject only. */
   deployModes?: ReadonlySet<string>;
+  /** A verified running Node supplied only by the container eager injector. */
+  eagerCursorNodePath?: string;
   enabled?: (agentId: string) => boolean;
   euid?: number;
   homeOwner?: (home: string) => Promise<number | null>;
@@ -485,6 +488,9 @@ export async function runHookInstall(opts: HookInstallRunOptions): Promise<HookI
         continue;
       }
 
+      if (scope === 'system' && def.id === 'cursor' && opts.eagerCursorNodePath) {
+        await initializeCursorSystemNodePin(opts.dataDir, opts.eagerCursorNodePath);
+      }
       const result = scope
         ? await manager.deployHookScope(active)
         : home ? await manager.deployPrepared(active, true)
