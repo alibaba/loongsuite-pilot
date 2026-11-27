@@ -973,13 +973,69 @@ fn node_rollback_protects_durable_hook_ingress_before_outbox_and_fences_stale_ho
         let item = item.unwrap();
         fs::rename(item.path(), fixture.root.path().join(item.file_name())).unwrap();
     }
+    // A transport fixture substitutes /bin/sh for Node so offline Rust
+    // installation tests do not require a system Node. The full package
+    // side of the bridge is validated separately with official v1.20.0.
+    #[cfg(unix)]
+    {
+        let hooks = node.join("assets/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(data.join("node-bin"), "\u{feff}/bin/sh\r\n").unwrap();
+        for (script, target) in [
+            ("qwen-work-cn-hook-processor.mjs", "node-qwen-hook.jsonl"),
+            ("cursor-hook-processor.mjs", "node-cursor-hook.jsonl"),
+        ] {
+            fs::write(
+                hooks.join(script),
+                format!(
+                    "/bin/cat >> \"$LOONGSUITE_PILOT_DATA_DIR/{target}\"\nprintf '\\n' >> \"$LOONGSUITE_PILOT_DATA_DIR/{target}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let config = data.join("cursor-policy.json");
+        fs::write(
+            &config,
+            br#"{"agents":{"cursor":{"captureMessageContent":false}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(data.join("hooks")).unwrap();
+        fs::write(
+            data.join("hooks/cursor-config-path"),
+            json!({"path":config,"implicitDefault":false}).to_string(),
+        )
+        .unwrap();
+    }
     success(&rollback());
     assert!(!gate.exists());
     assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
-    // Old commands cached in an Agent must still fail open for the Agent,
-    // but cannot append to a Rust-only queue while Node owns the installation.
+    // An Agent that cached the previous native command uses the selected
+    // Node capture once, and never appends to a Rust-only queue.
     assert!(qwen_stop().status.success());
     assert!(cursor_prompt().status.success());
+    #[cfg(unix)]
+    {
+        let observed = |name: &str| {
+            let bytes = fs::read_to_string(data.join(name)).unwrap();
+            let mut rows = bytes.lines();
+            let row: Value = serde_json::from_str(rows.next().unwrap()).unwrap();
+            assert!(
+                rows.next().is_none(),
+                "legacy capture must receive one body"
+            );
+            row
+        };
+        let qwen = observed("node-qwen-hook.jsonl");
+        assert_eq!(qwen["session_id"], "offline-qwen");
+        assert_eq!(qwen["hook_event_name"], "Stop");
+        let cursor = observed("node-cursor-hook.jsonl");
+        assert_eq!(cursor["conversation_id"], "offline-cursor");
+        assert_eq!(cursor["generation_id"], "one");
+        assert_eq!(cursor["hook_event_name"], "beforeSubmitPrompt");
+        assert!(cursor["prompt"]
+            .as_str()
+            .is_some_and(|text| text.trim().is_empty()));
+    }
     assert_eq!(fs::read_dir(&wakeups).unwrap().count(), 0);
     assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
     success(&publish());

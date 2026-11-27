@@ -1,6 +1,7 @@
 //! A writer lease for durable Hook ingress, shared by the thin binary and installer.
 //! A Node rollback keeps the exclusive lease through publication of the version
-//! pointer. A delayed Rust Hook then observes Node, not an empty Rust inbox.
+//! pointer. If the empty inbox closes before admission, the installed Node
+//! capture process, not the retired Rust queue, owns that callback.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -19,6 +20,117 @@ pub(crate) enum WriterLease {
         #[allow(dead_code, reason = "reserved slot is used in the thin Hook")]
         tempfile::NamedTempFile,
     ),
+    Node(#[allow(dead_code, reason = "legacy capture belongs to the thin Hook")] NodeCutover),
+}
+
+/// Identifies the official Node release that won the cutover. No Hook input
+/// can select a program: the binding and current pointer are install-owned.
+#[allow(dead_code, reason = "the thin Hook executes the selected release")]
+pub(crate) struct NodeCutover {
+    cache: PathBuf,
+    version: PathBuf,
+}
+
+#[allow(dead_code, reason = "used only by the thin Hook")]
+#[derive(Clone, Copy)]
+pub(crate) enum NodeCapture {
+    Cursor,
+    QwenStop,
+}
+
+#[allow(dead_code, reason = "used only by the thin Hook")]
+impl NodeCutover {
+    pub(crate) fn forward(
+        &self,
+        agent: NodeCapture,
+        data: &Path,
+        config: Option<&Path>,
+        payload: &serde_json::Value,
+    ) -> io::Result<()> {
+        use std::process::{Command, Stdio};
+
+        let data = match agent {
+            NodeCapture::Cursor => data,
+            NodeCapture::QwenStop => {
+                let suffix = Path::new("state").join("standalone-qwen-work-cn-sdk");
+                if !data.ends_with(suffix) {
+                    return Err(io::Error::other("invalid legacy Qwen Hook data directory"));
+                }
+                data.parent()
+                    .and_then(Path::parent)
+                    .expect("checked suffix")
+            }
+        };
+        // The v1 installer pins its runtime in the install cache/data
+        // (PowerShell 5.1 can write the pin with a UTF-8 BOM). Do not run an
+        // executable from the Agent working directory or fall back to PATH.
+        let node = [&self.cache, data]
+            .into_iter()
+            .find_map(|directory| {
+                let bytes = read_bounded(&directory.join("node-bin"), 16 * 1024).ok()?;
+                let text = std::str::from_utf8(&bytes)
+                    .ok()?
+                    .trim_start_matches('\u{feff}')
+                    .trim();
+                let path = Path::new(text);
+                (path.is_absolute() && path.is_file()).then(|| path.to_owned())
+            })
+            .ok_or_else(|| io::Error::other("invalid legacy Hook Node runtime"))?;
+        let assets = self.version.join("assets");
+        let hooks = assets.join("hooks");
+        check_directory(&assets)?;
+        check_directory(&hooks)?;
+        let script = hooks.join(match agent {
+            NodeCapture::Cursor => "cursor-hook-processor.mjs",
+            NodeCapture::QwenStop => "qwen-work-cn-hook-processor.mjs",
+        });
+        open_file(&script, false)?;
+        let mut command = Command::new(node);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+        }
+        command
+            .arg(script)
+            .env("LOONGSUITE_PILOT_DATA_DIR", data)
+            .env("LOONGSUITE_PILOT_CACHE_DIR", &self.cache)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let config = config.map(Path::to_owned).or_else(|| {
+            std::env::var_os("AGENT_DATA_COLLECTION_CONFIG")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        });
+        command
+            .env(
+                "AGENT_DATA_COLLECTION_CONFIG",
+                config.unwrap_or_else(|| data.join("config.json")),
+            )
+            .env_remove("LOONGSUITE_CURSOR_RAW_TRACE");
+        if matches!(agent, NodeCapture::QwenStop) {
+            command.args(["--agent-id", "qwen-work-cn", "--log-prefix", "qwen-work-cn"]);
+        }
+        // Send directly to the official processor: no second inbox, payload
+        // file, shell, or replay. The existing Hook watchdog bounds Agent wait.
+        let bytes = serde_json::to_vec(payload)?;
+        let mut child = command.spawn()?;
+        let mut input = child.stdin.take().expect("piped legacy Hook stdin");
+        let result = input.write_all(&bytes);
+        drop(input);
+        if let Err(error) = result {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        if !child.wait()?.success() {
+            return Err(io::Error::other(
+                "legacy Hook capture failed during cutover",
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn open_file(path: &Path, create_lock: bool) -> io::Result<File> {
@@ -183,37 +295,7 @@ pub(crate) fn publish_transition(
     Ok(())
 }
 
-/// Ordinary embedded SDKs have no install binding. For a bound installation
-/// the kernel lease serializes publishing with rollback, and the same version
-/// pointer used by the installer handles abort, retry and later re-upgrade.
-#[allow(
-    dead_code,
-    reason = "shared source is also compiled into the installer"
-)]
-pub(crate) fn lock_writer(root: &Path) -> io::Result<WriterLease> {
-    let root = root.canonicalize()?;
-    let lease = open_file(&root.join(LEASE), true)?;
-    match fs2::FileExt::try_lock_shared(&lease) {
-        Ok(()) => {}
-        Err(error)
-            if error.kind() == io::ErrorKind::WouldBlock
-                || error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
-        {
-            if let Some(inbox) = transition_inbox(&root)? {
-                check_directory(&inbox)?;
-                let pending = tempfile::Builder::new()
-                    .prefix(&format!("{RESERVATION_PREFIX}{}-", std::process::id()))
-                    .suffix(".tmp")
-                    .tempfile_in(inbox)?;
-                return Ok(WriterLease::Switching(pending));
-            }
-            return Err(error);
-        }
-        Err(error) => return Err(error),
-    }
-    let Some(cache) = bound_cache(&root)? else {
-        return Ok(WriterLease::Active { _guard: lease });
-    };
+fn current_version(cache: &Path) -> io::Result<PathBuf> {
     let current = read_bounded(&cache.join("current"), 256)?;
     let name = std::str::from_utf8(&current)
         .map_err(io::Error::other)?
@@ -227,23 +309,122 @@ pub(crate) fn lock_writer(root: &Path) -> io::Result<WriterLease> {
     {
         return Err(io::Error::other("invalid Hook ingress install binding"));
     }
-    // Check the active runtime, not the stale executable's directory. Never
-    // authorize a Node version just because it is now the current pointer.
-    let version = cache.join("versions").join(name);
-    let manifest = version.join("runtime-manifest.json");
-    for path in [cache.join("versions"), version] {
-        let entry = fs::symlink_metadata(&path)?;
-        if !entry.is_dir() || entry.file_type().is_symlink() {
-            return Err(io::Error::other("invalid Hook ingress version directory"));
-        }
-    }
+    let versions = cache.join("versions");
+    check_directory(&versions)?;
+    let version = versions.join(name);
+    check_directory(&version)?;
+    Ok(version)
+}
+
+fn is_rust_version(version: &Path) -> io::Result<bool> {
+    let bytes = match read_bounded(&version.join("runtime-manifest.json"), 2 * 1024 * 1024) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
     #[derive(serde::Deserialize)]
     struct Runtime {
         runtime: String,
     }
-    let manifest: Runtime = serde_json::from_slice(&read_bounded(&manifest, 2 * 1024 * 1024)?)?;
+    let manifest: Runtime = serde_json::from_slice(&bytes)?;
     if manifest.runtime != "rust" {
-        return Err(io::Error::other("Rust Hook ingress is inactive"));
+        return Err(io::Error::other("unknown installed Hook runtime"));
+    }
+    Ok(true)
+}
+
+fn node_owner(cache: PathBuf, version: PathBuf) -> io::Result<WriterLease> {
+    // The installer can already have written a tentative Node pointer. Only
+    // closing the inbox commits it; never hand off while the gate still exists.
+    match fs::symlink_metadata(cache.join(ROLLBACK_INBOX)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+        Ok(_) => return Err(io::Error::other("Node Hook cutover has not committed")),
+    }
+    let package = read_bounded(&version.join("package.json"), 64 * 1024)?;
+    let package: serde_json::Value = serde_json::from_slice(&package)?;
+    let marker = read_bounded(&version.join("VERSION"), 64 * 1024)?;
+    let release = std::str::from_utf8(&marker)
+        .map_err(io::Error::other)?
+        .lines()
+        .find_map(|line| line.strip_prefix("version="));
+    if package["name"] != "loongsuite-pilot"
+        || package["version"].as_str() != release
+        || !release.is_some_and(|version| version.starts_with("1."))
+    {
+        return Err(io::Error::other("invalid installed Node Pilot release"));
+    }
+    Ok(WriterLease::Node(NodeCutover { cache, version }))
+}
+
+fn is_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+fn reserve(inbox: &Path, before_reserve: impl FnOnce()) -> io::Result<tempfile::NamedTempFile> {
+    check_directory(inbox)?;
+    before_reserve();
+    tempfile::Builder::new()
+        .prefix(&format!("{RESERVATION_PREFIX}{}-", std::process::id()))
+        .suffix(".tmp")
+        .tempfile_in(inbox)
+}
+
+/// Ordinary embedded SDKs have no install binding. For a bound installation,
+/// never infer ownership from lock contention alone. Reserving a slot and
+/// removing the empty directory are the mutually exclusive outcomes.
+#[allow(
+    dead_code,
+    reason = "shared source is also compiled into the installer"
+)]
+pub(crate) fn lock_writer(root: &Path) -> io::Result<WriterLease> {
+    lock_writer_before_reserve(root, || {})
+}
+
+#[allow(
+    dead_code,
+    reason = "used by the thin Hook and deterministic cutover regression"
+)]
+pub(crate) fn lock_writer_before_reserve(
+    root: &Path,
+    before_reserve: impl FnOnce(),
+) -> io::Result<WriterLease> {
+    let root = root.canonicalize()?;
+    let lease = open_file(&root.join(LEASE), true)?;
+    let cache = match fs2::FileExt::try_lock_shared(&lease) {
+        Ok(()) => bound_cache(&root)?,
+        Err(error) if is_contended(&error) => {
+            let inbox = transition_inbox(&root)?.ok_or(error)?;
+            match reserve(&inbox, before_reserve) {
+                Ok(slot) => return Ok(WriterLease::Switching(slot)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    // rmdir won before this callback could reserve. It is a
+                    // successful handoff, not a dropped capture. Re-read the
+                    // result rather than using the pre-cutover pointer.
+                    let cache = inbox.parent().expect("install-bound inbox").to_path_buf();
+                    match fs2::FileExt::try_lock_shared(&lease) {
+                        Ok(()) => Some(cache),
+                        Err(error) if is_contended(&error) => {
+                            let version = current_version(&cache)?;
+                            if is_rust_version(&version)? {
+                                return Err(error);
+                            }
+                            return node_owner(cache, version);
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(cache) = cache {
+        let version = current_version(&cache)?;
+        if !is_rust_version(&version)? {
+            return node_owner(cache, version);
+        }
     }
     Ok(WriterLease::Active { _guard: lease })
 }

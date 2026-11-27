@@ -3,6 +3,7 @@
 //! The Hook can publish while the SDK host is stopped. The collector must
 //! revalidate each transcript against the current policy before opening it.
 
+use super::hook_ingress::{self, NodeCapture, WriterLease};
 use serde_json::{json, Value};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -82,7 +83,26 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     }) {
         return false;
     }
-    let lease = match super::hook_ingress::lock_writer(data) {
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|value| value.len() <= MAX_FIELD)
+        .unwrap_or("");
+    let lease = match hook_ingress::lock_writer(data) {
+        Ok(WriterLease::Node(owner)) => {
+            let request = json!({"hook_event_name":"Stop", "transcript_path":transcript,
+                "session_id":session, "cwd":cwd});
+            return match owner.forward(NodeCapture::QwenStop, data, None, &request) {
+                Ok(()) => true,
+                Err(error) => {
+                    eprintln!(
+                        "loongsuite-pilot: Qwen Work Stop could not reach the installed Node Hook: {}",
+                        error.kind()
+                    );
+                    false
+                }
+            };
+        }
         Ok(lease) => lease,
         Err(error) => {
             eprintln!(
@@ -92,19 +112,13 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
             return false;
         }
     };
-    let cwd = payload
-        .get("cwd")
-        .and_then(Value::as_str)
-        .filter(|value| value.len() <= MAX_FIELD)
-        .unwrap_or("");
     let (directory, switching) = match &lease {
-        super::hook_ingress::WriterLease::Active { .. } => {
-            (data.join("wakeups").join("qwen-work-cn"), false)
-        }
-        super::hook_ingress::WriterLease::Switching(slot) => (
+        WriterLease::Active { .. } => (data.join("wakeups").join("qwen-work-cn"), false),
+        WriterLease::Switching(slot) => (
             slot.path().parent().expect("reserved inbox").to_owned(),
             true,
         ),
+        WriterLease::Node(_) => unreachable!("already handed off committed Node capture"),
     };
     if !private_path(&directory)
         || (!switching && fs::create_dir_all(&directory).is_err())
@@ -140,13 +154,13 @@ pub(super) fn publish(data: &Path, input: &[u8]) -> bool {
     let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return false;
     };
-    if let super::hook_ingress::WriterLease::Switching(slot) = lease {
+    if let WriterLease::Switching(slot) = lease {
         let name = format!(
             "qwen-{:020}-{:010}.json",
             now.as_nanos(),
             std::process::id()
         );
-        return super::hook_ingress::publish_transition(slot, &name, &bytes).is_ok();
+        return hook_ingress::publish_transition(slot, &name, &bytes).is_ok();
     }
     for attempt in 0..8u8 {
         let name = format!(

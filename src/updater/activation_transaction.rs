@@ -547,6 +547,72 @@ fn node_rollback_cannot_commit_while_an_accepted_hook_is_paused_before_publish()
     assert_eq!(fs::read(gate.join("qwen-restored.json")).unwrap(), record);
 }
 
+#[cfg(test)]
+#[test]
+fn node_rollback_routes_hook_paused_before_reserving_to_the_committed_owner() {
+    use crate::sdk::hook_ingress::{
+        lock_for_rollback, lock_writer_before_reserve, publish_transition, WriterLease,
+        ROLLBACK_INBOX,
+    };
+
+    for (commit, release_lease) in [(false, false), (false, true), (true, false), (true, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().canonicalize().unwrap();
+        let root = cache.join("sdk");
+        let rust = cache.join("versions/native");
+        let node = cache.join("versions/legacy");
+        for dir in [&root, &rust, &node] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(rust.join("runtime-manifest.json"), br#"{"runtime":"rust"}"#).unwrap();
+        fs::write(
+            node.join("package.json"),
+            br#"{"name":"loongsuite-pilot","version":"1.20.0"}"#,
+        )
+        .unwrap();
+        fs::write(node.join("VERSION"), b"version=1.20.0\n").unwrap();
+        let current = cache.join("current");
+        fs::write(&current, b"native\n").unwrap();
+        let gate = cache.join(ROLLBACK_INBOX);
+        let mut installer = Some(lock_for_rollback(&root, &cache).unwrap());
+        let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+        let mut txn = ActivationTransaction::begin(&cache, targets).unwrap();
+        let owner = lock_writer_before_reserve(&root, || {
+            // The Hook has observed contention, but it has not created any
+            // file. Commit/abort the actual activation at that exact point.
+            assert_eq!(fs::read_dir(&gate).unwrap().count(), 0);
+            txn.write("current", b"legacy\n", 0o600).unwrap();
+            if commit {
+                txn.commit_node_rollback().unwrap();
+            } else {
+                let blocker = gate.join("cursor-existing.json");
+                fs::write(&blocker, b"{}").unwrap();
+                assert!(txn.commit_node_rollback().is_err());
+                txn.rollback().unwrap();
+                fs::remove_file(blocker).unwrap();
+            }
+            if release_lease {
+                drop(installer.take());
+            }
+        })
+        .unwrap();
+        if commit {
+            assert!(matches!(owner, WriterLease::Node(_)));
+            assert_eq!(fs::read(&current).unwrap(), b"legacy\n");
+            assert!(!gate.exists(), "do not recreate the retired Rust queue");
+        } else {
+            let WriterLease::Switching(slot) = owner else {
+                panic!("the original Rust runtime must still own the callback");
+            };
+            let original = br#"{"session_id":"paused-before-reserve"}"#;
+            publish_transition(slot, "qwen-late.json", original).unwrap();
+            assert_eq!(fs::read(&current).unwrap(), b"native\n");
+            assert_eq!(fs::read_dir(&gate).unwrap().count(), 1);
+            assert_eq!(fs::read(gate.join("qwen-late.json")).unwrap(), original);
+        }
+    }
+}
+
 fn comparable_mode(mode: u32) -> u32 {
     if cfg!(unix) {
         mode

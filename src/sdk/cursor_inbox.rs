@@ -1,4 +1,5 @@
 //! Bounded capture for the thin Cursor command. The collector owns assembly.
+use super::hook_ingress::{self, NodeCapture, WriterLease};
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -37,12 +38,13 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
                         .any(|name| name.eq_ignore_ascii_case(platform.trim()))
                 })
     })?;
+    payload.insert("hook_event_name".into(), Value::String(event.to_owned()));
     let explicit = std::env::var_os("AGENT_DATA_COLLECTION_CONFIG").filter(|path| !path.is_empty());
     let implicit = explicit.is_none();
     let config_path = explicit
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| root.join("config.json"));
-    let (policy, _) = capture::Capture::load(root, config_path, implicit, |path| {
+    let (policy, effective_config) = capture::Capture::load(root, config_path, implicit, |path| {
         let file = fs::File::open(path)?;
         let mut text = String::new();
         file.take(MAX_CONFIG_BYTES + 1).read_to_string(&mut text)?;
@@ -55,7 +57,6 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
     });
     let disabled =
         !policy.enabled(None) && !policy.enabled(capture::variant(payload.get("cursor_version")));
-    payload.insert("hook_event_name".into(), Value::String(event.to_owned()));
     let redacted_prompt = disabled
         && event == "beforeSubmitPrompt"
         && payload
@@ -119,9 +120,29 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         roots.retain(Value::is_string);
     }
     regular_directory(root)?;
-    let lease = super::hook_ingress::lock_writer(root)?;
+    let lease = match hook_ingress::lock_writer(root)? {
+        WriterLease::Node(owner) => {
+            if disabled {
+                // The v1 processor may read transcript text before filtering.
+                // Do not let the bridge undo the native Hook's privacy decision.
+                payload.remove("transcript_path");
+                if redacted_prompt {
+                    // v1 infers the user activity from a truthy prompt.
+                    // Preserve presence, not the private text, in its journal.
+                    payload.insert("prompt".into(), Value::String(" ".into()));
+                }
+            }
+            return owner.forward(
+                NodeCapture::Cursor,
+                root,
+                effective_config.as_deref(),
+                &Value::Object(payload),
+            );
+        }
+        lease => lease,
+    };
     let (directory, switching) = match &lease {
-        super::hook_ingress::WriterLease::Active { .. } => {
+        WriterLease::Active { .. } => {
             let mut directory = root.to_path_buf();
             for component in ["state", "cursor", "deferred", "inbox"] {
                 directory.push(component);
@@ -134,10 +155,11 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
             }
             (directory, false)
         }
-        super::hook_ingress::WriterLease::Switching(slot) => (
+        WriterLease::Switching(slot) => (
             slot.path().parent().expect("reserved inbox").to_owned(),
             true,
         ),
+        WriterLease::Node(_) => unreachable!("already handed off committed Node capture"),
     };
     regular_directory(&directory)?;
     if fs::read_dir(&directory)?.take(MAX_PENDING).count() >= MAX_PENDING {
@@ -175,8 +197,8 @@ pub(super) fn publish(root: &Path, raw: &[u8], event: &str) -> io::Result<()> {
         std::process::id(),
         uuid::Uuid::new_v4()
     );
-    if let super::hook_ingress::WriterLease::Switching(slot) = lease {
-        return super::hook_ingress::publish_transition(slot, &name, &data);
+    if let WriterLease::Switching(slot) = lease {
+        return hook_ingress::publish_transition(slot, &name, &data);
     }
     let mut pending = tempfile::NamedTempFile::new_in(&directory)?;
     pending.write_all(&data)?;
