@@ -268,6 +268,7 @@ export function enrichTurn(turn, mainSessionId, subagent = false) {
     prompt: promptText,
     promptTimestamp: userRec.timestamp,
     promptUuid: userRec.uuid,
+    promptId: typeof userRec.promptId === 'string' ? userRec.promptId : undefined,
     llmCalls,
     positionalFallbacksUsed: pairStats.positionalFallbacksUsed,
   };

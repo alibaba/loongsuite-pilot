@@ -11,27 +11,27 @@
 |---|---|---|---|---|
 | Antigravity IDE | `antigravity` | 原生日志/SQLite 的会话与用户回合；后台/补采回合不等同外部请求。未确认桌面外部调用参数 | 未列 | 夹具 |
 | Antigravity CLI | `antigravity-cli` | 复用独立 CLI Input 的会话回合。需要发起方能复核原生回合，不能把 CLI 进程 PID 当回合 | 未列 | 夹具 |
-| Claude Code | `claude-code-log` | Hook 读取原生 transcript，当前回合键由会话和轮次构造。CLI 新启用 env；热 SDK 需把调用和原生消息边界桥接，不让客户猜轮次 | 有 | 夹具 |
+| Claude Code | `claude-code-log` | 每轮新建进程：子进程 env → `UserPromptSubmit.prompt_id` → transcript 原生回合快照，可 `--resume`。热 SDK 发布者仍需提供可核对原生边界 | 有 | 真实 2.1.330；补采与续接 |
 | Codex | `codex-transcript` | App Server 返回 thread 和 turn；登记后按候选规范键绑定。向 active turn steer 不是新的原生 turn | 有 | 实测 App Server |
-| Copilot CLI（`copilot`） | `copilot-log` | 原生会话事件给采集侧回合身份，尚未核定所用外部调用入口是否在派发时暴露同一键 | 未列 | 夹具 |
+| Copilot CLI（`copilot`） | `copilot-log` | SDK 自有调用方传 `clientTurnId`，从对应 `user.message` 事件拿 `interactionId` 绑定。普通桌面 UI 无此调用方回调 | 未列 | 原生 SDK 回调 |
 | Cursor IDE | `cursor-hook` | Hook 的 conversation/generation；只有 session 的回退记录不关联。桌面纯被动场景不能由外部请求附加 | 未列 | 夹具 |
 | Cursor CLI | `cursor-hook` | 同一 Hook/Input 的 CLI 变体，可用真实 generation；验证了原生形状，不等于 CLI API 会将其交给调用方 | 未列 | 夹具 |
 | 豆包 | `doubao` | 被动日志中的 conversation/chat session。只验证可确认的客户端请求；未找到外部调用方传任意属性的原生接口 | 未列 | 夹具 |
 | 豆包 Work | `doubao-work` | 同类被动观测，独立 Input、原生观测身份。不从本地工具或模型轨迹倒推调用方身份 | 未列 | 夹具 |
-| DeepSeek Harness（`dsh`） | `dsh-log` | 原生会话和 turn 序号组合。若调用侧没有同一原生 turn，需 Hook/启动入口桥接 | 未列 | 夹具 |
+| DeepSeek Harness（`dsh`） | `dsh-log` | SDK 调用所辖的 `session.event / turn/start` 给出原生回合。不要从同 session 的其他调用取事件 | 未列 | 原生 SDK 回调 |
 | Grok Build | `grok-build-log` | 有原生 prompt ID 才可复核回合；不能把只有 session 的回退记录拿来登记 | 未列 | 夹具 |
 | Hermes Agent（`hermes`） | `hermes-agent-log` | `pre_llm_call` 提供 native session/turn；自有 Python caller 用请求局部状态交给 Hook。不能把 Hook 返回的 model context 当属性 | 仅标准用户身份例外 | 原生宿主 / 模拟模型 |
 | Kiro CLI | `kiro-cli-log` | 原生会话/SQLite transcript 与 Stop Hook 推导回合。外部调用方若没有对应键，需桥接；不假定另外的会话回放路径也可按次绑定 | 未列 | 夹具 |
-| MiMo Code | `mimo-code-log` | Plugin 记录 session/turn 序列；业务调用方需在 lifecycle 共享同一轮边界，不凭计数猜 | 未列 | 夹具 |
+| MiMo Code | `mimo-code-log` | serve 发 `messageID`，原生响应 `info.parentID` 与插件的用户消息键对应，先登记后发送 | 未列 | 原生 serve；夹具补重放 |
 | OpenClaw | `openclaw-plugin-log` | 已验证的 `agent` RPC：sessionId + idempotencyKey 对应 native runId，可发起前登记 | 有 | 实测 Gateway |
-| OpenCode | `opencode-log` | Plugin 回合键含原生 session 及内部 turn/Trace 标识；需要可观察的 message lifecycle 桥接，`opencode.message.id` 本身不是业务属性容器 | 有 | 夹具 |
-| Pi Coding Agent | `pi-coding-agent-log` | Extension 在回合生命周期分配 ID；自有 Extension/调用侧要复用同一身份，而非另造 ID | 未列 | 夹具 |
+| OpenCode | `opencode-log` | serve + V1 插件：调用方用原生格式生成 `messageID`，响应回显 `info.parentID`，先登记后发送 | 有 | 原生 serve；V1 插件夹具 |
+| Pi Coding Agent | `pi-coding-agent-log` | Pilot Extension 在 `before_agent_start` 将采集使用的回合 ID 交给自有 SDK 调用侧，调用侧在此登记 | 未列 | 原生 SDK 回调 |
 | Qoder IDE | `qoder-trace` | 原生 transcript/Hook 可观察回合；仅在调用侧确实持有相同原生 user UUID 时能复用消息选择器。不能给普通 GUI 用户假设 SDK 入口 | Qoder 普通透传 | 夹具 |
 | Qoder CN | `qoder-cn-trace` | 同一类 transcript UUID 或已证实的会话回合。用实际事件变体登记，不能套用 Global SDK 的 agent 参数 | 有 | 夹具；内部候选另行证实 |
 | Qoder JetBrains（`qoder-idea`） | `qoder-trace` | 仅发现定义，复用 Qoder 采集；同文本不等同同调用 | Qoder 普通透传不是该入口实测 | 夹具 |
 | Qoder Work | `qoder-work-trace` | Hook/原生会话回合可供采集，不代表办公端暴露任意逐次写入入口 | 未列 | 夹具 |
 | Qoder Work CN | `qoder-work-cn-trace` | 同上，独立 CN 变体 | 未列 | 夹具 |
-| Qwen Code CLI | `qwen-code-cli-log` | transcript user prompt 与当前轮；新进程 env 可用。热调用需 lifecycle 同一原生轮桥接，不能把 QwenPaw 的请求字段套在这里 | 有 | 夹具 |
+| Qwen Code CLI | `qwen-code-cli-log` | 每轮新建进程：子进程 env → `UserPromptSubmit.prompt_id` → transcript 原生回合快照，可 `--resume`。不使用其他框架的请求扩展字段 | 有 | 真实 0.28.4；补采与续接 |
 | 千问办公（`qwen-work-cn`） | `qwen-work-cn-trace` | 原生 Hook/SQLite 工作回合；无外部可控键时只做采集。协作观察不等同客户端请求 | 未列 | 夹具 |
 | Trae CN | `trae-cn-log` | Hub 解析得到的会话回合；还没有客户调用方持有同一原生键的证据 | 未列 | 夹具 |
 | WorkBuddy | `workbuddy` | transcript 的真实 user record ID 优先；内部生成的回退键不是外部接口 | 未列 | 夹具 |

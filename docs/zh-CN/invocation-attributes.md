@@ -77,6 +77,12 @@ with request_attributes(session_id=agent.session_id, task_id=task_id,
 
 ## 直接携带属性的适配器
 
+每个入口只适配**身份边界**，而不是为每个业务键写代码。Claude Code / Qwen Code 的一次一进程接入、SDK UUID 和回调示例，以及仍没有调用方原生 ID 的入口，见[各框架的传递方式](./invocation-attributes-native.md)。
+
+### 自定义字段与上报限制
+
+`memory.user_id` 不是 Pilot 内置字段，也不用逐个修改代码或固定字段白名单。配置实际的业务前缀（例如 `memory.`），该前缀下新登记的合法字段就能进入 Span。**这不等于取消上报边界**：前缀仍是显式选择，原生字段、敏感键、类型、数量、长度和 payload 大小仍受校验与脱敏约束。不要用无差别放行、可变全局文件或全局属性代替逐次登记。既有 Span 数量与大小限制也不会因开启本功能而取消。
+
 如果原生运行时明确在每次调用携带属性，而不是让 Collector 旁路关联，可复用 `assets/hooks/shared/invocation-attributes.mjs`：
 
 1. 在真实原生调用开始时取得专属元数据，或者用可复核的原生消息 UUID 读取事先登记的快照。不能按 prompt、会话最近一轮、到达顺序或全局 env 匹配。

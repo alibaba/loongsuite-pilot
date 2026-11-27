@@ -115,6 +115,29 @@ export class InvocationAttributeStore {
     return 'bound';
   }
   register(i) { return this.transaction(() => { const put = this.putInside(i), bind = this.bindInside(i); return bind === 'sealed' ? bind : put; }); }
+  // Unlike caller-selected UUIDs, a host can reuse a native prompt ID after
+  // an aborted launch. In this opt-in producer path two witnessed claims for
+  // the same selector mean neither caller can be safely used on replay.
+  registerObservedPrompt(i) {
+    return this.transaction(() => {
+      const { scope, agent } = identity(i), invocation = text(i.invocationId), key = selectorKey(i.selector);
+      const prior = this.db.prepare('SELECT selector FROM contexts WHERE scope=? AND agent=? AND invocation=?')
+        .get(scope, agent, invocation);
+      if (prior?.selector && prior.selector !== key) throw new InvocationAttributeStoreError('conflict');
+      const owner = this.db.prepare('SELECT invocation FROM contexts WHERE scope=? AND agent=? AND selector=?')
+        .get(scope, agent, key);
+      if (owner && owner.invocation !== invocation) {
+        parseInvocationAttributes(i.attributes);
+        const now = this.now();
+        this.db.prepare(`INSERT INTO decisions VALUES(?,?,?,'ambiguous',?,?,'{}',NULL,?)
+          ON CONFLICT(scope,agent,selector) DO UPDATE SET state='ambiguous',attrs='{}',invocation=NULL,retain=excluded.retain`)
+          .run(scope, agent, key, now, now, now + DECISION_RETENTION);
+        return 'ambiguous';
+      }
+      const put = this.putInside(i), bind = this.bindInside(i);
+      return bind === 'sealed' ? bind : put;
+    });
+  }
   resolve(i) {
     if (this.now() - this.lastPrune > 60000) { this.prune(); this.lastPrune = this.now(); }
     return this.transaction(() => {

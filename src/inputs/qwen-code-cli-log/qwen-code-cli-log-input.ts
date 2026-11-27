@@ -37,6 +37,6 @@ export class QwenCodeCliLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.QwenCodeCli, 'qwen-code-cli');
+    return transformHookRecord(record, ClientType.QwenCodeCli, 'qwen-code-cli', { preserveInvocationAttributes: true });
   }
 }

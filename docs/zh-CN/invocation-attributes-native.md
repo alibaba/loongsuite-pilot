@@ -2,7 +2,7 @@
 
 **业务属性不用走 Agent 接口。需要逐入口确认的是：调用方与 Pilot 能否识别同一次执行。** 同一个框架可以有多个入口：可控 SDK、独立启动的 CLI、常驻 Gateway 和纯桌面 UI 的结论不一定相同。
 
-1. **新建进程**：已有支持的 Hook 可读取启动 env。适合一次启动一个请求；env 里的值是字符串，不用于热进程逐轮换值。
+1. **新建进程**：Claude Code、Qwen Code CLI 可通过子进程 env 传当次值，再在 `UserPromptSubmit` 按原生 `prompt_id` 登记。Stop 恢复时按每个原生回合查值，不把当前进程的 env 贴给历史回合。
 2. **已知本次原生键**：先向 Pilot `register`，再用原生协议发请求。Agent 请求只带原生 ID。
 3. **稍后才得到原生键**：调用前 `put`，收到本次调用所属的受理消息或生命周期事件后立即 `bind`。不能等最终输出再作无来源猜测。
 4. **现有接口拿不到同一个键**：只补交出或保留该 ID 的薄桥接，再复用同一套登记、字段校验、隔离、脱敏与 Span 透传。
@@ -26,7 +26,25 @@
 
 Qoder、Codex 和 OpenClaw 的完整参数见[原有接入步骤](./invocation-attributes.md#长驻宿主接入)。以下专门列出新验证的调用法。
 
-### Pi：受控的 Node SDK 用户
+## Claude Code / Qwen Code CLI：每次新建一个进程
+
+启动器给本次子进程单独设置两项环境变量（不要改常驻 Worker 的 `process.env`）：
+
+```text
+LOONGSUITE_PILOT_INVOCATION_ID=<本次子进程的唯一 ID，例如随机 UUID>
+LOONGSUITE_PILOT_SPAN_ATTRIBUTES=memory.user_id=tenant:A,audit.request_id=request-123
+```
+
+然后按正常方式调用 `claude -p …` 或 `qwen -p …`，可用各自的 `--resume` 继续已有会话。下一轮换用户时传新 ID 和新值；空轮也传新 ID，属性值留空。不要给同一常驻 CLI 进程重复发送 input 来逐轮切换 env。
+
+- Claude Code **2.1.330**、Qwen Code **0.28.4** 的原生 `UserPromptSubmit.prompt_id` 与 transcript 的 `user.promptId` 能对上。Qwen 的登记只接受真正含 `submitted_prompt` 的提交，不在工具续跑时登记。
+- 安装本版本提供的 `UserPromptSubmit`、`Stop` Hook（Claude 保留 `StopFailure`）。快照保存在 Pilot dataDir；应用/Pilot 重启后继续使用同一个 dataDir。普通桌面固定标签和不显式设置 `LOONGSUITE_PILOT_INVOCATION_ID` 的既有用法不变。
+- 如果宿主没有稳定 ID、漏掉开始 Hook、ID 冲突或快照已过期，普通遥测仍继续，未绑定的轮次不附个人归属。不要把 `--resume` 的 session ID、prompt 文本或 Stop 进程 env 当作旧回合的属性。
+- 同一个采集源的业务前缀只选一种入口；使用此 Hook 快照时不要再给该输入配置相同命名空间的 `invocationAttributes.sources`，也不要全局注入这个每次变化的字段。配置 `otlpTrace.spanAttributePassthroughPrefixes` 如 `["memory.", "audit."]`。
+
+例如多个用户共用聊天房间和 Agent 会话：网关从已认证的当前消息取得用户，**不同发送者拆成不同执行轮**；A 的原生 prompt 查 A 的快照，B 的查 B 的。会话 ID 不按用户重写。属性只描述本轮发起人，不会将群聊历史隔离成个人记忆。
+
+## Pi：受控的 Node SDK 用户
 
 在创建 Pi SDK 会话时，只加载一份 Pilot 扩展。使用 [Pi 接入示例](../examples/pi-invocation-attributes.mjs)，把 `bridge.extension` 传入该会话的 `DefaultResourceLoader({ extensionFactories: [...] })`。Pilot 扩展在 `before_agent_start` 分配本轮键后交给调用方，回调只做本地登记，不改变模型请求。普通 `pi` CLI 不会自动获得这个 SDK 调用方作用域。
 
@@ -41,7 +59,7 @@ await bridge.run({
 
 回调应同步、短小。Pilot 不等待调用方返回的 Promise，也不会因为登记失败重试 Agent 请求。不能把网络查询塞进这里。
 
-### OpenCode：V1 插件 + 常驻 HTTP server
+## OpenCode：V1 插件 + 常驻 HTTP server
 
 1. 按已验证版本为本次用户消息生成新的原生 `msg_…` ID；保持 OpenCode 的原生 ID 排序格式。不要用随机 UUID 或外部用户自选值替代它。
 2. 调用 [OpenCode 接入示例](../examples/opencode-invocation-attributes.mjs)，用该 ID 登记；把正常请求正文原样发送到 **1.14.29 的** `POST /session/:id/message`，正文内仍叫 `messageID`。

@@ -6,7 +6,7 @@ export interface InvocationIdentity { scope?: string; agent: string; invocationI
 export interface InvocationRegistration extends InvocationIdentity { attributes: unknown; ttlMs?: number; }
 export interface InvocationBinding extends InvocationIdentity { selector: NativeInvocationSelector; }
 export interface InvocationResolution {
-  state: 'pending'|'bound'|'noAttrs'|'timedOut'|'capacityDegraded';
+  state: 'pending'|'bound'|'noAttrs'|'timedOut'|'capacityDegraded'|'ambiguous';
   attributes: InvocationAttributes;
   invocationId?: string | null;
 }
@@ -18,6 +18,7 @@ export class InvocationAttributeStore {
   put(input: InvocationRegistration): 'stored' | 'unchanged';
   bind(input: InvocationBinding): 'bound' | 'unchanged' | 'sealed';
   register(input: InvocationRegistration & InvocationBinding): 'stored' | 'unchanged' | 'sealed';
+  registerObservedPrompt(input: InvocationRegistration & InvocationBinding): 'stored' | 'unchanged' | 'sealed' | 'ambiguous';
   resolve(input: { agent: string; scope?: string; selector: NativeInvocationSelector; managed?: boolean; waitMs?: number; seal?: boolean }): InvocationResolution;
   prune(): void;
   close(): void;

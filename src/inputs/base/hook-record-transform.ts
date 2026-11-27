@@ -2,6 +2,7 @@ import { ClientType } from '../../types/index.js';
 import type { AgentActivityEntry, AgentEventName } from '../../types/index.js';
 import { buildAgentActivityEntry, normalizeEventName, toJsonValue } from '../../normalization/entry-builder.js';
 import { enrichCanonicalEntryWithGit } from '../../normalization/enrich-git-context.js';
+import { INVOCATION_ATTRIBUTES_FIELD, projectInvocationAttributes } from '../../../assets/hooks/shared/invocation-attributes.mjs';
 
 function getStringValue(data: Record<string, unknown>, key: string): string | undefined {
   const val = data[key];
@@ -21,13 +22,15 @@ export async function transformHookRecord(
   record: Record<string, unknown>,
   agentType: ClientType,
   gitNamespace: string,
+  options?: { preserveInvocationAttributes?: boolean },
 ): Promise<AgentActivityEntry | null> {
   const rawEventName = getStringValue(record, 'event.name');
   if (!rawEventName) return null;
   const eventName = normalizeEventName(rawEventName);
+  const { [INVOCATION_ATTRIBUTES_FIELD]: attributes, ...nativeFields } = record;
 
   const entry = buildAgentActivityEntry({
-    ...record,
+    ...nativeFields,
     time_unix_nano: getStringValue(record, 'time_unix_nano'),
     observed_time_unix_nano: getStringValue(record, 'observed_time_unix_nano'),
     'event.id': getStringValue(record, 'event.id'),
@@ -68,6 +71,7 @@ export async function transformHookRecord(
     'error.message': getStringValue(record, 'error.message'),
   });
   if (entry) {
+    if (options?.preserveInvocationAttributes) projectInvocationAttributes(entry, attributes);
     await enrichCanonicalEntryWithGit(entry as Record<string, unknown>, record, gitNamespace);
   }
   return entry;
