@@ -84,7 +84,8 @@ it.each([
   try {
     await mkdir(join(root, 'task'));
     const rows = [
-      ['metadata', { session_id: session, trace_id: 'a'.repeat(32) }],
+      ['metadata', { session_id: session, trace_id: 'a'.repeat(32),
+        model_info: { model_name: 'glm-5.3-flash', display_model_name: 'GLM-5.3-Flash', prompt_max_tokens: 936000 } }],
       ['plan_item', { id: 'read', tool_call_info: { meta: { llm_toolcall_id: 'read-call' } } }],
       ['plan_item', { id: 'todo', tool_call_info: { name: 'TodoWrite', params: args,
         result: { status, data: result }, meta: { llm_toolcall_id: 'todo-call' } } }],
@@ -104,6 +105,13 @@ it.each([
       responses: () => ({ matchesHubOwner, rounds: [
         { id: '3'.repeat(24), at: '100', todos: [{ call: 'todo-call', start: '102', committedAt: '105' }] },
       ] }) });
+    // A turn selected by session + tool ID alone may belong to another turn.
+    // When the native trace/reply does not confirm ownership the usage is
+    // rejected, so the cache model must not be backfilled onto this response
+    // either -- otherwise it keeps a foreign turn's model with no usage.
+    expect(entry['gen_ai.request.model']).toBe(matchesHubOwner ? 'glm-5.3-flash' : undefined);
+    expect(entry['agent.trae-cn.hub.display_model']).toBe(matchesHubOwner ? 'GLM-5.3-Flash' : undefined);
+    expect(entry['agent.trae-cn.hub.prompt_max_tokens']).toBe(matchesHubOwner ? 936000 : undefined);
     expect(events?.map(e => e['gen_ai.tool.call.id'])).toEqual(['todo-call', 'todo-call']);
     const includesBody = capture && matchesHubOwner;
     expect(events?.[0]['gen_ai.tool.call.arguments']).toEqual(includesBody ? args : undefined);

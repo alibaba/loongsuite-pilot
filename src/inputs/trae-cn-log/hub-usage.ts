@@ -240,8 +240,15 @@ export class HubUsage {
     // model field, so this is the only source that reflects what actually
     // served the turn. A precise turn match wins; otherwise fall back to the
     // session only when every observed turn in that session agrees.
+    //
+    // Gate on hub ownership first: `turn` is selected by session + tool ID
+    // alone, so it can name a different turn whose native trace/reply does not
+    // match this response. When matchesHubOwner is false the usage below is
+    // rejected as 'unavailable' and the foreign turn's model must not leak in
+    // either -- otherwise the entry carries another turn's model with no usage.
     const hookModel = entry['gen_ai.request.model'];
-    if (typeof hookModel !== 'string' || hookModel.length === 0 || hookModel === 'unknown') {
+    if (evidence?.matchesHubOwner !== false &&
+        (typeof hookModel !== 'string' || hookModel.length === 0 || hookModel === 'unknown')) {
       const apply = (t: Turn) => {
         if (t.model) entry['gen_ai.request.model'] = t.model;
         if (t.displayModel) entry[HUB_PREFIX + 'display_model'] ??= t.displayModel;
