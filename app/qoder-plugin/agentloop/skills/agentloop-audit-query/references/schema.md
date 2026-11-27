@@ -130,6 +130,12 @@ SLS 元数据 `__time__` 为秒级过滤时间，`__source__`、`__tag__:*` 按�
 | `__tag__:__service_name__` | string | Agent 应用或服务名称，用于按应用维度筛选和归因。 |
 | `service.name` | string | 应用名称（备用），当 `__tag__:__service_name__` 缺失时作为补充。 |
 
+| **字段** | **类型** | **说明** |
+| --- | --- | --- |
+| `gateway.route.name` | string | 网关路由。请求命中的逻辑路由。`audit-event` 与 `incident-event` 中的列名是 `gateway_route_name`。 |
+| `gateway.instance.id` | string | 网关实例。逻辑网关部署标识，保留大小写。结果表中的列名是 `gateway_instance_id`。 |
+| `gateway.consumer` | string | 网关消费者。网关侧身份。结果表中的列名是 `gateway_consumer`。应用用户仍用 `user.id`。 |
+
 ### 事件名称与兼容名称
 
 | 行为 | 标准事件名 | 兼容事件名 |
@@ -173,6 +179,9 @@ SLS 元数据 `__time__` 为秒级过滤时间，`__source__`、`__tag__:*` 按�
 | 缓存读取 Token | `try_cast("gen_ai.usage.cache_read.input_tokens" AS bigint) AS cache_read_tokens` | 可缺失；只在缓存有效样本过滤通过时进入比率。 |
 | 工具名称 | `nullif(nullif("gen_ai.tool.name", ''), 'null') AS tool_name` | 只在需要 Tool 分析时投影。 |
 | Skill 显式字段 | `nullif(nullif("gen_ai.skill.name", ''), 'null') AS skill_name_explicit` | 可选字段；先检查覆盖率。非空时优先作为 Skill 名称。 |
+| 网关路由 | `nullif(nullif("gateway.route.name", ''), 'null') AS gateway_route_name` | 原始事实表。空值和字面量 `null` 视为缺失。 |
+| 网关实例 | `if(coalesce(lower(trim("gateway.instance.id")), '') IN ('', '-', 'null', '__unknown__'), '', trim("gateway.instance.id")) AS gateway_instance_id` | 原始事实表。`-`、`null`、`__unknown__` 视为缺失，其余保留大小写。 |
+| 网关消费者 | `nullif(nullif("gateway.consumer", ''), 'null') AS gateway_consumer` | 原始事实表。与 `user_id` 分开筛选。 |
 
 响应中的 `observed_tokens` 使用 `coalesce(input_tokens, 0) + coalesce(output_tokens, 0)`；基础数值列仍保留 NULL，用于计算字段覆盖。两个事实源按相同投影合并，Tool、Skill、错误等字段仅在对应分析需要时补充。
 
@@ -268,6 +277,9 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 | `usage_total_tokens` | int64 | 按意图占比分摊的 Session Token；同一 Session 各意图行之和为其已分摊总量，不能再次重复累加 Session 总量。 |
 | `risk_type` / `risk_subtype` / `severity` | string | 风险意图的风险分类及严重性。 |
 | `reason` / `entities` | string / json | 识别摘要与实体快照，可能包含敏感内容。 |
+| `gateway_route_name` | string | 网关路由，对应 `gateway.route.name`。整张 `audit-event` 都有该列。 |
+| `gateway_instance_id` | string | 网关实例，对应 `gateway.instance.id`。 |
+| `gateway_consumer` | string | 网关消费者，对应 `gateway.consumer`。应用用户仍用 `user`。 |
 | `detector_name` / `detector_version` | string | 识别器及版本。 |
 
 ### Session 与模型用量关联
@@ -295,6 +307,9 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 | `service_name` | string | 应用或服务名，无法明确时可为空或使用占位值。 |
 | `agent_type` | string | Agent 类型，例如 qoder、cursor、claude-code 等。 |
 | `user` | string | 用户实体的平铺查询列，优先取自 `user.id`。适合按用户筛选和分组。 |
+| `gateway_route_name` | string | 网关路由，对应 `gateway.route.name`。 |
+| `gateway_instance_id` | string | 网关实例，对应 `gateway.instance.id`。 |
+| `gateway_consumer` | string | 网关消费者，对应 `gateway.consumer`。应用用户仍用 `user`。 |
 | `host` | string | 主机实体的平铺查询列，优先取自 `host.name`；`host.name` 为空或缺失时，兼容使用 `__tag__:__hostname__`。 |
 | `source_ip` | string | Agent 主机 IP 实体的平铺查询列，优先取自 `host.ip`；`host.ip` 为空或缺失时，兼容使用 `__source__`。该字段不表示网络对端或外联目标。 |
 | `severity` | enum | 风险严重性，表示风险成立后可能造成的影响，从高到低取 `critical`、`high`、`medium`、`low`，页面上对应严重、高危、中危和低危。 |
@@ -313,7 +328,7 @@ regexp_like(skill_path, '(?i)(/SKILL\.md|/[^/]+\.skill\.md)$')
 | `evidence_subject_value` | string | 证据主体值，与 `evidence_subject_type` 配合使用。 |
 | `evidence_subject_key` | string | 证据主体稳定键，用于更可靠地关联主体。 |
 | `evidence_values` | object[] | 结构化证据值数组，例如命中的敏感类型、脱敏后的值、文件路径、命令片段、外发目标等。 |
-| `entities` | object[] | 关键风险实体快照，例如应用、用户、主机、Agent 主机 IP、工具、域名、目标 IP、Secret、PII、文件路径或命令实体。多信号晋升事件应合并所有关键实体。 |
+| `entities` | object[] | 关键风险实体快照，例如应用、用户、主机、Agent 主机 IP、网关实例、工具、域名、目标 IP、Secret、PII、文件路径或命令实体。多信号晋升事件应合并所有关键实体。网关实例的 `type` 为 `gateway_instance`，实例 ID 在 `display_name`。 |
 | `detector_name` | string | 生成该事件的检测器或服务名称。 |
 | `detector_version` | string | 检测器或服务版本。 |
 
