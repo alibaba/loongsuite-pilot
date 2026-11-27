@@ -41,3 +41,29 @@ distinct、均值、比例和分位数在目标粒度重算；TopN 之前计算�
 ## 字段与参数
 
 带点字段、带连字符表名使用双引号；字符串中的单引号加倍。COALESCE 不能引用不存在的列。`{{from}}` / `{{to}}` 是查询模板的整数标记；一次性查询交付前展开，仪表盘适配见“时间窗口”。仪表盘 `${{key}}` 的替换规则见 Builder 参考。
+
+## Dataset
+
+AgentLoop Dataset 的语句只用于查询，不用于其他操作。查询用单 Dataset `SELECT`，或只读 SearchExpr。已保存的 `* | SELECT ...` 也是只读 SELECT，按原文执行。
+
+先读该 Dataset 的 `schema`。公共字段类型是 `text`、`long`、`double`、`json`。系统字段用 `id` 和 `__time__`，不要依赖内部序列字段。
+
+`SELECT` 只查这一个 Dataset，显式列出字段和 `LIMIT`，不把用户输入直接拼进 SQL。不使用 JOIN、UNION、INTERSECT、EXCEPT 或子查询。不写 `LIMIT` 时，服务默认最多返回 1000 行。
+
+```sql
+SELECT id, __time__, question, answer, trace_id
+FROM "<dataset-name>"
+ORDER BY __time__ DESC
+LIMIT 100
+```
+
+SearchExpr 支持比较、`AND` / `OR` / `NOT`、括号、`field:value`、`field:*` 和前缀匹配，例如 `question:"timeout" AND score >= 0.8`。这一侧不用 `IN`、`BETWEEN`、`LIKE`、`IS NULL`、任意函数或 JSON Filter DSL。
+
+语义检索只在该字段的 schema 已启用 embedding 时使用。距离阈值用 `similarity(question, "<semantic-query>") < 0.3`，值越小通常越相近。Top-K 用 `topk(question, "<semantic-query>") <= 10`。按距离排序：
+
+```sql
+SELECT id, question, semantic_distance(question, "<semantic-query>", "l2") AS distance
+FROM "<dataset-name>"
+ORDER BY distance ASC
+LIMIT 10
+```

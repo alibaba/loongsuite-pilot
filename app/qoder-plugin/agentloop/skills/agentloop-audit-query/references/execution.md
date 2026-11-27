@@ -26,16 +26,16 @@ SQL 写法与分页见 [SQL 写作技巧](sql-writing.md)。日志库查询的 s
 
 用户给出 AgentSpace 和 Dataset 时走这里，不改当前日志库目标。
 
-不带 `--query` 时读字段，stdout 是 get-dataset JSON。SQL 只用其中 `schema` 的字段，外加 `id` 与 `__time__`。读失败则停止。
+不带 `--query` 时读字段，stdout 是 get-dataset JSON。语句按 [SQL 写作技巧](sql-writing.md#dataset)。读失败则停止。
 
 ```bash
 python3 "<agentloop-collector-setup目录>/scripts/run.py" audit --agent-space <agent-space> --region <region> --dataset <dataset>
 ```
 
-再查询。这次仍先读 schema，读失败则不调用 execute-query。`--dataset` 传成 `--dataset-name`，`--line` 对应 `--length`，上限仍是 100。stdout 是 `columns` 与 `rows`。
+再查询。这次仍先读 schema，读失败则不调用 execute-query。`--dataset` 传成 `--dataset-name`，`--line` 对应 `--length`，上限仍是 100。`--from` / `--to` 是 Unix 秒，作用于 `__time__`，`to` 不包含。stdout 是 `columns` 与 `rows`，用 `columns[j]` 对齐 `rows[i][j]`。`meta.progress` 为完成后再交付。`meta.truncation` 显示截断时，不能把截断后的文本当成完整样本。
 
 ```bash
-python3 "<agentloop-collector-setup目录>/scripts/run.py" audit --agent-space <agent-space> --region <region> --dataset <dataset> --from <from> --to <to> --query '<SELECT 或 * | SELECT>' --line 100 --offset 0
+python3 "<agentloop-collector-setup目录>/scripts/run.py" audit --agent-space <agent-space> --region <region> --dataset <dataset> --from <from> --to <to> --query '<SELECT、* | SELECT 或 SearchExpr>' --line 100 --offset 0
 ```
 
 账户与查询目标切换按 Setup 的[账户与查询目标切换](../../agentloop-collector-setup/references/auth.md)完成。`audit --list-spaces` 返回 `{spaces:[{agentSpace,regionId}]}`，只列空间，不更改 Profile 或目标，可用 `--region` 缩小范围；选定后按上述 AgentSpace 或直接 Project 参数执行 `audit --list` 绑定，成功返回当前上下文 JSON。元数据操作不要求日志时间、不取日志；实际查询才执行上述时间确认流程。

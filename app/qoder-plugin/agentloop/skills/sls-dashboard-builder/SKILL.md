@@ -169,7 +169,7 @@ description: 当任务需要创建、修改、扩展或重组阿里云 SLS 的 d
 
 将 dashboard JSON 转成可本地打开的 HTML 预览。
 
-预览器按 dashboard JSON 中的查询配置取数并渲染。
+预览器按 dashboard JSON 中的查询配置取数并渲染。Dataset 图表先核对已保存的查询，只执行 [Dataset 语句](../agentloop-audit-query/references/sql-writing.md#dataset) 里的 `SELECT`、`* | SELECT` 或只读 SearchExpr，按原文执行。
 
 在当前项目目录执行，`<agentloop-collector-setup目录>` 替换为 Setup Skill 的安装路径：
 

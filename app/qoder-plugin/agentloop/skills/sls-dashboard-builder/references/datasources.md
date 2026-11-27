@@ -195,7 +195,7 @@ AgentLoop Dataset。查询上不写 `logstore`。`project` 填该 AgentSpace 的
 
 外层 `search.query` 与 `search.logstore` 保持 `@`，`dataSourceType` 为 `current`。无变量时 `query` 与 `tokenQuery` 相同。时间留在 `search.start` / `search.end`。`__time__` 是 Unix 秒；分桶用 `__time__` 或整数除法。
 
-字段按 [Dataset 查询](../../agentloop-audit-query/references/execution.md) 先读 `schema`，再写 SQL。
+字段和语句按 [Dataset](../../agentloop-audit-query/references/sql-writing.md#dataset)。
 
 图表类型、`display` 和 `queryOptionMap` 复用 [图表模板](chart-templates.md)：表格 `tablepro`，单序列折线 `linepro`，分组折线 `aggpro`。`display.version` 用模板里的 `"2"`。
 

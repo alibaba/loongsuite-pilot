@@ -24,7 +24,7 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 |---|---|
 | [查询目录](references/catalog.md) | 八类核心面板与参考 SQL 索引 |
 | [schema](references/schema.md) | 数据模型、统计口径、公共构件与组织、账单外表关联 |
-| [SQL 写作技巧](references/sql-writing.md) | JSON、关联、时间窗口、分页与汇总的 SLS 注意事项 |
+| [SQL 写作技巧](references/sql-writing.md) | SLS 的 JSON、关联、时间窗口、分页与汇总，以及 Dataset 语句 |
 | [执行说明](references/execution.md) | Skill 脚本、环境绑定与错误处理 |
 | [接入交付](references/delivery.md) | SQL / CLI / SDK 参数与结果契约 |
 
