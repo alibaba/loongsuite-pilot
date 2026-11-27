@@ -156,6 +156,9 @@ Cursor CLI 使用 [Enterprise 系统 Hook 配置](https://cursor.com/docs/hooks#
 共同使用的 UID 访问。
 可用 `--agents cursor-cli` 指定 Cursor 的这份共享注册。
 
+Linux 容器中，Cursor 系统 Hook 可继续使用可写的 `/mnt/pilot`，不搬迁文件，也不修改挂载权限。
+请仅在共享卷的所有写入方均可信时使用此布局。系统 Hook 配置、运行文件和子目录仍保留原有检查。
+
 当 [官方无头 CLI](https://cursor.com/docs/cli/headless) 没有触发常规请求和响应 Hook 时，
 Pilot 可读取 `sessionEnd` 指向的原生会话记录，采集当前已完成的一轮。文件需在运行身份的
 `~/.cursor/projects` 下可读。消息内容遵循现有隐私配置，Token 用量以源数据为准。

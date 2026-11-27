@@ -3,6 +3,16 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 export const CURSOR_SYSTEM_HOOK_SCRIPT = 'cursor-loongsuite-pilot-hook.sh';
+const CURSOR_SYSTEM_CONTAINER_MOUNT = '/mnt/pilot';
+
+export interface CursorSystemPathOptions {
+  allowWritableMount?: boolean;
+  bundledHooksRoot?: string;
+}
+
+export function cursorSystemRuntimePathOptions(dataDir: string): CursorSystemPathOptions {
+  return { allowWritableMount: process.platform === 'linux' && path.resolve(dataDir) === CURSOR_SYSTEM_CONTAINER_MOUNT };
+}
 
 function canTrustOwner(uid: number): boolean {
   return uid === 0 || uid === process.geteuid?.();
@@ -12,25 +22,26 @@ export function isTrustedCursorSystemFile(stat: Stats): boolean {
   return stat.isFile() && canTrustOwner(stat.uid) && (stat.mode & 0o022) === 0;
 }
 
-export async function assertTrustedCursorSystemFile(file: string, bundledHooksRoot?: string): Promise<void> {
-  await assertTrustedCursorSystemDirectory(path.dirname(file), bundledHooksRoot);
+export async function assertTrustedCursorSystemFile(file: string, options?: CursorSystemPathOptions): Promise<void> {
+  await assertTrustedCursorSystemDirectory(path.dirname(file), options);
   if (!isTrustedCursorSystemFile(await fs.lstat(file))) {
     throw new Error(`Untrusted Cursor system runtime file: ${file}`);
   }
 }
 
-export async function assertTrustedCursorSystemNodePin(dataDir: string): Promise<void> {
+export async function assertTrustedCursorSystemNodePin(dataDir: string, options?: CursorSystemPathOptions): Promise<void> {
   const pin = path.join(dataDir, 'node-bin');
-  await assertTrustedCursorSystemFile(pin);
+  await assertTrustedCursorSystemFile(pin, options);
   const node = (await fs.readFile(pin, 'utf8')).replace(/\r?\n$/, '');
   if (!path.isAbsolute(node) || /[\r\n\0]/.test(node)) throw new Error('Cursor system Node pin must contain one absolute path');
-  await assertTrustedCursorSystemDirectory(path.dirname(node));
+  await assertTrustedCursorSystemDirectory(path.dirname(node), options);
   const resolved = await fs.realpath(node);
-  await assertTrustedCursorSystemFile(resolved);
+  await assertTrustedCursorSystemFile(resolved, options);
   await fs.access(resolved, fs.constants.X_OK);
 }
 
-export async function assertTrustedCursorSystemDirectory(directory: string, bundledHooksRoot?: string): Promise<void> {
+export async function assertTrustedCursorSystemDirectory(directory: string, options?: CursorSystemPathOptions): Promise<void> {
+  const { allowWritableMount = false, bundledHooksRoot } = options ?? {};
   let current = path.resolve(directory);
   let leaf = true;
   while (true) {
@@ -42,7 +53,7 @@ export async function assertTrustedCursorSystemDirectory(directory: string, bund
       if (!canTrustOwner(stat.uid)) throw new Error(`Untrusted Cursor system directory owner: ${current}`);
       // Only the bundled source may use assets/hooks -> ../hooks as its
       // immediate parent. Continue to validate the resolved directory and
-      // all ancestors of both paths with the normal ownership and mode rules.
+      // all ancestors of both paths with the same ownership and mode rules.
       const bundledAlias = leaf && bundledHooksRoot && stat.isSymbolicLink()
         && current === path.join(bundledHooksRoot, 'assets', 'hooks')
         && await fs.readlink(current) === '../hooks';
@@ -51,10 +62,11 @@ export async function assertTrustedCursorSystemDirectory(directory: string, bund
         if (bundledAlias && bundledHooksRoot && resolved !== await fs.realpath(path.join(bundledHooksRoot, 'hooks'))) {
           throw new Error('Cursor bundled hook source must resolve to the installed hooks directory');
         }
-        await assertTrustedCursorSystemDirectory(resolved);
-      } else if (!stat.isDirectory() || ((stat.mode & 0o022) !== 0 && (leaf || (stat.mode & 0o1000) === 0))) {
+        await assertTrustedCursorSystemDirectory(resolved, { allowWritableMount });
+      } else if (!stat.isDirectory() || (!(allowWritableMount && current === CURSOR_SYSTEM_CONTAINER_MOUNT)
+        && (stat.mode & 0o022) !== 0 && (leaf || (stat.mode & 0o1000) === 0))) {
         // A sticky ancestor such as /tmp protects entries owned by the
-        // installer, but the managed directory itself must be exclusive.
+        // installer. Only the designated container mount may itself be writable.
         throw new Error(`Untrusted Cursor system directory permissions: ${current}`);
       }
     }

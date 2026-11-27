@@ -3,7 +3,8 @@ import * as path from 'node:path';
 import { GROK_BUILD_HOOK_ASSETS } from './grok-build-assets.js';
 import { areHookRuntimeAssetsHealthy, restoreHookRuntimeAssets } from './hook-runtime-assets.js';
 import { assertTrustedCursorSystemDirectory, assertTrustedCursorSystemFile,
-  assertTrustedCursorSystemNodePin, CURSOR_SYSTEM_HOOK_SCRIPT } from './cursor-system-paths.js';
+  assertTrustedCursorSystemNodePin, CURSOR_SYSTEM_HOOK_SCRIPT, cursorSystemRuntimePathOptions,
+  type CursorSystemPathOptions } from './cursor-system-paths.js';
 import { writeTextFileAtomic } from '../utils/fs-utils.js';
 import { configJsonPath } from '../utils/data-dir.js';
 
@@ -34,29 +35,29 @@ function manifest(agentId: string): readonly string[] {
   throw new Error(`No system hook runtime for ${agentId}`);
 }
 
-async function assertPrivateCursorDirectory(directory: string): Promise<void> {
-  await assertTrustedCursorSystemDirectory(directory);
+async function assertPrivateCursorDirectory(directory: string, options: CursorSystemPathOptions): Promise<void> {
+  await assertTrustedCursorSystemDirectory(directory, options);
   const stat = await lstat(directory);
   if (stat.uid !== process.geteuid?.() || (stat.mode & 0o077) !== 0) {
     throw new Error('Cursor system data directory must be private to the collector user');
   }
 }
 
-async function ensurePrivateCursorDirectory(directory: string): Promise<void> {
-  await assertTrustedCursorSystemDirectory(directory);
+async function ensurePrivateCursorDirectory(directory: string, options: CursorSystemPathOptions): Promise<void> {
+  await assertTrustedCursorSystemDirectory(directory, options);
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await assertTrustedCursorSystemDirectory(directory);
+  await assertTrustedCursorSystemDirectory(directory, options);
   if ((await lstat(directory)).uid !== process.geteuid?.()) {
     throw new Error('Cursor system data directory must belong to the collector user');
   }
   await chmod(directory, 0o700);
 }
 
-async function trustedCursorPolicyPath(): Promise<string> {
+async function trustedCursorPolicyPath(options: CursorSystemPathOptions): Promise<string> {
   const config = path.resolve(configJsonPath());
   if (/[\r\n\0]/.test(config)) throw new Error('Invalid Cursor system config path');
   try {
-    await assertTrustedCursorSystemFile(config);
+    await assertTrustedCursorSystemFile(config, options);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
   }
@@ -66,18 +67,21 @@ async function trustedCursorPolicyPath(): Promise<string> {
 export async function areSystemHookAssetsHealthy(agentId: string, pilotDir: string, dataDir: string): Promise<boolean> {
   if (agentId === 'cursor') {
     try {
-      await assertTrustedCursorSystemNodePin(dataDir);
-      const config = await trustedCursorPolicyPath();
-      await assertPrivateCursorDirectory(path.join(dataDir, 'logs/cursor'));
-      await assertPrivateCursorDirectory(path.join(dataDir, 'state/cursor'));
+      const options = cursorSystemRuntimePathOptions(dataDir);
+      await assertTrustedCursorSystemNodePin(dataDir, options);
+      const config = await trustedCursorPolicyPath(options);
+      await assertPrivateCursorDirectory(path.join(dataDir, 'logs/cursor'), options);
+      await assertPrivateCursorDirectory(path.join(dataDir, 'state/cursor'), options);
       const root = path.join(dataDir, 'hooks');
       const pin = path.join(root, CURSOR_SYSTEM_CONFIG_PIN);
-      await assertTrustedCursorSystemFile(pin);
+      await assertTrustedCursorSystemFile(pin, options);
       if (await readFile(pin, 'utf8') !== config + '\n') return false;
       const list = path.join(root, CURSOR_SYSTEM_MANIFEST);
-      await assertTrustedCursorSystemFile(list);
+      await assertTrustedCursorSystemFile(list, options);
       if (await readFile(list, 'utf8') !== CURSOR_SYSTEM_MANIFEST_TEXT) return false;
-      for (const file of CURSOR_SYSTEM_HOOK_ASSETS) await assertTrustedCursorSystemFile(path.join(root, file));
+      for (const file of CURSOR_SYSTEM_HOOK_ASSETS) {
+        await assertTrustedCursorSystemFile(path.join(root, file), options);
+      }
     } catch {
       return false;
     }
@@ -87,26 +91,27 @@ export async function areSystemHookAssetsHealthy(agentId: string, pilotDir: stri
 
 export async function restoreSystemHookAssets(agentId: string, pilotDir: string, dataDir: string): Promise<void> {
   if (agentId === 'cursor') {
-    await assertTrustedCursorSystemNodePin(dataDir);
-    const config = await trustedCursorPolicyPath();
+    const options = cursorSystemRuntimePathOptions(dataDir);
+    await assertTrustedCursorSystemNodePin(dataDir, options);
+    const config = await trustedCursorPolicyPath(options);
     const root = path.join(dataDir, 'hooks');
-    await assertTrustedCursorSystemDirectory(root);
+    await assertTrustedCursorSystemDirectory(root, options);
     const logs = path.join(dataDir, 'logs/cursor');
-    await ensurePrivateCursorDirectory(logs);
-    await ensurePrivateCursorDirectory(path.join(dataDir, 'state/cursor'));
+    await ensurePrivateCursorDirectory(logs, options);
+    await ensurePrivateCursorDirectory(path.join(dataDir, 'state/cursor'), options);
     const history = path.join(logs, 'history');
-    await assertTrustedCursorSystemDirectory(history);
+    await assertTrustedCursorSystemDirectory(history, options);
     await mkdir(history, { recursive: true, mode: 0o700 });
     await writeTextFileAtomic(path.join(root, CURSOR_SYSTEM_CONFIG_PIN), config + '\n',
       { mode: 0o644, preserveMode: true });
     // The container payload may ship this exact alias when package and data
     // roots are shared. The exception belongs only to source path resolution.
-    const bundledHooksRoot = process.platform === 'linux' && path.resolve(pilotDir) === path.resolve(dataDir)
-      ? path.resolve(pilotDir) : undefined;
+    const sourceOptions = process.platform === 'linux' && path.resolve(pilotDir) === path.resolve(dataDir)
+      ? { ...options, bundledHooksRoot: path.resolve(pilotDir) } : options;
     // Let the Cursor Input establish its first-run baseline before the first turn.
     await restoreHookRuntimeAssets(pilotDir, dataDir, CURSOR_SYSTEM_HOOK_ASSETS, async (source, target) => {
-      await assertTrustedCursorSystemFile(source, bundledHooksRoot);
-      await assertTrustedCursorSystemDirectory(path.dirname(target));
+      await assertTrustedCursorSystemFile(source, sourceOptions);
+      await assertTrustedCursorSystemDirectory(path.dirname(target), options);
     });
     await writeTextFileAtomic(path.join(root, CURSOR_SYSTEM_MANIFEST), CURSOR_SYSTEM_MANIFEST_TEXT,
       { mode: 0o644, preserveMode: true });

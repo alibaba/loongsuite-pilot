@@ -188,6 +188,11 @@ the UID running the collector and CLI.
 `--agents cursor-cli` selects the shared Cursor registration. Start new CLI
 processes after installation so they can read the updated policy.
 
+On Linux, Cursor system hooks can use the existing writable `/mnt/pilot`
+container mount without relocating files or changing its mode. Use this layout
+only when all writers to the mount are trusted. The system hook configuration
+and the runtime's nested directories and files still have their usual checks.
+
 For [official headless CLI runs](https://cursor.com/docs/cli/headless) that omit
 the normal prompt and response hooks, Pilot can recover a completed turn from
 the native transcript referenced by the CLI's `sessionEnd` hook. The transcript
