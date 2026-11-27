@@ -156,7 +156,9 @@ describe('AgentDiscoveryService', () => {
       const svc = new AgentDiscoveryService([entry]);
       await svc.start();
 
+      expect(entry.isAvailable).not.toHaveBeenCalled();
       expect(entry.start).not.toHaveBeenCalled();
+      expect(mockFsWatch).not.toHaveBeenCalled();
       expect(svc.getStates()['test-agent']).toBe('idle');
       await svc.stop();
     });
@@ -684,17 +686,43 @@ describe('AgentDiscoveryService deleted-directory watches', () => {
     await svc.stop();
   });
 
-  it('keeps the watcher when the agent is unavailable or disabled', async () => {
+  it('does not stat or watch an agent that stays disabled', async () => {
+    const records = useFakeWatch();
+    const absent = path.join(tree.root, '.openclaw');
+    const isAvailable = vi.fn(async () => true);
+    const statSpy = vi.spyOn(fs, 'statSync');
+    const entry = makeEntry({
+      id: 'deploy:openclaw',
+      watchPaths: [absent],
+      enabled: () => false,
+      isAvailable,
+    });
+    const svc = new AgentDiscoveryService([entry]);
+    try {
+      await svc.start();
+      await svc.refresh('poll');
+      expect(isAvailable).not.toHaveBeenCalled();
+      expect(records).toHaveLength(0);
+      expect(statSpy.mock.calls.map(call => String(call[0]))).not.toContain(absent);
+      expect(svc.getStates()['deploy:openclaw']).toBe('idle');
+    } finally {
+      statSpy.mockRestore();
+      await svc.stop();
+    }
+  });
+
+  it('keeps the watcher while unavailable and drops it when disabled', async () => {
     const records = useFakeWatch();
     let available = true;
     const enabled = vi.fn().mockReturnValue(true);
+    const isAvailable = vi.fn(async () => available);
     const start = vi.fn().mockResolvedValue(undefined);
     const entry = makeEntry({
       id: 'deploy:codex',
       watchPaths: [tree.codex],
       pollIntervalMs: 1000,
       enabled,
-      isAvailable: async () => available,
+      isAvailable,
       start,
     });
     const svc = new AgentDiscoveryService([entry]);
@@ -708,15 +736,17 @@ describe('AgentDiscoveryService deleted-directory watches', () => {
 
     available = true;
     enabled.mockReturnValue(false);
+    const checksBeforeDisable = isAvailable.mock.calls.length;
     await svc.refresh('disabled');
     expect(svc.getStates()['deploy:codex']).toBe('idle');
-    expect(records[0].watcher.close).not.toHaveBeenCalled();
+    expect(records[0].watcher.close).toHaveBeenCalledOnce();
+    expect(isAvailable).toHaveBeenCalledTimes(checksBeforeDisable);
     expect(records).toHaveLength(1);
     expect(vi.getTimerCount()).toBe(1);
 
     enabled.mockReturnValue(true);
-    records[0].cb();
-    await flush();
+    await svc.refresh('enabled');
+    expect(records).toHaveLength(2);
     expect(svc.getStates()['deploy:codex']).toBe('running');
     expect(start).toHaveBeenCalledTimes(2);
     await svc.stop();
