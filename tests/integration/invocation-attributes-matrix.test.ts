@@ -5,7 +5,7 @@ import {randomUUID} from 'node:crypto';
 import { expect, it, vi } from 'vitest';
 import type { ReadableSpan } from '@opentelemetry/sdk-trace-base';
 import { InvocationAttributeStore } from '../../assets/hooks/shared/invocation-attribute-store.mjs';
-import { INVOCATION_MESSAGE_ID_FIELD } from '../../assets/hooks/shared/invocation-attributes.mjs';
+import { INVOCATION_MESSAGE_ID_FIELD, projectInvocationAttributes } from '../../assets/hooks/shared/invocation-attributes.mjs';
 import { InvocationAttributeJoin } from '../../src/invocation-attributes/join.js';
 import { readInvocationAttributeConfig } from '../../src/invocation-attributes/config.js';
 import { StateStore } from '../../src/checkpoints/state-store.js';
@@ -13,6 +13,8 @@ import { InputManager } from '../../src/core/input-manager.js';
 import { BaseInput } from '../../src/inputs/base/base-input.js';
 import { OtlpTraceFlusher } from '../../src/flushers/otlp-trace-flusher.js';
 import { MultiFlusher } from '../../src/flushers/multi-flusher.js';
+import { CodexTurnJournal } from '../../src/flushers/codex-turn-journal.js';
+import { GlobalAttributesProvider } from '../../src/normalization/global-attributes.js';
 import { maskAgentActivityEntry } from '../../src/mask/entry-masker.js';
 import { buildDoubaoTaskEvents, parseDoubaoLogLine } from '../../src/inputs/doubao-work/doubao-work-log.js';
 import { buildAgentActivityEntry } from '../../src/normalization/entry-builder.js';
@@ -75,7 +77,7 @@ it.each(matrix)('canonical-stage fixture: %s (client %s, Input %s)', async (labe
   const manager=new InputManager();
   const captures:ReadableSpan[]=[];
   const trace=new OtlpTraceFlusher({
-    enabled:true,serviceName:'fixture-'+label,protocol:'http/protobuf',dataDir:dir,spanAttributePassthroughPrefixes:['memory.'],
+    enabled:true,serviceName:'fixture-'+label,protocol:'http/protobuf',dataDir:dir,
     endpoints:[{name:'fixture',endpoint:'http://127.0.0.1:4318'}],
   }, undefined, () => ({export(rows,done) {captures.push(...rows);done({code:0});},shutdown:async()=>{}}));
   const output=new MockFlusher();
@@ -123,6 +125,73 @@ it.each(matrix)('canonical-stage fixture: %s (client %s, Input %s)', async (labe
     }
   } finally {
     await manager.stopAll();await trace.shutdown();store.close();fs.rmSync(dir,{recursive:true,force:true});
+  }
+});
+
+it.each([false, true])('prefers admitted attributes to unmarked LLM fields and defaults (legacy prefixes=%s)', async (legacy) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-prefix-collision-'));
+  const spans: ReadableSpan[] = [];
+  const trace = new OtlpTraceFlusher({
+    enabled: true, serviceName: 'fixture-collision', protocol: 'http/protobuf', dataDir: dir,
+    endpoints: [{ name: 'fixture', endpoint: 'http://127.0.0.1:4318' }],
+    ...(legacy ? { spanAttributePassthroughPrefixes: ['memory.'] } : {}),
+  }, new GlobalAttributesProvider({ 'memory.owner': 'global' }, path.join(dir, 'absent.json')),
+  () => ({ export(rows, done) { spans.push(...rows); done({ code: 0 }); }, shutdown: async () => {} }));
+  try {
+    const rows = entries('claude-code', 'session', 'turn', 1);
+    delete rows[0]['memory.owner'];
+    projectInvocationAttributes(rows[0], { 'memory.owner': 'admitted', 'audit.enabled': false });
+    rows[2]['private.detail'] = 'only-in-event-log';
+    await trace.sendBatch(rows);
+    await trace.flush();
+    expect(spans.map(s => s.attributes['gen_ai.span.kind'])).toContain('LLM');
+    for (const span of spans) {
+      expect(span.attributes['memory.owner']).toBe('admitted');
+      expect(span.attributes['audit.enabled']).toBe(false);
+      expect(span.attributes['private.detail']).toBeUndefined();
+    }
+    expect(rows[2]['memory.owner']).toBe('unscoped-default');
+    expect(rows[2]['private.detail']).toBe('only-in-event-log');
+  } finally {
+    await trace.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+it('replays and masks admitted invocation fields from the pending journal without configuring prefixes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pilot-invocation-replay-'));
+  const journalDir = path.join(dir, 'journal');
+  const manager = new InputManager();
+  manager.setMaskConfig({ mode: 'all', types: [], replacementMode: 'placeholder' });
+  const spans: ReadableSpan[] = [];
+  const trace = new OtlpTraceFlusher({
+    enabled: true, serviceName: 'fixture-replay', protocol: 'http/protobuf', dataDir: dir,
+    endpoints: [{ name: 'fixture', endpoint: 'http://127.0.0.1:4318' }],
+  }, undefined, () => ({ export(rows, done) { spans.push(...rows); done({ code: 0 }); }, shutdown: async () => {} }),
+  new CodexTurnJournal(journalDir), entries => manager.prepareRestoredEntries(entries));
+  try {
+    const rows = entries('codex', 'session', 'turn', 1);
+    rows.at(-1)!['agent.codex.turn_status'] = 'completed';
+    for (const row of rows) {
+      delete row['memory.owner'];
+      row['unregistered'] = 'no opt-in';
+      projectInvocationAttributes(row, {
+        'memory.owner': 'admitted', 'audit.note': 'sk-' + '1234567890abcdefghijklmnop', 'audit.attempt': 0,
+      });
+    }
+    await new CodexTurnJournal(journalDir).append(rows);
+    await trace.start();
+    await trace.flush();
+    expect(spans.map(s => s.attributes['gen_ai.span.kind'])).toContain('LLM');
+    for (const span of spans) {
+      expect(span.attributes).toMatchObject({
+        'memory.owner': 'admitted', 'audit.note': '[APIKEY_MASKED]', 'audit.attempt': 0,
+      });
+      expect(span.attributes['unregistered']).toBeUndefined();
+    }
+  } finally {
+    await trace.shutdown();
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 

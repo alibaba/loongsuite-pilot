@@ -33,6 +33,7 @@ import { createReadableSpanToOtlpSpanJsonArray } from './otlp-json-serializer.js
 import { multimodalMetadataItemsFromMessages } from '../multimodal/rewrite.js';
 import { removeMessageContentFields, stripAgentMessageContent } from '../normalization/agent-content-policy.js';
 import { normalizeGuardrailFields } from '../normalization/guardrail-fields.js';
+import { projectedInvocationAttributeKeys } from '../../assets/hooks/shared/invocation-attributes.mjs';
 
 import type { AgentActivityEntry, OtlpTraceFlusherConfig } from '../types/index.js';
 import { BaseFlusher } from './base-flusher.js';
@@ -1627,9 +1628,14 @@ export class OtlpTraceFlusher extends BaseFlusher {
         // are already on the records and only need to be listed as keys.
         const customAttrs = this.globalAttributesProvider?.resolve() ?? {};
         const customKeys = Object.keys(customAttrs);
-        // Caller-supplied attributes (e.g. multica.*) are already stamped as
-        // top-level fields on the records by the hook/plugin; discover any key
-        // matching a configured prefix and list it so it reaches span attributes.
+        // Exact invocation fields are explicitly admitted by the producer or
+        // registry before masking. Only legacy, unmarked fields need a prefix.
+        const invocationKeys = new Set<string>();
+        for (const record of records) {
+          for (const key of projectedInvocationAttributeKeys(record)) {
+            if (Object.hasOwn(record, key)) invocationKeys.add(key);
+          }
+        }
         const prefixKeys = this.spanAttributePassthroughPrefixes.length === 0
           ? []
           : [...new Set(
@@ -1653,16 +1659,29 @@ export class OtlpTraceFlusher extends BaseFlusher {
           ...(agentType === 'openclaw' || agentType === 'hermes' ? ['agent.pilot.request_context.truncated'] : []),
           ...agentSpecificKeys,
           ...customKeys,
+          ...invocationKeys,
           ...prefixKeys,
         ])];
-        let recordsForConversion = customKeys.length === 0
+        let recordsForConversion = customKeys.length === 0 && invocationKeys.size === 0
           ? records
           : records.map((r) => {
-              const copy: AgentActivityEntry = { ...r };
-              for (const [k, v] of Object.entries(customAttrs)) {
-                if (copy[k] === undefined) copy[k] = v;
+              let copy: AgentActivityEntry | undefined;
+              const projected = projectedInvocationAttributeKeys(r);
+              // The converter also looks at each LLM/TOOL's own record. Don't
+              // let an unmarked lookalike override the admitted turn value.
+              for (const key of invocationKeys) {
+                if (Object.hasOwn(r, key) && !projected.includes(key)) {
+                  copy ??= { ...r };
+                  delete copy[key];
+                }
               }
-              return copy;
+              for (const [k, v] of Object.entries(customAttrs)) {
+                if (!invocationKeys.has(k) && r[k] === undefined) {
+                  copy ??= { ...r };
+                  copy[k] = v;
+                }
+              }
+              return copy ?? r;
             });
         if (agentType === 'openclaw') {
           recordsForConversion = prepareOpenClawCollectionRecords(recordsForConversion);

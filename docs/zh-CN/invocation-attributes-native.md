@@ -24,7 +24,7 @@
 | OpenCode 1.14.29 serve / V1 插件 | 调用方提供原生 `messageID`，响应的 `info.parentID` 回显该 ID | `opencode-log`、`opencode`、message | **新增** V1 插件→Input 的 user-message ID 保留 |
 | MiMo Code 0.1.17 serve | 调用方提供原生 `messageID`，响应回显同一个 `info.parentID` | `mimo-code-log`、`mimo-code`、message | **新增** native user-message ID 保留，防止 idle 后的旧消息重放重复贴值 |
 
-Qoder、Codex 和 OpenClaw 的完整参数见[原有接入步骤](./invocation-attributes.md#长驻宿主接入)。以下专门列出新验证的调用法。
+Qoder 的完整登记示例见[快速接入](./invocation-attributes.md#长驻宿主接入)。OpenClaw 以 `sessionId` 和本次 RPC 的 `idempotencyKey`（对应原生 run ID）组成 turn 选择器，先登记，再发正常 `agent` RPC。Codex 先 `put`，收到 `turn/start` 的响应后 `bind`：`sessionId=thread.id`，`turnId=thread.id + ":" + turn.id`；向已有 turn 执行 steer 不产生新回合。
 
 ## Claude Code / Qwen Code CLI：每次新建一个进程
 
@@ -35,12 +35,12 @@ LOONGSUITE_PILOT_INVOCATION_ID=<本次子进程的唯一 ID，例如随机 UUID>
 LOONGSUITE_PILOT_SPAN_ATTRIBUTES=memory.user_id=tenant:A,audit.request_id=request-123
 ```
 
-然后按正常方式调用 `claude -p …` 或 `qwen -p …`，可用各自的 `--resume` 继续已有会话。下一轮换用户时传新 ID 和新值；空轮也传新 ID，属性值留空。不要给同一常驻 CLI 进程重复发送 input 来逐轮切换 env。
+然后按正常方式调用 `claude -p …` 或 `qwen …`，可用各自的 `--resume` 继续已有会话。下一轮换用户时传新 ID 和新值；空轮也传新 ID，属性值留空。不要给同一常驻 CLI 进程重复发送 input 来逐轮切换 env。
 
 - Claude Code **2.1.330**、Qwen Code **0.28.4** 的原生 `UserPromptSubmit.prompt_id` 与 transcript 的 `user.promptId` 能对上。Qwen 的登记只接受真正含 `submitted_prompt` 的提交，不在工具续跑时登记。
 - 安装本版本提供的 `UserPromptSubmit`、`Stop` Hook（Claude 保留 `StopFailure`）。快照保存在 Pilot dataDir；应用/Pilot 重启后继续使用同一个 dataDir。普通桌面固定标签和不显式设置 `LOONGSUITE_PILOT_INVOCATION_ID` 的既有用法不变。
 - 如果宿主没有稳定 ID、漏掉开始 Hook、ID 冲突或快照已过期，普通遥测仍继续，未绑定的轮次不附个人归属。不要把 `--resume` 的 session ID、prompt 文本或 Stop 进程 env 当作旧回合的属性。
-- 同一个采集源的业务前缀只选一种入口；使用此 Hook 快照时不要再给该输入配置相同命名空间的 `invocationAttributes.sources`，也不要全局注入这个每次变化的字段。配置 `otlpTrace.spanAttributePassthroughPrefixes` 如 `["memory.", "audit."]`。
+- 同一个采集源的业务前缀只选一种入口；使用此 Hook 快照时不要再给该输入配置相同命名空间的 `invocationAttributes.sources`，也不要全局注入这个每次变化的字段。已校验的本轮属性不需要配置 Span 前缀。
 
 例如多个用户共用聊天房间和 Agent 会话：网关从已认证的当前消息取得用户，**不同发送者拆成不同执行轮**；A 的原生 prompt 查 A 的快照，B 的查 B 的。会话 ID 不按用户重写。属性只描述本轮发起人，不会将群聊历史隔离成个人记忆。
 
@@ -82,7 +82,19 @@ const { response, attributeStatus } = await withOpenCodeInvocation({
 
 ### Hermes：Python SDK + 原生 hook
 
-参考 [Hermes 示例与初始化](./invocation-attributes.md#hermes在调用代码里怎么设置)。给每次 `run_conversation` 使用自己的任务 ID，把 scope 设在执行该调用的 worker 内。示例插件在 `pre_llm_call` 通过 session、task 双重核对并登记真实 turn；Hook 返回 `None`，不会把值注入模型。
+将 [示例插件](../examples/hermes-invocation-attributes) 放入 `$HERMES_HOME/plugins/hermes-invocation-attributes`，追加到 Hermes 配置的 `plugins.enabled`；同时保留 Pilot 的采集插件。在服务启动时把 `PILOT_INVOCATION_ATTRIBUTE_CLI` 指向本候选的 `dist/invocation-attributes.js`，用 `PILOT_INVOCATION_NODE` 指定 Pilot 的 Node 路径。示例默认使用 `agent-gateway` scope，可用 `PILOT_INVOCATION_SCOPE` 调整。若配置了专用登记根，调用端的 `LOONGSUITE_PILOT_ATTRIBUTION_ROOT` 要与 Collector 相同。
+
+```python
+from uuid import uuid4
+from hermes_plugins.hermes_invocation_attributes import request_attributes
+
+task_id = str(uuid4())
+with request_attributes(session_id=agent.session_id, task_id=task_id,
+                        attributes={"memory.user_id": "tenant:A"}):
+    result = agent.run_conversation(prompt, task_id=task_id)
+```
+
+在实际运行 `run_conversation` 的 worker 内打开这个作用域。多个请求若使用线程池，不要指望父线程的 ContextVar 自动跨线程传播，也不要并发复用有可变会话状态的同一个 Agent 实例。这个示例只用 `task_id` 确认 Hook 归属；绑定的仍是真正的原生 session/turn。Hook 返回 `None`，不会把业务属性写进模型 prompt。这里是接入示例，不是 Hermes 或 Pilot 内置的通用请求参数。
 
 补充实测：同一 Hermes 0.16.0 Python 宿主内，两个 session 的同文 A/B 并发，再在 A session 发空属性与换值轮。原生模型是 Model Studio `qwen-plus`，请求正文中没有任何测试属性；本地事件、OTLP 和 CMS 的属性一致。
 
@@ -153,3 +165,22 @@ Grok CLI 1.0.92 的真实无头调用返回本次 `requestId`，和同一 sessio
 | Wukong | 已检查 CLI，桌面服务未运行且无可用登录态 | 尚未拿到真实业务调用和原生请求身份 |
 
 参见[源码及初始夹具矩阵](./invocation-attributes-poc-matrix.md)。不因 Collector 能回放便宣称外部接入可用。
+
+## 登记配置与适配器契约
+
+- `sources` 的键是 Pilot Input ID，不是客户 ID，也不一定与事件的 `gen_ai.agent.type` 相同。一个 source 只选一种选择器，默认用 `turn`。
+- `scope` 是部署/隔离域，由可信调用侧和 Pilot 约定；默认 `default`。它与事件的 Agent 变体、选择器共同组成登记键。不能用业务用户 ID、Prompt 或 Trace ID 代替原生选择器。
+- 设置 `attributePrefixes` 后，这些命名空间只认精确登记；找不到匹配或显式登记 `{}` 时，不继承旧的事件级属性。省略该选项则只填未占用字段。不要把同一个前缀同时配置成全局 Span 属性，否则全局补齐规则仍可能给 Span 填值。
+- `waitMs` 默认 0，上限 5000。晚返回 ID 时可给首次遥测处理留短暂的绑定窗口；不会让模型/Agent 等待，但同一采集批次可能稍晚导出。无有效绑定时原遥测继续，超时封存的回合不补贴、不重传。
+- 存储是本机 SQLite，需要支持 `node:sqlite` 的 Pilot Node 运行时。默认路径为 `<dataDir>/state/invocation-attributes`，可用 `LOONGSUITE_PILOT_ATTRIBUTION_ROOT` 或显式 `root`；Unix 下目录/文件只能由部署身份访问。未提供跨主机注册服务。
+
+JS 调用方也可以从构建产物 `dist/invocation-attributes-api.js` 导入 `InvocationAttributeStore`，使用相同的 `register/put/bind`。相同内容重试幂等，不同内容或将不同调用绑定到同一原生身份会报冲突。登记须在原生回合首批输出前有效；默认 TTL 48 小时，最长 7 天，过期登记和已决结果按有限恢复窗口保留。已知会话占位值及回退用的 `turnId == sessionId` 不视作独立回合。
+
+如果原生运行时明确在每次调用携带属性，而不是让 Collector 旁路关联，可复用 `assets/hooks/shared/invocation-attributes.mjs`：
+
+1. 在真实原生调用开始时取得专属元数据，或者用可复核的原生消息 UUID 读取事先登记的快照。不能按 prompt、会话最近一轮、到达顺序或全局 env 匹配。
+2. 在生命周期内为同一次调用保存独立快照。Node producer 可用 `parseInvocationAttributes()` 校验。在受控 producer → Input 的内部记录里使用 `INVOCATION_ATTRIBUTES_FIELD`（`pilot.invocation.attributes`）。
+3. Canonical Input 显式设置 `preserveInvocationAttributes: true`，或取出载体、走现有原生归一化后调用 `projectInvocationAttributes(entry, snapshot)`。不要把整个载体、源请求或未经选择的 metadata 输出。投影不会覆盖已存在的原生字段。
+4. 采用字符串、有限 number（整数不超过安全整数范围）、boolean；最多 32 项、16 KiB JSON，键最长 128 ASCII 字符，字符串最长 512 UTF-16 单元。非法/超限组不部分投影，`{}` 是明确没有本轮属性。保留、结构及常见敏感字段名不能用作自定义键。值使用业务选定的非敏感 ID，键名校验不代替应用权限或值脱敏。
+
+这是生产者与 Collector 的公共契约，不是给所有原生 Agent 增加了新 RPC 参数。SDK、Hook 或 App 仍须有真实可观察的本次执行边界。可独立于上游 Trace 串联使用；本能力不创建、提取或改写父上下文。

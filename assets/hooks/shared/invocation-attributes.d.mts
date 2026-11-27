@@ -4,6 +4,7 @@ export function isInvocationAttributeKey(key: unknown): key is string;
 export function nativeInvocationMessageId(record: Record<string, unknown>): unknown;
 export function copyNativeInvocationMessageId(record: Record<string, unknown>, entry: Record<string, unknown>): void;
 export function projectedInvocationAttributeKeys(entry: Record<string, unknown>): string[];
+export function restoreProjectedInvocationAttributeKeys(entry: Record<string, unknown>, keys: unknown): void;
 export type InvocationAttributes = Record<string, string | number | boolean>;
 export function parseInvocationAttributes(input: unknown): InvocationAttributes;
 export function projectInvocationAttributes(entry: Record<string, unknown>, input: unknown): void;

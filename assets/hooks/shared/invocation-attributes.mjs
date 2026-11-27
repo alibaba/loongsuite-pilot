@@ -27,6 +27,20 @@ export function projectedInvocationAttributeKeys(entry) {
   return entry[PROJECTED_INVOCATION_KEYS] ?? [];
 }
 
+/** Reattach provenance only from Pilot's private journal, never from an Input
+ * record. Values have already been admitted and may have since been masked. */
+export function restoreProjectedInvocationAttributeKeys(entry, keys) {
+  if (!Array.isArray(keys)) return;
+  const restored = new Set();
+  for (const key of keys) {
+    if (!isInvocationAttributeKey(key) || !Object.hasOwn(entry, key)) continue;
+    const value = entry[key];
+    if (typeof value === 'string' || typeof value === 'boolean'
+      || (typeof value === 'number' && Number.isFinite(value))) restored.add(key);
+  }
+  if (restored.size) entry[PROJECTED_INVOCATION_KEYS] = [...restored];
+}
+
 /** Strict policy for a single, already-associated native invocation. An empty
  * object is a valid snapshot. Invalid inputs never become partial attribution. */
 export function parseInvocationAttributes(input) {

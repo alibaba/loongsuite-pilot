@@ -6,10 +6,29 @@ import * as path from 'node:path';
 import type { AgentActivityEntry } from '../types/index.js';
 import { createLogger } from '../utils/logger.js';
 import { resolveAgentSystem } from '../normalization/agent-system-map.js';
+import {
+  projectedInvocationAttributeKeys, restoreProjectedInvocationAttributeKeys,
+} from '../../assets/hooks/shared/invocation-attributes.mjs';
 
 const MAX_ACKNOWLEDGED_TURNS = 10_000;
 export const CODEX_PENDING_MAX_BYTES = 512 * 1024 * 1024;
 const logger = createLogger('CodexTurnJournal');
+const INVOCATION_KEYS_MARKER = 'pilot-invocation-keys-v1';
+
+function journalLineDigest(line: string): string {
+  return createHash('sha256').update(line).digest('hex');
+}
+
+function serializeJournalEntry(entry: AgentActivityEntry): string {
+  const line = JSON.stringify(entry);
+  const keys = projectedInvocationAttributeKeys(entry);
+  // Older readers skip this non-event line but can still read the entry.
+  // A digest binds the metadata to exactly the following complete line,
+  // even if a crash left an orphan marker before an incomplete append.
+  return keys.length === 0 ? line
+    : JSON.stringify([INVOCATION_KEYS_MARKER, journalLineDigest(line), keys]) + '\n' + line;
+}
+
 function pendingBudget(): number {
   const raw = process.env.LOONGSUITE_CODEX_PENDING_MAX_BYTES;
   if (raw === undefined) return CODEX_PENDING_MAX_BYTES;
@@ -109,7 +128,7 @@ export class CodexTurnJournal {
       // group's payload; a large recovery batch can contain many turns.
       let addedBytes = 0;
       for (const group of groups.values()) {
-        for (const entry of group) addedBytes += Buffer.byteLength(JSON.stringify(entry)) + 1;
+        for (const entry of group) addedBytes += Buffer.byteLength(serializeJournalEntry(entry)) + 1;
       }
       const usage = await this.pendingUsage();
       if (usage.bytes + addedBytes > this.maxPendingBytes) {
@@ -133,7 +152,7 @@ export class CodexTurnJournal {
           this.initialized.add(key);
         }
         try {
-          const data = group.map(entry => JSON.stringify(entry)).join('\n') + '\n';
+          const data = group.map(serializeJournalEntry).join('\n') + '\n';
           await fs.appendFile(file, data, { mode: 0o600 });
           usage.bytes += Buffer.byteLength(data);
           await fs.chmod(file, 0o600);
@@ -182,12 +201,23 @@ export class CodexTurnJournal {
       const seen = new Set<string>();
       let batch: AgentActivityEntry[] = [];
       let bytes = 0;
+      let invocationKeys: { digest: string; keys: unknown[] } | undefined;
       try {
         for await (const line of lines) {
+          const marker = invocationKeys;
+          invocationKeys = undefined;
           let entry: unknown;
           try { entry = JSON.parse(line); } catch { continue; }
+          if (Array.isArray(entry) && entry.length === 3 && entry[0] === INVOCATION_KEYS_MARKER
+            && typeof entry[1] === 'string' && /^[a-f0-9]{64}$/.test(entry[1]) && Array.isArray(entry[2])) {
+            invocationKeys = { digest: entry[1], keys: entry[2] };
+            continue;
+          }
           if (!this.accepts(entry) || codexTurnJournalGroupKey(entry) !== match[1]
             || seen.has(entry['event.id'])) continue;
+          if (marker && journalLineDigest(line) === marker.digest) {
+            restoreProjectedInvocationAttributeKeys(entry, marker.keys);
+          }
           seen.add(entry['event.id']);
           const size = Buffer.byteLength(line);
           if (batch.length && bytes + size > 1024 * 1024) {

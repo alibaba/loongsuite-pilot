@@ -84,7 +84,7 @@ export interface OtlpTraceRawConfig {
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
-  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  /** Legacy event-field prefixes to pass through. Validated invocation attributes do not need this. */
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
@@ -297,7 +297,7 @@ export interface OtlpTraceFlusherConfig {
   debug?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
-  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  /** Legacy event-field prefixes to pass through. Validated invocation attributes do not need this. */
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   dataDir?: string;
