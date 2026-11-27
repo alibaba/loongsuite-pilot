@@ -1,24 +1,89 @@
 # 给一次 Agent 调用加自定义 Span 属性
 
-比如，A 和 B 共用一个 Agent 会话：A 发起的回合写 `memory.user_id=user-a`，B 发起的回合写 `memory.user_id=user-b`。会话 ID 不变，属性跟着每轮调用走。
+**业务属性（如 `memory.user_id`）写给 Pilot，不用加到 Agent 请求的 `meta` 里。** Agent 请求照常发，Pilot 从 Hook、插件或 transcript 读到同一个原生调用 ID，再把这一轮的属性加到 Span。不用修改 prompt 或配置 Span 前缀。A、B 共用一个会话也可以各带自己的值。
 
-Pilot 只需要把属性和**本次原生调用**对上。通过校验的按次属性会直接进入 Span，**不用再配 `otlpTrace.spanAttributePassthroughPrefixes`**。这个过程不会改 prompt，也不依赖 `TRACEPARENT`。
+安装支持按次属性的 Pilot，启用对应 Agent 的采集和 [Trace 输出](./trace-output.md)。
 
-## 准备 Pilot
+## 长驻宿主接入
 
-安装支持按次属性的 Pilot 版本，部署对应 Agent 的 Hook 或插件，并按 [Trace 输出](./trace-output.md) 配好上报。使用自定义 Pilot 数据目录时，调用方、Hook 和采集器使用同一个本地目录。应用从自己的业务上下文获取用户 ID 或请求 ID，不直接采用用户可随意填写的身份。
+在 Pilot 配置里只保留你实际使用的采集源。Codex 的 `waitMs` 给回执后的绑定留时间，不让 Agent 等待。
 
-| 你怎么调用 Agent | 你需要做什么 |
-| --- | --- |
-| 每次新起 Claude Code / Qwen Code CLI | 启动时给本次子进程设置两项 env，可以继续同一个会话 |
-| Qoder SDK / OpenClaw，发送前已知原生 ID | 用本次 UUID 或 session/run ID 登记，再发送请求 |
-| Codex / Copilot / DeepSeek Harness / Hermes，调用中才知道原生 ID | 先登记属性，从本次受理回执或生命周期回调拿到原生 ID 后绑定 |
+```json
+{
+  "invocationAttributes": {
+    "sources": {
+      "openclaw-plugin-log": { "selector": "turn" },
+      "qoder-trace": { "selector": "message" },
+      "codex-transcript": { "selector": "turn", "waitMs": 1500 }
+    }
+  }
+}
+```
 
-仅在桌面里手工发消息、调用方拿不到原生回合 ID 的，不适用这套按次绑定。其他框架和具体版本见 [各框架接入示例](./invocation-attributes-native.md)。
+在调用端初始化一次登记接口。使用 Pilot 的 Node 运行时，并与采集器使用同一个本地数据目录（自定义目录时设置 `LOONGSUITE_PILOT_DATA_DIR`）。下方片段择一使用，复用已有的 Agent 客户端和会话。属性取自本次请求的可信业务上下文。
 
-## 每轮启动一个 CLI 进程
+```js
+import { randomUUID } from "node:crypto";
+import { InvocationAttributeStore } from "/path/to/pilot/dist/invocation-attributes-api.js";
 
-启动器为**每次**进程创建新的调用 ID 和 env。示例用 Claude Code；Qwen Code CLI 可将最后一行换为 `qwen "请回复 OK"`。
+const store = new InvocationAttributeStore();
+// 以下是本次调用的值；下一次调用可以不同。
+const attributes = { "memory.user_id": "user-a", "memory.request_id": "req-42" };
+```
+
+### OpenClaw：`agent` RPC
+
+以已验证的 2026.6.5 为例：先把属性登记到 **原生 `sessionId` + 本次 `runId`**，再把同一个 `runId` 作为 `idempotencyKey` 发给 Gateway。不要用 `sessionKey` 代替 `sessionId`。
+
+```js
+const runId = randomUUID();
+store.register({
+  agent: "openclaw", invocationId: runId, attributes,
+  selector: { kind: "turn", sessionId, turnId: runId },
+});
+await gateway.request("agent", {
+  sessionId, sessionKey, idempotencyKey: runId, message: prompt,
+});
+```
+
+### Qoder CLI：通过 Qoder SDK 发送
+
+先用新 UUID 登记，再把同一个值写到 **SDK 用户消息的 `uuid`**。其余 SDK 选项和流处理不变。
+
+```js
+const uuid = randomUUID();
+store.register({
+  agent: "qoder-cli", invocationId: uuid, attributes,
+  selector: { kind: "message", messageId: uuid },
+});
+async function* input() {
+  yield { type: "user", uuid, parent_tool_use_id: null,
+          message: { role: "user", content: prompt } };
+}
+const stream = query({ prompt: input(), options });
+```
+
+### Codex：App Server
+
+先保存属性；收到 **`turn/start` 回执里的 `turn.id`** 就绑定，不等整轮结束。这里的 `threadId` 来自 `thread/start` 或已有线程。
+
+```js
+const invocationId = randomUUID();
+store.put({ agent: "codex", invocationId, attributes });
+const { turn } = await rpc("turn/start", {
+  threadId, input: [{ type: "text", text: prompt }],
+});
+store.bind({
+  agent: "codex", invocationId,
+  selector: { kind: "turn", sessionId: threadId, turnId: `${threadId}:${turn.id}` },
+});
+```
+
+**其他语言**可将同样的参数以 JSON 传给 `"$PILOT_NODE" "$PILOT_INSTALL_DIR/dist/invocation-attributes.js" register < registration.json`；`put`、`bind` 同理。如果只用于观测，登记失败时记录诊断，仍按原流程调用 Agent。
+
+## Claude Code / Qwen Code CLI：每次启动一个子进程
+
+安装本版本的 `UserPromptSubmit` 和 `Stop` Hook。启动时给**这一个子进程**设置本次 ID 和属性，续聊仍可用 `--resume`，不要改常驻进程的 env。
 
 ```bash
 LOONGSUITE_PILOT_INVOCATION_ID="$(uuidgen)" \
@@ -26,42 +91,8 @@ LOONGSUITE_PILOT_SPAN_ATTRIBUTES='memory.user_id=user-a,memory.request_id=req-42
   claude -p "请回复 OK"
 ```
 
-需要续聊时照常传 `--resume`。即使下一轮没有业务属性，也要传新的调用 ID，属性变量留空。不要改常驻服务的全局 env。
+Qwen Code CLI 把最后一行换为 `qwen "请回复 OK"`。下一轮使用新 ID；没属性时留空。长驻调用也可用 `attributes: {}` 明确不附属性。
 
-## 长驻宿主接入
+**怎么确认：** 在同一个会话发两次相同的消息，分别登记 `user-a` 和 `user-b`，检查两轮 Span 的 `memory.user_id`。不要把逐轮变化的键也设成全局属性。普通桌面 UI 没有可用的回合 ID 入口时，继续使用已有的固定属性配置。
 
-先在采集器配置里启用实际使用的 Input。下面是 Qoder SDK 的配置；已有 Trace 输出设置不需要改。
-
-```json
-{
-  "invocationAttributes": {
-    "sources": {
-      "qoder-trace": { "selector": "message" }
-    }
-  }
-}
-```
-
-用 Pilot 自带的 Node 和安装目录中的登记工具。若部署时自定义了数据目录，运行登记工具时把 `LOONGSUITE_PILOT_DATA_DIR` 指向同一个目录。下面的 UUID 由调用方为本次用户消息预先生成：
-
-```bash
-"$PILOT_NODE" "$PILOT_INSTALL_DIR/dist/invocation-attributes.js" register <<'JSON'
-{
-  "agent": "qoder-cli",
-  "invocationId": "req-42",
-  "selector": {
-    "kind": "message",
-    "messageId": "2dbdb620-69d9-44d5-832b-6c4e329f7444"
-  },
-  "attributes": { "memory.user_id": "user-a", "memory.attempt": 1 }
-}
-JSON
-```
-
-接着把**同一个 UUID** 设为 Qoder SDK 用户消息的 `uuid` 并发出。不用把 `attributes` 塞进 Agent 请求。如果是先调用再拿到原生 ID 的入口，改用 `put` 保存属性、`bind` 关联该次回合；对应 Input、选择器和示例见 [各框架接入示例](./invocation-attributes-native.md)。
-
-## 验证结果
-
-在同一个会话发两次相同的消息，分别带 `user-a` 和 `user-b`。打开两条 Trace，核对各自 Span 的 `memory.user_id`；不登记属性的回合不应继承上一轮的值。不要把逐轮变化的键同时设置成全局属性。
-
-可以直接新增业务键，无需逐键配置。保留键、敏感键、字段类型和大小限制仍然生效。旧版平铺事件字段的前缀配置保持兼容，不是上述按次接入的必选项。
+版本、其他入口和示例见 [各框架接入](./invocation-attributes-native.md)；字段限制见 [登记契约](./invocation-attributes-poc-matrix.md#登记配置与适配器契约)。
