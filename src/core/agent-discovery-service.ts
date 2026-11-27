@@ -68,9 +68,6 @@ export class AgentDiscoveryService extends EventEmitter {
 
   async start(): Promise<void> {
     this.stopping = false;
-    for (const [id, rt] of this.runtimes) {
-      this.setupWatcher(rt);
-    }
     await this.refresh('startup');
     if (this.stopping) return;
 
@@ -125,13 +122,26 @@ export class AgentDiscoveryService extends EventEmitter {
   }
 
   private async processEntryOnce(rt: EntryRuntime): Promise<void> {
-    this.retireWatcherIfStale(rt);
-    this.detachIfEarlierPathExists(rt);
-    if (!rt.watcher) this.setupWatcher(rt);
     const { entry } = rt;
     try {
       const enabled = entry.enabled ? entry.enabled() : true;
-      const available = enabled ? await entry.isAvailable() : false;
+      // A disabled agent must not stat, watch, or probe its paths. Those calls
+      // are CreateFile on Windows and show up as reads of the agent.
+      if (!enabled) {
+        this.closeWatcher(rt);
+        this.clearPollTimer(rt);
+        if (this.stopping) return;
+        if (rt.state === 'running' || rt.state === 'starting') {
+          await this.stopEntry(rt, 'disabled');
+        } else if (rt.state === 'idle') {
+          logger.debug('agent skipped', { id: entry.id, enabled: false });
+        }
+        return;
+      }
+      this.retireWatcherIfStale(rt);
+      this.detachIfEarlierPathExists(rt);
+      if (!rt.watcher) this.setupWatcher(rt);
+      const available = await entry.isAvailable();
       if (this.stopping) return;
       const shouldRun = enabled && available;
 
@@ -152,22 +162,17 @@ export class AgentDiscoveryService extends EventEmitter {
         rt.state = 'running';
         this.emit('agent:started', entry.id);
       } else if (!shouldRun && (rt.state === 'running' || rt.state === 'starting')) {
-        if (!enabled) {
+        rt.consecutiveUnavailable++;
+        const threshold = entry.unavailableThreshold ?? 1;
+        if (rt.consecutiveUnavailable >= threshold) {
           rt.consecutiveUnavailable = 0;
-          await this.stopEntry(rt, 'disabled');
+          await this.stopEntry(rt, 'unavailable');
         } else {
-          rt.consecutiveUnavailable++;
-          const threshold = entry.unavailableThreshold ?? 1;
-          if (rt.consecutiveUnavailable >= threshold) {
-            rt.consecutiveUnavailable = 0;
-            await this.stopEntry(rt, 'unavailable');
-          } else {
-            logger.debug('agent unavailable, debouncing', {
-              id: entry.id,
-              consecutiveUnavailable: rt.consecutiveUnavailable,
-              threshold,
-            });
-          }
+          logger.debug('agent unavailable, debouncing', {
+            id: entry.id,
+            consecutiveUnavailable: rt.consecutiveUnavailable,
+            threshold,
+          });
         }
       } else if (shouldRun && rt.state === 'running' && entry.runOnActive) {
         rt.consecutiveUnavailable = 0;
