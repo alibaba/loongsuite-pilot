@@ -6,6 +6,7 @@
 - 查询图表使用 `search.chartQueries` 数组
 - 每个 query 至少包含 `name` 和 `datasource`
 - 除 `builtin` 外，通常还需要 `project`, `logstore`, `query`, `tokenQuery`
+- `agentloop-dataset` 不写 `logstore`，改为 `agentSpaceName`、`datasetName`、`regionId`
 
 ## 通用字段
 
@@ -13,12 +14,15 @@
 interface ChartQuery {
   name: string           // 必填，查询标识，如 "A", "B"
   datasource: string     // 必填，数据源类型
-  project: string        // 非 builtin 时必填
-  logstore: string       // 非 builtin 时必填
+  project: string        // 非 builtin 时必填。agentloop-dataset 填 AgentSpace 的 SLS Project
+  logstore: string       // logstore / metricstore / metricsql 时必填。agentloop-dataset 不写
   query: string          // 非 builtin 时必填
   tokenQuery: string     // 非 builtin 时必填，无变量替换时与 query 相同
   displayName?: string
-  region?: string
+  region?: string        // SLS 数据源地域
+  agentSpaceName?: string
+  datasetName?: string
+  regionId?: string      // agentloop-dataset 的地域字段名，不用 region
   legendFormat?: string
   limit?: number         // metricstore 查询数量限制
   interval?: string      // metricstore 查询间隔
@@ -172,9 +176,33 @@ storeview 不是独立的 datasource 值，而是在原始 datasource 基础上�
 }
 ```
 
+## 6. agentloop-dataset
+
+AgentLoop Dataset。查询上不写 `logstore`。`project` 填该 AgentSpace 的 SLS Project。地域字段名是 `regionId`。
+
+```json
+{
+  "name": "A",
+  "datasource": "agentloop-dataset",
+  "agentSpaceName": "my-agent-space",
+  "datasetName": "my_dataset",
+  "regionId": "cn-hangzhou",
+  "project": "my-project",
+  "query": "* | SELECT __time__ AS t, category, count(*) AS cnt FROM \"my_dataset\" GROUP BY t, category ORDER BY t LIMIT 100",
+  "tokenQuery": "* | SELECT __time__ AS t, category, count(*) AS cnt FROM \"my_dataset\" GROUP BY t, category ORDER BY t LIMIT 100"
+}
+```
+
+外层 `search.query` 与 `search.logstore` 保持 `@`，`dataSourceType` 为 `current`。无变量时 `query` 与 `tokenQuery` 相同。时间留在 `search.start` / `search.end`。`__time__` 是 Unix 秒；分桶用 `__time__` 或整数除法。
+
+字段和语句按 [Dataset](../../agentloop-audit-query/references/sql-writing.md#dataset)。
+
+图表类型、`display` 和 `queryOptionMap` 复用 [图表模板](chart-templates.md)：表格 `tablepro`，单序列折线 `linepro`，分组折线 `aggpro`。`display.version` 用模板里的 `"2"`。
+
 ## 实践建议
 
 - 用户没给真实数据源 → 用 `builtin`
+- 用户给了 AgentSpace 和 Dataset → 用 `agentloop-dataset`，查询不写 `logstore`
 - 用户给了 project / logstore / query → 用 `logstore`
 - 用户给了 PromQL → 判断用 `metricstore` 还是 `metricsql`
 - 用户给了 PromQL 且只是直接展示趋势 → 默认 `metricstore`

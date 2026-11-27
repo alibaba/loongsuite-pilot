@@ -1,6 +1,6 @@
 ---
 name: agentloop-audit-query
-description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体数据；按用户需求返回实际结果、验证 SQL 或 CLI/SDK 接入材料。仪表盘制作使用 agentloop-audit-dashboard。
+description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体数据，或按 AgentSpace 与 Dataset 执行 execute-query；按用户需求返回实际结果、验证 SQL 或 CLI/SDK 接入材料。仪表盘制作使用 agentloop-audit-dashboard。
 ---
 
 # AgentLoop 审计查询
@@ -16,13 +16,15 @@ description: 查询 AgentLoop 行为、Token、风险、意图、拦截和实体
 3. 适配目标表与索引并执行验证。新写或修改的 SQL 超过一天时，先在目标范围内窄窗验证，再查询完整范围；比较窗口需要额外历史范围时先说明。
 4. 检查完成状态，交付结果或 SQL，说明范围、口径及验证状态。无法执行时标明未执行；敏感内容只展示必要的脱敏摘要。需保存 SQL、结果或接入包时，默认放当前项目的 `output/audit/reports/`，用户指定目录时按其要求。
 
+用户给出 AgentSpace 和 Dataset 时，不走上面的目录和 schema，按 [执行说明](references/execution.md) 的 Dataset 查询。
+
 ## 参考资料
 
 | 资料 | 用途 |
 |---|---|
 | [查询目录](references/catalog.md) | 八类核心面板与参考 SQL 索引 |
 | [schema](references/schema.md) | 数据模型、统计口径、公共构件与组织、账单外表关联 |
-| [SQL 写作技巧](references/sql-writing.md) | JSON、关联、时间窗口、分页与汇总的 SLS 注意事项 |
+| [SQL 写作技巧](references/sql-writing.md) | SLS 的 JSON、关联、时间窗口、分页与汇总，以及 Dataset 语句 |
 | [执行说明](references/execution.md) | Skill 脚本、环境绑定与错误处理 |
 | [接入交付](references/delivery.md) | SQL / CLI / SDK 参数与结果契约 |
 

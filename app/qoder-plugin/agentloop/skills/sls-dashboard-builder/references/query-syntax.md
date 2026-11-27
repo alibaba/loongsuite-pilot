@@ -14,6 +14,7 @@ SLS 搜索、SQL、SPL 与 PromQL 的查询字符串写法。
 | PromQL 时序查询 | `metricstore` | PromQL 表达式 |
 | SQL 嵌套 PromQL | `metricsql` | `* \| SELECT promql_query_range(..., '60s') FROM metrics` |
 | MetricStore SQL 直查 | `metricsql` | `* \| SELECT ... FROM "{store}.prom"` |
+| AgentLoop Dataset | `agentloop-dataset` | 单 Dataset `SELECT`、`* \| SELECT` 或只读 SearchExpr，见 [Dataset 语句](../../agentloop-audit-query/references/sql-writing.md#dataset) |
 
 经验规则：
 - `metricstore + PromQL` 在 SLS dashboard 里经常直接返回 `time / value / labels / metric` 序列，这类结果默认更适合 `linepro`

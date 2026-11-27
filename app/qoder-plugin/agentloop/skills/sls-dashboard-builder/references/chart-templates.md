@@ -906,5 +906,6 @@ interface LegendOption {
 - 做多序列指标趋势时，优先 `linepro`；仅在用户明确要求时使用 `metricspro`
 - 做日志趋势时，优先 `linepro`
 - 做日志样本 / TopN / 明细表时，优先 `tablepro + scan SQL`
+- Dataset 只替换 `chartQueries` 为 [agentloop-dataset](datasources.md)，`display` 与 `queryOptionMap` 仍用对应图表模板
 - 做过滤器时，优先 `droplistpro`
 - 做大盘分段时，优先 `dashboardrow`

@@ -562,6 +562,212 @@ function Invoke-AliyunApi { throw 'No real cloud calls' }
                         self.assertEqual(state, before_state)
                         self.assertEqual(path.read_bytes(), before)
 
+    def test_dataset_audit_query_uses_execute_query_without_rebinding_logstore(self):
+        sql = '* | SELECT model AS "模型" FROM "demo_dataset" LIMIT 1'
+        payload = {
+            "requestId": "req-dataset",
+            "meta": {"progress": "Complete", "count": 1},
+            "columns": ["模型"],
+            "columnTypes": ["text"],
+            "rows": [["demo-model"]],
+        }
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with self.subTest(layout=label), import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                with self.synthetic_profile_state(module) as (path, state):
+                    before = deepcopy(state)
+                    history = []
+                    calls = []
+
+                    def fake_cli(profile, region, argv):
+                        calls.append((profile, region, argv))
+                        if argv[:2] == ["agentloop", "get-dataset"]:
+                            return {
+                                "agentSpace": "demo-space",
+                                "datasetName": "demo_dataset",
+                                "regionId": "cn-test",
+                                "schema": {"model": {"type": "text"}},
+                            }, ""
+                        return deepcopy(payload), ""
+
+                    stdout = io.StringIO()
+                    with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                            mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                            mock.patch.object(module, "get_logs", side_effect=AssertionError("No GetLogs")), \
+                            mock.patch.object(module, "get_space", side_effect=AssertionError("No AgentSpace binding")), \
+                            mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                            mock.patch.object(module, "append_history", side_effect=history.append), \
+                            contextlib.redirect_stdout(stdout):
+                        module.run([
+                            "--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset",
+                            "--from", "100", "--to", "200", "--line", "20", "--offset", "5", "--query", sql,
+                        ])
+                    self.assertEqual(state, before)
+                    self.assertEqual(len(calls), 2)
+                    self.assertEqual(calls[0][2][:2], ["agentloop", "get-dataset"])
+                    profile, region, argv = calls[1]
+                    self.assertEqual((profile, region), ("alpha", "cn-test"))
+                    self.assertEqual(argv[argv.index("--agent-space") + 1], "demo-space")
+                    self.assertEqual(argv[argv.index("--dataset-name") + 1], "demo_dataset")
+                    self.assertEqual(argv[argv.index("--type") + 1], "SQL")
+                    self.assertEqual(argv[argv.index("--query") + 1], sql)
+                    self.assertEqual(argv[argv.index("--from") + 1], "100")
+                    self.assertEqual(argv[argv.index("--to") + 1], "200")
+                    self.assertEqual(argv[argv.index("--offset") + 1], "5")
+                    self.assertEqual(argv[argv.index("--length") + 1], "20")
+                    self.assertNotIn("GetLogsV2", argv)
+                    self.assertEqual(json.loads(stdout.getvalue()), payload)
+                    self.assertEqual(history[0]["datasetName"], "demo_dataset")
+                    self.assertEqual(history[0]["agentSpace"], "demo-space")
+                    self.assertEqual(history[0]["regionId"], "cn-test")
+                    self.assertEqual(history[0]["slsProject"], "")
+                    self.assertEqual(history[0]["slsLogstore"], "")
+
+    def test_dataset_schema_is_read_before_query_and_without_rebinding(self):
+        schema_doc = {
+            "agentSpace": "demo-space",
+            "datasetName": "demo_dataset",
+            "regionId": "cn-test",
+            "schema": {"model": {"type": "text"}, "total_tokens": {"type": "long"}},
+        }
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with self.subTest(layout=label), import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                with self.synthetic_profile_state(module) as (path, state):
+                    before = deepcopy(state)
+                    calls = []
+
+                    def fake_cli(profile, region, argv):
+                        calls.append(list(argv))
+                        if argv[:2] == ["agentloop", "get-dataset"]:
+                            return deepcopy(schema_doc), ""
+                        raise AssertionError("schema read must not query")
+
+                    stdout = io.StringIO()
+                    with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                            mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                            mock.patch.object(module, "append_history", side_effect=AssertionError("No history")), \
+                            mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                            contextlib.redirect_stdout(stdout):
+                        module.run(["--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset"])
+                    self.assertEqual(state, before)
+                    self.assertEqual(calls, [["agentloop", "get-dataset", "--agent-space", "demo-space", "--dataset-name", "demo_dataset"]])
+                    self.assertEqual(json.loads(stdout.getvalue())["schema"], schema_doc["schema"])
+
+    def test_dataset_query_stops_when_schema_cannot_be_read(self):
+        cases = [
+            (None, "Forbidden. No permission for get-dataset"),
+            ({"datasetName": "demo_dataset"}, ""),
+        ]
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                for data, err in cases:
+                    with self.subTest(layout=label, err=err or "missing"), self.synthetic_profile_state(module) as (path, state):
+                        before = deepcopy(state)
+                        calls = []
+
+                        def fake_cli(profile, region, argv, data=data, err=err):
+                            calls.append(argv[:2])
+                            if argv[:2] == ["agentloop", "get-dataset"]:
+                                return data, err
+                            raise AssertionError("query must not run without schema")
+
+                        stderr = io.StringIO()
+                        with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                                mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                                mock.patch.object(module, "append_history", side_effect=AssertionError("No history")), \
+                                mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                                contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as failure:
+                                module.run([
+                                    "--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset",
+                                    "--query", "SELECT model FROM demo_dataset",
+                                ])
+                        self.assertEqual(failure.exception.code, 1)
+                        self.assertEqual(state, before)
+                        self.assertEqual(calls, [["agentloop", "get-dataset"]])
+                        self.assertIn("schema" if not err else "Forbidden", stderr.getvalue())
+
+    def test_incomplete_dataset_query_does_not_fall_back_to_logstore(self):
+        cases = [
+            (["--dataset", "demo_dataset", "--query", "SELECT 1"], ("agent-space", "region")),
+            (["--agent-space", "demo-space", "--dataset", "demo_dataset", "--query", "SELECT 1"], ("region",)),
+            (["--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset", "--project", "demo-project", "--query", "SELECT 1"], ("project", "logstore")),
+            (["--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset", "--list"], ("list",)),
+        ]
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            with import_script(self.query_scripts(skills) / "query.py", scripts, self.fake_home) as module:
+                for args, expected in cases:
+                    with self.subTest(layout=label, args=args), self.synthetic_profile_state(module) as (path, state):
+                        before = deepcopy(state)
+                        stderr = io.StringIO()
+                        with mock.patch.object(module, "require_profile", return_value="alpha"), \
+                                mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=AssertionError("No execute-query")), \
+                                mock.patch.object(module, "get_logs", side_effect=AssertionError("No GetLogs")), \
+                                mock.patch.object(module, "get_space", side_effect=AssertionError("No AgentSpace binding")), \
+                                mock.patch.object(module, "save_target", side_effect=AssertionError("No target writes")), \
+                                mock.patch.object(module, "append_history", side_effect=AssertionError("No history")), \
+                                contextlib.redirect_stderr(stderr):
+                            with self.assertRaises(SystemExit) as failure:
+                                module.run(args)
+                        self.assertEqual(failure.exception.code, 1)
+                        self.assertEqual(state, before)
+                        for field in expected:
+                            self.assertIn(field, stderr.getvalue().lower())
+
+    @unittest.skipUnless(shutil.which("pwsh"), "PowerShell runtime is not installed")
+    def test_powershell_dataset_audit_query_uses_execute_query(self):
+        sql = '* | SELECT model AS "模型" FROM "demo_dataset" LIMIT 1'
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            record = self.fake_home / ".loongsuite-pilot" / "audit" / "config-record.json"
+            record.parent.mkdir(parents=True, exist_ok=True)
+            record.write_text(json.dumps({"profile": "alpha", **TARGET}), encoding="utf-8")
+            before = record.read_bytes()
+            trace = self.business / (label + "-dataset-argv.txt")
+            with (scripts / "lib" / "config-record.ps1").open("a", encoding="utf-8") as f:
+                f.write("""
+function Require-Profile { return 'alpha' }
+function Save-AuditTarget { throw 'No target writes' }
+function Get-AgentSpace { throw 'No AgentSpace binding' }
+""")
+            with (scripts / "lib" / "aliyun.ps1").open("a", encoding="utf-8") as f:
+                f.write("""
+function Invoke-AliyunApi([string]$Profile, [string]$Region, [string[]]$CliArgs) {
+    if ($Profile -cne 'alpha' -or $Region -cne 'cn-test') { throw 'Wrong dataset scope' }
+    Add-Content -LiteralPath $env:SKILL_LAYOUT_DATASET_TRACE -Value (($CliArgs -join "`n") + "`n---`n") -Encoding UTF8
+    if ($CliArgs[1] -eq 'get-dataset') {
+        $json = '{"agentSpace":"demo-space","datasetName":"demo_dataset","regionId":"cn-test","schema":{"model":{"type":"text"}}}'
+    } else {
+        $json = '{"requestId":"req-dataset","meta":{"progress":"Complete","count":1},"columns":["model"],"columnTypes":["text"],"rows":[["demo-model"]]}'
+    }
+    return @{ Data = ($json | ConvertFrom-Json); Err = ''; Text = $json }
+}
+function Get-PilotLogs { throw 'No GetLogs' }
+""")
+            env = dict(os.environ, USERPROFILE=str(self.fake_home), SKILL_LAYOUT_DATASET_TRACE=str(trace))
+            result = subprocess.run(
+                [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+                 str(self.query_scripts(skills) / "query.ps1"),
+                 "--agent-space", "demo-space", "--region", "cn-test", "--dataset", "demo_dataset",
+                 "--from", "100", "--to", "200", "--line", "20", "--offset", "5", "--query", sql],
+                cwd=self.business, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
+            with self.subTest(layout=label):
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["rows"], [["demo-model"]])
+                self.assertEqual(json.loads(result.stdout)["columns"], ["model"])
+                argv = trace.read_text(encoding="utf-8-sig").splitlines()
+                self.assertEqual(argv[argv.index("--dataset-name") + 1], "demo_dataset")
+                self.assertEqual(argv[argv.index("--query") + 1], sql)
+                self.assertEqual(argv[argv.index("--length") + 1], "20")
+                self.assertNotIn("GetLogsV2", argv)
+                self.assertEqual(record.read_bytes(), before)
+                history = (record.parent / "query-history.jsonl").read_text(encoding="utf-8-sig")
+                self.assertIn('"datasetName":"demo_dataset"', history)
+                self.assertIn('"agentSpace":"demo-space"', history)
+
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell runtime is not installed")
     def test_powershell_list_spaces_does_not_change_existing_target_or_query_logs(self):
         expected = {"spaces": [{"agentSpace": "first", "regionId": "cn-one"},
@@ -691,6 +897,145 @@ function Invoke-AliyunApi { throw 'No real cloud calls' }
                     self.assertIn("dry_run=true", stdout.getvalue())
                     self.assertNotIn("published=true", stdout.getvalue())
                     self.assertIn("action=" + ("create" if missing else "update"), stdout.getvalue())
+
+    def dataset_dashboard(self):
+        sql = '* | SELECT t, model AS "模型", count(*) AS cnt FROM "demo_dataset" GROUP BY t, model'
+        def chart(title, chart_type, option, display_name, y_pos):
+            return {
+                "title": title, "type": chart_type,
+                "display": {"basicOptions": {"displayName": display_name},
+                            "xPos": 0, "yPos": y_pos, "width": 12, "height": 5,
+                            "version": "2", "queryOptionMap": {"A": option}},
+                "search": {"query": "@", "logstore": "@", "start": "-86400s", "end": "now",
+                           "dataSourceType": "current",
+                           "chartQueries": [{
+                               "name": "A", "datasource": "agentloop-dataset",
+                               "agentSpaceName": TARGET["agentSpace"], "datasetName": "demo_dataset",
+                               "regionId": TARGET["regionId"], "project": "",
+                               "query": sql, "tokenQuery": sql,
+                           }]},
+            }
+        path = self.business / "dataset report-dashboard.json"
+        path.write_text(json.dumps({
+            "dashboardName": "dataset-layout-test", "displayName": "Dataset layout",
+            "charts": [
+                chart("dataset-table", "tablepro", {"name": "A", "yAxisKeys": []}, "Dataset 表", 0),
+                chart("dataset-line", "linepro", {"name": "A", "xAxisKey": "t", "yAxisKeys": ["cnt"]}, "Dataset 折线", 5),
+                {"title": "logstore-table", "type": "tablepro",
+                 "display": {"basicOptions": {"displayName": "Logstore 表"},
+                             "xPos": 12, "yPos": 0, "width": 12, "height": 5},
+                 "search": {"chartQueries": [{"name": "B", "datasource": "logstore", "project": "",
+                                              "logstore": "", "query": "* | SELECT 1 AS amount"}]}},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+        return path, sql
+
+    def test_dataset_preview_does_not_inherit_saved_logstore_target(self):
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            renderer = skills / "sls-dashboard-builder" / "scripts" / "render_report.py"
+            with self.subTest(layout=label), import_script(renderer, scripts, self.fake_home) as module:
+                query = {"datasource": "agentloop-dataset", "datasetName": "demo_dataset", "regionId": "cn-test"}
+                with mock.patch.object(module, "load_target", return_value=TARGET), \
+                        mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=AssertionError("No inherited execute-query")):
+                    rows, err = module.query_dataset(query, "SELECT 1", 100, 200, "shared-profile", "")
+                self.assertIsNone(rows)
+                self.assertIn("agentSpaceName", err)
+                old = module.committed_chart_query({
+                    "datasource": "logstore",
+                    "project": "old-project",
+                    "logstore": "old-store",
+                    "query": "* | SELECT 1",
+                }, "new-project", "agent-event")
+                self.assertEqual(old["datasource"], "logstore")
+                self.assertEqual((old["project"], old["logstore"]), ("old-project", "old-store"))
+                dataset_old = module.committed_chart_query({
+                    "datasource": "agentloop-dataset",
+                    "agentSpaceName": "old-space",
+                    "datasetName": "old_dataset",
+                    "regionId": "cn-old",
+                    "project": "",
+                    "logstore": "",
+                    "query": "SELECT 1 FROM old_dataset",
+                }, "new-project", "agent-event")
+                self.assertEqual(dataset_old["agentSpaceName"], "old-space")
+                self.assertEqual(dataset_old["datasetName"], "old_dataset")
+                self.assertEqual(dataset_old["regionId"], "cn-old")
+                self.assertEqual(dataset_old["logstore"], "")
+
+    def test_dataset_preview_uses_execute_query(self):
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            renderer = skills / "sls-dashboard-builder" / "scripts" / "render_report.py"
+            with self.subTest(layout=label), import_script(renderer, scripts, self.fake_home) as module:
+                calls = []
+
+                def fake_cli(profile, region, argv):
+                    calls.append((profile, region, argv))
+                    if argv[:2] == ["agentloop", "execute-query"]:
+                        return {"columns": ["t", "模型", "cnt"], "rows": [["100", "demo-model", "7"]]}, ""
+                    return {"data": [{"amount": "1"}]}, ""
+
+                dashboard, sql = self.dataset_dashboard()
+                with mock.patch.object(module, "require_profile", return_value="shared-profile"), \
+                        mock.patch.object(module, "load_target", return_value=TARGET), \
+                        mock.patch.object(module, "aliyun", side_effect=fake_cli), \
+                        mock.patch.object(sys.modules["util.aliyun"], "aliyun", side_effect=fake_cli), \
+                        mock.patch.object(sys, "argv", [str(renderer), "--dashboard", str(dashboard), "--from", "100", "--to", "200"]), \
+                        working_directory(self.business), contextlib.redirect_stdout(io.StringIO()):
+                    module.main()
+                output = dashboard.with_name("dataset report-report.html")
+                text = output.read_text(encoding="utf-8")
+                self.assertIn("demo-model", text)
+                self.assertIn("Dataset 折线", text)
+                dataset_calls = [(profile, region, argv) for profile, region, argv in calls if argv[:2] == ["agentloop", "execute-query"]]
+                logstore_calls = [argv for _, _, argv in calls if "GetLogsV2" in argv]
+                self.assertEqual(len(dataset_calls), 2)
+                self.assertEqual(len(logstore_calls), 1)
+                for profile, region, argv in dataset_calls:
+                    self.assertEqual((profile, region), ("shared-profile", TARGET["regionId"]))
+                    self.assertEqual(argv[argv.index("--query") + 1], sql)
+                    self.assertEqual(argv[argv.index("--agent-space") + 1], TARGET["agentSpace"])
+                    self.assertEqual(argv[argv.index("--dataset-name") + 1], "demo_dataset")
+                    self.assertEqual(argv[argv.index("--from") + 1], "100")
+                    self.assertEqual(argv[argv.index("--to") + 1], "200")
+                    self.assertNotIn("GetLogsV2", argv)
+
+    def test_publish_keeps_dataset_query_without_logstore(self):
+        for label, root, skills in self.forms():
+            scripts = self.setup_scripts(skills)
+            publisher = skills / "sls-dashboard-builder" / "scripts" / "publish_dashboard.py"
+            with self.subTest(layout=label), import_script(publisher, scripts, self.fake_home) as module:
+                calls = []
+
+                def fake_cli(profile, region, argv):
+                    calls.append(argv)
+                    if "GetDashboard" in argv:
+                        return None, "DashboardNotExist"
+                    return {}, ""
+
+                dashboard, _sql = self.dataset_dashboard()
+                stdout = io.StringIO()
+                with mock.patch.object(module, "require_profile", return_value="shared-profile"), \
+                        mock.patch.object(module, "load_target", return_value=TARGET), \
+                        mock.patch.object(module, "aliyun", side_effect=fake_cli), \
+                        mock.patch.object(sys, "argv", [str(publisher), "--dashboard", str(dashboard), "--confirm", "--remark", "dataset probe"]), \
+                        working_directory(self.business), contextlib.redirect_stdout(stdout):
+                    self.assertEqual(module.main(), 0)
+                create = next(argv for argv in calls if "CreateDashboard" in argv)
+                body = json.loads(create[create.index("--body") + 1])
+                dataset_query = body["charts"][0]["search"]["chartQueries"][0]
+                line_query = body["charts"][1]["search"]["chartQueries"][0]
+                logstore_query = body["charts"][2]["search"]["chartQueries"][0]
+                self.assertEqual(dataset_query["datasource"], "agentloop-dataset")
+                self.assertNotIn("logstore", dataset_query)
+                self.assertNotIn("logstore", line_query)
+                self.assertEqual(dataset_query["agentSpaceName"], TARGET["agentSpace"])
+                self.assertEqual(dataset_query["datasetName"], "demo_dataset")
+                self.assertEqual(dataset_query["project"], TARGET["slsProject"])
+                self.assertEqual(logstore_query["logstore"], TARGET["slsLogstore"])
+                self.assertEqual(logstore_query["project"], TARGET["slsProject"])
+                self.assertIn("published=true", stdout.getvalue())
 
     def test_collector_import_and_argument_help_are_offline(self):
         for label, root, skills in self.forms():

@@ -403,6 +403,44 @@ def get_api_key(profile, region, project):
     fail(get_err or "CreateApiKey did not return the secret")
 
 
+def get_dataset(profile, region, space, dataset):
+    data, err = aliyun(profile, region, [
+        "agentloop", "get-dataset",
+        "--agent-space", space,
+        "--dataset-name", dataset,
+    ])
+    if data is None:
+        return None, err or "dataset schema is unavailable. Do not use the audit event schema or guess fields."
+    schema = data.get("schema") if isinstance(data, dict) else None
+    if not isinstance(schema, dict) or not schema:
+        return None, "dataset schema is missing. Do not use the audit event schema or guess fields."
+    return data, ""
+
+
+def execute_dataset_query(profile, region, space, dataset, query, start, end, line=None, offset=None):
+    args = [
+        "agentloop", "execute-query",
+        "--agent-space", space,
+        "--dataset-name", dataset,
+        "--type", "SQL",
+        "--query", query,
+        "--from", str(start),
+        "--to", str(end),
+    ]
+    if offset is not None:
+        args.extend(["--offset", str(offset)])
+    if line is not None:
+        args.extend(["--length", str(line)])
+    data, err = aliyun(profile, region, args)
+    if data is None:
+        return None, err
+    columns = data.get("columns") if isinstance(data, dict) else None
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return None, "query returned no columns/rows"
+    return data, ""
+
+
 def get_logs(profile, context, query, start, end, line, offset):
     # CLI 3.5.1 里 GetLogs 已废弃，--from 不是它的参数。GetLogsV2 把时间范围和查询语句放在 body。
     region = context.get("regionId") or ""

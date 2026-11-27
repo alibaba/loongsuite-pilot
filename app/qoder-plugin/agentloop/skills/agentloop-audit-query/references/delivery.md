@@ -24,6 +24,8 @@ Skill 环境通过 Setup 共享入口执行 [execution](execution.md) 的 `scrip
 
 GetLogsV2 结构包括 query、from、to；纯检索用 line/offset 分页，分析 SQL 用 `ORDER BY ... LIMIT offset,count`，不要用接口 line 或 offset 声称分析结果已取全。完成状态为 meta.progress；执行成功但 Incomplete 的结果不能标为准确全量；Complete 也不代表没有被 LIMIT 截断，行数检查与 SQL 分页见 [SQL 写作技巧](sql-writing.md#sql-分页)。
 
+Dataset 的调用和结果见 [执行说明](execution.md) 的 Dataset 查询。
+
 ## Python SDK 调用骨架
 
 客户端由客户现有鉴权初始化，下面只消费已配置的 client；不创建第二套凭据管理。SDK 已存在时才运行，不自动添加依赖。

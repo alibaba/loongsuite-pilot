@@ -35,6 +35,8 @@ def bind_targets(dashboard, project, logstore):
                 continue
             if str(q.get("project") or "") in PLACEHOLDER_PROJECTS:
                 q["project"] = project
+            if q.get("datasource") == "agentloop-dataset":
+                continue
             if str(q.get("logstore") or "") in PLACEHOLDER_LOGSTORES:
                 q["logstore"] = logstore
 

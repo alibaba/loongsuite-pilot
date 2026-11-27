@@ -21,7 +21,7 @@ SETUP_SCRIPTS_DIR = SCRIPT_DIR.parents[1] / "agentloop-collector-setup" / "scrip
 if str(SETUP_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SETUP_SCRIPTS_DIR))
 
-from util.aliyun import SLS_VERSION, aliyun
+from util.aliyun import SLS_VERSION, aliyun, execute_dataset_query
 from util.config_record import DEFAULT_LOGSTORE, load_target, require_profile
 
 REPORT_DIR = Path("output") / "audit" / "reports"
@@ -87,6 +87,35 @@ def get_chart_time_range(chart, args, ts_from, ts_to):
     if seconds is None:
         return ts_from, ts_to
     return ts_to - seconds, ts_to
+
+
+def dataset_rows(data):
+    columns = data.get("columns") if isinstance(data, dict) else None
+    rows = data.get("rows") if isinstance(data, dict) else None
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        return None
+    out = []
+    for row in rows:
+        if not isinstance(row, list):
+            return None
+        out.append({columns[i]: row[i] if i < len(row) else None for i in range(len(columns))})
+    return out
+
+
+def query_dataset(query, sql, ts_from, ts_to, profile="", region=""):
+    space = query.get("agentSpaceName") or ""
+    dataset = query.get("datasetName") or ""
+    if not region:
+        region = query.get("regionId") or ""
+    if not space or not dataset or not region:
+        return None, "Dataset query target is incomplete. agentSpaceName, datasetName, and regionId are required."
+    data, err = execute_dataset_query(profile, region, space, dataset, sql, int(ts_from), int(ts_to))
+    if data is None:
+        return None, (err or "query failed")[:200]
+    rows = dataset_rows(data)
+    if rows is None:
+        return None, "query returned no columns/rows"
+    return rows, None
 
 
 def query_sls(project, logstore, query, ts_from, ts_to, profile="", region=""):
@@ -602,6 +631,24 @@ def chart_info(chart, section="", default_project=""):
         "query": q0.get("query", ""),
         "project": q0.get("project", default_project),
         "logstore": q0.get("logstore", ""),
+        "datasource": q0.get("datasource", ""),
+        "agentSpaceName": q0.get("agentSpaceName", ""),
+        "datasetName": q0.get("datasetName", ""),
+        "regionId": q0.get("regionId", ""),
+    }
+
+
+def committed_chart_query(old_info, fallback_project="", fallback_logstore=""):
+    """Replay a diff against the committed chart query, not the current one."""
+    info = old_info or {}
+    return {
+        "datasource": info.get("datasource", ""),
+        "project": info.get("project", fallback_project),
+        "logstore": info.get("logstore", fallback_logstore),
+        "agentSpaceName": info.get("agentSpaceName", ""),
+        "datasetName": info.get("datasetName", ""),
+        "regionId": info.get("regionId", ""),
+        "query": info.get("query", ""),
     }
 
 
@@ -1417,7 +1464,7 @@ def main():
     layout_changes = []
 
     # ── Phase 1: 并行查询所有数据（含旧 SQL diff 查询）──
-    query_tasks = []  # (chart_index, chart, sql, project, logstore, is_old)
+    query_tasks = []  # (chart_index, chart, sql, project, logstore, is_old, chart_query)
     changed_titles = set()
     for i, c in enumerate(charts):
         if c.get("type") == "dashboardrow":
@@ -1430,13 +1477,14 @@ def main():
         sql = q0.get("query", "")
         proj = q0.get("project", args.default_project)
         ls = q0.get("logstore", "")
-        query_tasks.append((i, c, sql, proj, ls, False))
+        query_tasks.append((i, c, sql, proj, ls, False, q0))
         # 如果旧 SQL 不同，也加入查询队列
         old_info = head_sqls.get(chart_title, {}) if diff_enabled else {}
         old_sql = old_info.get("query", "") if old_info else ""
         if old_sql and old_sql != sql:
             changed_titles.add(chart_title)
-            query_tasks.append((i, c, old_sql, old_info.get("project", proj), old_info.get("logstore", ls), True))
+            old_query = committed_chart_query(old_info, proj, ls)
+            query_tasks.append((i, c, old_sql, old_query.get("project", proj), old_query.get("logstore", ls), True, old_query))
 
     query_results = {}  # chart_index -> (rows, err, elapsed)
     old_query_results = {}  # chart_index -> (rows, err)
@@ -1460,7 +1508,7 @@ def main():
         return sql
 
     def _do_query(task):
-        ci, c, sql, proj, ls, is_old = task
+        ci, c, sql, proj, ls, is_old, chart_query = task
         nm = get_display_name(c)
         sql = _apply_filters(sql)
         q_from, q_to = get_chart_time_range(c, args, ts_from, ts_to)
@@ -1468,7 +1516,10 @@ def main():
             sql = sql.replace("to_unixtime(now())", str(ts_to))
             q_from = min(q_from, ts_to - 1209600)
         q_start = time.time()
-        rows, err = query_sls(proj, ls, sql, q_from, q_to, args.profile, args.region)
+        if chart_query.get("datasource") == "agentloop-dataset":
+            rows, err = query_dataset(chart_query, sql, q_from, q_to, args.profile, args.region)
+        else:
+            rows, err = query_sls(proj, ls, sql, q_from, q_to, args.profile, args.region)
         q_elapsed = round(time.time() - q_start, 1)
         rows = rows or []
         status = f"ERROR: {err}" if err else f"OK ({len(rows)} rows)"

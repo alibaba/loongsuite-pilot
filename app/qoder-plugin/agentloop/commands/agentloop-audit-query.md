@@ -1,5 +1,5 @@
 ---
-description: 查询 AgentLoop 审计数据，返回结果、验证 SQL 或接入材料。
+description: 查询 AgentLoop 审计数据或 Dataset，返回结果、验证 SQL 或接入材料。
 ---
 
 # 审计查询
