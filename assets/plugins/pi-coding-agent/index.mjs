@@ -446,6 +446,8 @@ function trailingUserInputMessages(messages) {
 
 export function createPiTelemetryExtension(identityOptions = {}) {
   const identity = normalizeIdentity(identityOptions);
+  const onInvocationStart = typeof identityOptions.onInvocationStart === 'function'
+    ? identityOptions.onInvocationStart : undefined;
   const resourceAttributes = collectResourceAttributesFromEnv(process.env, { agentId: identity.agentId });
   const runtime = {
     identity,
@@ -496,7 +498,7 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.toolStarts.clear();
   }));
 
-  pi.on('before_agent_start', safeHandler('before_agent_start', async (event) => {
+  pi.on('before_agent_start', safeHandler('before_agent_start', async (event, ctx) => {
     resetSessionConfig();
     state.traceId = traceId();
     state.turnId = crypto.randomUUID();
@@ -511,6 +513,18 @@ export function createPiTelemetryExtension(identityOptions = {}) {
     state.previousRequestMessages = [];
     state.hasPreviousRequestSnapshot = false;
     state.toolStarts.clear();
+    if (onInvocationStart) {
+      // Expose the exact key this extension will emit. A trusted in-process
+      // caller can bind synchronously without adding anything to the prompt.
+      // Never await a caller promise or change Pi's hook return value.
+      const failed = () => writeError('onInvocationStart', new Error('invocation binding callback failed'));
+      try {
+        const result = onInvocationStart({ sessionId: ctx.sessionManager.getSessionId(), turnId: state.turnId });
+        if (result && typeof result.then === 'function') void Promise.resolve(result).catch(failed);
+      } catch {
+        failed();
+      }
+    }
   }));
 
   pi.on('turn_start', safeHandler('turn_start', async (event) => {

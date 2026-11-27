@@ -418,7 +418,9 @@ Notes:
 - Keys are written verbatim as span attribute names. **Avoid keys starting with `agent.`** and other reserved prefixes (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`) — such keys are skipped.
 - Attributes never overwrite existing span attributes (fill-only).
 
-**3. Per-invocation passthrough attributes.** The three sources above are process-global (one shared pilot daemon), so they cannot vary per agent call. To attribute individual calls (e.g. which user / issue triggered a run), the calling process sets a **per-invocation** env var on the spawned agent, and the daemon passes matching keys through onto that call's spans.
+**3. Per-invocation custom attributes.** To attach business metadata to a specific call, use [invocation-scoped attributes](./zh-CN/invocation-attributes.md). Once Pilot validates and associates the attributes with a native invocation, they are exported on its spans with no prefix configuration required.
+
+**Legacy passthrough (compatible).** The following instructions apply to older hooks and plugins that flatten `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` into ordinary event fields. These unmarked fields still use the prefix configuration.
 
 - The host process sets `LOONGSUITE_PILOT_SPAN_ATTRIBUTES` (same `key=value,key=value` format) on the agent subprocess. The agent's hook/plugin parses it at startup and stamps the pairs as top-level fields on every record it emits, so each call carries its own values.
 
@@ -456,7 +458,7 @@ Notes:
 - Unlike source #2 (spans only), passthrough attributes are ordinary top-level record fields, so they appear in **both** the event log (SLS / JSONL) and the trace spans — same behavior as the git fields.
 - Except for the two standard identity keys documented above, reserved-prefix keys (`gen_ai.`, `git.`, `workspace.`, `event.`, `trace_`, `user.`, `cost_`, `agent.`) and sensitive names (token/secret/password/…) are dropped by the hook. Use a dedicated namespace such as `multica.*`.
 - Values must not contain a comma `,` (it is the pair separator); a value is also capped at 512 chars.
-- Only keys matching a configured prefix are passed through; all other top-level fields are unaffected. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
+- On this legacy path, only keys matching a configured prefix are passed through. Generic passthrough is supported for claude-code, codex, qoder/qoder-cn, qwen-code-cli, opencode, and openclaw.
 - Codex snapshots these process-level attributes on `UserPromptSubmit` (with `Stop` as a fail-open fallback) and correlates them to transcript records by session and turn. This prevents a resumed session launched by a different invocation from reusing the previous invocation's attributes.
 - Qwen Code CLI captures them from the current `Stop` hook and clears any saved values when a resumed invocation does not provide the variable, preventing stale attributes from leaking into a later turn.
 

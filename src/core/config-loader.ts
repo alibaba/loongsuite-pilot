@@ -1,3 +1,4 @@
+import { readInvocationAttributeConfig } from '../invocation-attributes/config.js';
 import * as os from 'node:os';
 import { validateExcludedWorkspaces } from './workspace-policy.js';
 import {
@@ -160,6 +161,8 @@ export interface ConfigFile {
   collectTrace?: boolean;
   serviceName?: string;
   serviceNamePrefix?: string;
+
+  invocationAttributes?: unknown;
 
   upstreamLink?: {
     enabled?: boolean;
@@ -350,6 +353,7 @@ export async function loadConfig(): Promise<AnalyticsConfig> {
     pipeline,
     statusBar: buildStatusBarConfig(file),
     dashboard: buildDashboardConfig(file),
+    invocationAttributes: readInvocationAttributeConfig(file?.invocationAttributes),
     upstreamLink: buildUpstreamLinkConfig(file),
     multimodal: buildMultimodalConfig(file, innerDataConfig),
     globalSpanAttributes: resolveGlobalSpanAttributes(file),

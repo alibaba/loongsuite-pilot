@@ -342,13 +342,14 @@ describe('MiMo Code plugin — end-to-end fixture replay', () => {
       await hooks.event({ event: e });
     }
     // The last event in the fixture is session.idle; plugin should not crash.
-    // After session.idle, the session Map is cleared. Replay the fixture again
-    // — turns should restart from t1 (since previous turn was cleared and
-    // sessionTurnSeqs preserves the count).
+    // The next real invocation carries a different native user message ID.
+    // An update replay with the same ID is not a new invocation.
     const beforeCount = capture.length;
-    for (const e of events) {
-      await hooks.event({ event: e });
-    }
+    const next = structuredClone(events.find(
+      e => e.type === 'message.updated' && e.properties?.info?.role === 'user',
+    ));
+    next.properties.info.id += '-next';
+    await hooks.event({ event: next });
     const records = capture.slice(beforeCount).map((c) => parseRecord(c.data));
     const otherRecords = records.filter((r) => r['event.name'] === 'other');
     expect(otherRecords.length).toBe(1);

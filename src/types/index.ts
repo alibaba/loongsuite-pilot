@@ -1,6 +1,7 @@
 export * from './client-type.js';
 export * from './deployment.js';
 export * from './events.js';
+import type { InvocationAttributeConfig } from '../invocation-attributes/config.js';
 
 /**
  * Configuration for a single tool listener.
@@ -83,7 +84,7 @@ export interface OtlpTraceRawConfig {
   captureMessageContent?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
-  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  /** Legacy event-field prefixes to pass through. Validated invocation attributes do not need this. */
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   compression?: 'none' | 'gzip';
@@ -144,6 +145,7 @@ export interface AnalyticsConfig {
   dashboard: DashboardConfig;
   autoUpdate?: AutoUpdateConfig;
   upstreamLink: UpstreamLinkConfig;
+  invocationAttributes?: InvocationAttributeConfig;
   /** Global multimodal storage. */
   multimodal?: MultimodalRuntimeConfig;
   /** User-defined attributes injected into trace spans only (config + env baseline). */
@@ -295,7 +297,7 @@ export interface OtlpTraceFlusherConfig {
   debug?: boolean;
   turnIdleTimeoutMs?: number;
   resourceAttributeKeys?: string[];
-  /** Top-level record-key prefixes (e.g. "multica.") whose fields are passed through to span attributes. */
+  /** Legacy event-field prefixes to pass through. Validated invocation attributes do not need this. */
   spanAttributePassthroughPrefixes?: string[];
   maxExportBatchBytes?: number;
   dataDir?: string;

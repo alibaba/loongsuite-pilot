@@ -1,0 +1,33 @@
+{
+  "agents": [
+    ["antigravity", "antigravity", "antigravity"],
+    ["antigravity-cli", "antigravity-cli", "antigravity-cli"],
+    ["claude-code", "claude-code", "claude-code-log"],
+    ["codex", "codex", "codex-transcript"],
+    ["copilot", "copilot", "copilot-log"],
+    ["cursor", "cursor", "cursor-hook"],
+    ["cursor-cli", "cursor-cli", "cursor-hook"],
+    ["doubao", "doubao", "doubao"],
+    ["doubao-work", "doubao-work", "doubao-work"],
+    ["dsh", "dsh", "dsh-log"],
+    ["grok-build", "grok-build", "grok-build-log"],
+    ["hermes-agent", "hermes", "hermes-agent-log"],
+    ["kiro-cli", "kiro-cli", "kiro-cli-log"],
+    ["mimo-code", "mimo-code", "mimo-code-log"],
+    ["openclaw", "openclaw", "openclaw-plugin-log"],
+    ["opencode", "opencode", "opencode-log"],
+    ["pi-coding-agent", "pi-coding-agent", "pi-coding-agent-log"],
+    ["qoder", "qoder", "qoder-trace"],
+    ["qoder-cn", "qoder-cn", "qoder-cn-trace"],
+    ["qoder-jetbrains", "qoder-idea", "qoder-trace"],
+    ["qoder-work", "qoder-work", "qoder-work-trace"],
+    ["qoder-work-cn", "qoder-work-cn", "qoder-work-cn-trace"],
+    ["qwen-code-cli", "qwen-code-cli", "qwen-code-cli-log"],
+    ["qwen-work-cn", "qwen-work-cn", "qwen-work-cn-trace"],
+    ["trae-cn", "trae-cn", "trae-cn-log"],
+    ["workbuddy", "workbuddy", "workbuddy"],
+    ["qoder-cli", "qoder-cli", "qoder-trace"],
+    ["qoder-app", "qoder-app", "qoder-trace"],
+    ["wukong", "wukong", "wukong"]
+  ]
+}

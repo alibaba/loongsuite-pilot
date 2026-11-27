@@ -116,6 +116,47 @@ async function startTurn(runtime) {
 }
 
 describe('Pi Coding Agent extension', () => {
+  it('hands a hosted session the exact ID before its first record on each turn', async () => {
+    const onInvocationStart = vi.fn();
+    const runtime = await createRuntime({}, { onInvocationStart });
+
+    await startTurn(runtime);
+    expect(onInvocationStart).toHaveBeenCalledTimes(1);
+    const first = onInvocationStart.mock.calls[0][0];
+    expect(first).toEqual({ sessionId: 'pi-session-1', turnId: expect.any(String) });
+    expect(fs.existsSync(path.join(tmpDir, 'logs', 'pi-coding-agent'))).toBe(false);
+    const messages = [{ role: 'user', content: [{ type: 'text', text: 'The same input' }] }];
+    await runtime.emit('context', { messages });
+
+    await runtime.emit('before_agent_start', { prompt: 'The same input' });
+    await runtime.emit('turn_start', { turnIndex: 0, timestamp: Date.now() });
+    await runtime.emit('context', { messages });
+    expect(onInvocationStart).toHaveBeenCalledTimes(2);
+    const second = onInvocationStart.mock.calls[1][0];
+    expect(second.sessionId).toBe(first.sessionId);
+    expect(second.turnId).not.toBe(first.turnId);
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests.map(record => record['gen_ai.turn.id'])).toEqual([first.turnId, second.turnId]);
+  });
+
+  it.each([
+    ['throws', () => { throw new Error('private-business-value'); }],
+    ['rejects', async () => { throw new Error('private-business-value'); }],
+    ['never settles', () => new Promise(() => {})],
+  ])('continues writing ordinary Pi telemetry when invocation callback %s', async (_, onInvocationStart) => {
+    const runtime = await createRuntime({}, { onInvocationStart });
+    await startTurn(runtime);
+    await runtime.emit('context', {
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'Proceed normally' }] }],
+    });
+    const requests = readRecords().filter(record => record['event.name'] === 'llm.request');
+    expect(requests).toHaveLength(1);
+    const logs = path.join(tmpDir, 'logs', 'pi-coding-agent');
+    for (const file of fs.readdirSync(logs)) {
+      expect(fs.readFileSync(path.join(logs, file), 'utf8')).not.toContain('private-business-value');
+    }
+  });
+
   it('continues collecting if the optional resource-context helper is unavailable', async () => {
     const installed = path.join(tmpDir, 'plugins', 'pi-coding-agent', 'index.mjs');
     fs.mkdirSync(path.dirname(installed), { recursive: true });

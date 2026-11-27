@@ -1,6 +1,7 @@
 // Copyright 2026 Alibaba Group Holding Limited
 // SPDX-License-Identifier: Apache-2.0
 
+import { INVOCATION_MESSAGE_ID_FIELD } from '../shared/invocation-attributes.mjs';
 import fs from 'node:fs/promises';
 import { constants, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
@@ -1018,13 +1019,15 @@ export class QoderTranscriptCollector {
     // A Hook may observe progress written after the tool line. Finish this
     // bounded scan before selecting its snapshot; never borrow a later turn's.
     if (!complete && !Number.isFinite(context?.observedSize)) return;
-    const hostProduct = this.hostProductFor(context, value.rows.find(isRealUserPrompt));
+    const prompt = value.rows.find(isRealUserPrompt);
+    const hostProduct = this.hostProductFor(context, prompt);
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     for (const row of value.rows) {
       if (!Number.isFinite(Date.parse(row.timestamp))) continue;
       for (const { link, block } of this.links.register(source, checkpoint, row)) {
         const identity = context.userIdentity ?? source.userIdentity;
         const record = {
+          ...(typeof prompt?.uuid === 'string' ? { [INVOCATION_MESSAGE_ID_FIELD]: prompt.uuid } : {}),
           'event.name': 'tool.call', 'gen_ai.agent.type': 'qoder-cli',
           'gen_ai.provider.name': 'qoder', 'gen_ai.request.model': row.message?.model,
           'gen_ai.session.id': source.sessionId, 'gen_ai.turn.id': checkpoint.turnId,
@@ -1058,7 +1061,8 @@ export class QoderTranscriptCollector {
     // Only this Turn's observation can label a product. source.desktop belongs
     // to the first discovery and may describe an earlier App invocation.
     const productContext = context;
-    const hostProduct = this.hostProductFor(productContext, value.rows.find(isRealUserPrompt));
+    const prompt = value.rows.find(isRealUserPrompt);
+    const hostProduct = this.hostProductFor(productContext, prompt);
     context ??= { cwd: source.cwd, desktop: source.desktop, userIdentity: source.userIdentity };
     const config = { ...loadHookRuntimeConfig(this.dataDir),
       hostProduct,
@@ -1070,7 +1074,7 @@ export class QoderTranscriptCollector {
     // for both boundaries and messages so these cannot create an empty Turn
     // or leak into the next model request when a turn is still being drained.
     const content = value.rows.filter(row => (row.type === 'user' || row.type === 'assistant') && !isControlUserRow(row));
-    await this.prepareWork(source, checkpoint, value.rows.find(isRealUserPrompt));
+    await this.prepareWork(source, checkpoint, prompt);
     if (earlyRecords) this.emitInvokes(source, contexts, checkpoint, value, earlyRecords, endOffset, true, productContext ?? null);
     const turnId = checkpoint.turnId;
     const boundaries = buildLlmBoundaries([], content);
@@ -1086,6 +1090,7 @@ export class QoderTranscriptCollector {
     }
     for (let index = 0; index < records.length; index++) {
       const record = records[index];
+      if (typeof prompt?.uuid === 'string') record[INVOCATION_MESSAGE_ID_FIELD] = prompt.uuid;
       // In-process provenance for the IDE adapter. Never serialized to events.
       Object.defineProperty(record, Symbol.for('loongsuite.qoder.native-source'), {
         value: source.transcriptPath,

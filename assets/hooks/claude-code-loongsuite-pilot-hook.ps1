@@ -15,7 +15,11 @@ $Processor = Join-Path $ScriptDir "claude-code-hook-processor.mjs"
 $Subcommand = if ($args.Count -gt 0) { $args[0] } else { "unknown" }
 
 # Only process registered subcommands
-if ($Subcommand -notin @("pre-tool-use", "stop", "stop-failure", "subagent-start", "subagent-stop")) {
+if ($Subcommand -notin @("user-prompt-submit", "pre-tool-use", "stop", "stop-failure", "subagent-start", "subagent-stop")) {
+    Write-Output $EMPTY_RESULT
+    exit 0
+}
+if ($Subcommand -eq "user-prompt-submit" -and -not (Test-Path Env:LOONGSUITE_PILOT_INVOCATION_ID)) {
     Write-Output $EMPTY_RESULT
     exit 0
 }

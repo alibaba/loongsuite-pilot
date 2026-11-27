@@ -1,6 +1,10 @@
 import type { AgentActivityEntry, JsonValue } from '../../types/index.js';
 import { buildAgentActivityEntry } from '../../normalization/entry-builder.js';
 import { isReservedKey } from '../../normalization/global-attributes.js';
+import {
+  INVOCATION_ATTRIBUTES_FIELD,
+  projectInvocationAttributes,
+} from '../../../assets/hooks/shared/invocation-attributes.mjs';
 
 const MAX_CUSTOM_FIELD_VALUE_LENGTH = 512;
 const SENSITIVE_FIELD_NAME_RE =
@@ -32,6 +36,8 @@ const CANONICAL_KEYS = new Set([
 ]);
 
 export interface CanonicalHookRecordOptions {
+  /** Opt in only for producers that attach a native, invocation-bound snapshot. */
+  preserveInvocationAttributes?: boolean;
   /**
    * Preserve caller-supplied string fields after canonical normalization.
    * This is opt-in because most canonical adapters intentionally expose only
@@ -71,6 +77,10 @@ export function buildCanonicalHookEntry(
     ...opts,
     attributes: toJsonObject(attributes ?? {}),
   });
+
+  if (options?.preserveInvocationAttributes) {
+    projectInvocationAttributes(entry, record[INVOCATION_ATTRIBUTES_FIELD]);
+  }
 
   if (options?.preserveSafeCustomTopLevelFields) {
     attachSafeCustomTopLevelFields(entry, record);

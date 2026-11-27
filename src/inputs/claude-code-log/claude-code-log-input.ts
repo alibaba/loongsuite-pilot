@@ -76,6 +76,6 @@ export class ClaudeCodeLogInput extends BaseHookInput {
   protected async transformRecord(
     record: Record<string, unknown>,
   ): Promise<AgentActivityEntry | null> {
-    return transformHookRecord(record, ClientType.ClaudeCliHook, 'claude-code');
+    return transformHookRecord(record, ClientType.ClaudeCliHook, 'claude-code', { preserveInvocationAttributes: true });
   }
 }

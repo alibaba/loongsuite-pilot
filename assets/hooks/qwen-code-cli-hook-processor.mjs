@@ -28,6 +28,10 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import { readStdinJson } from './shared/stdin-reader.mjs';
+import { INVOCATION_ATTRIBUTES_FIELD } from './shared/invocation-attributes.mjs';
+import {
+  cliPromptAttributesEnabled, readCliPromptAttributes, registerCliPromptAttributes,
+} from './shared/cli-prompt-attributes.mjs';
 import {
   INITIAL_HASH,
   computeHash,
@@ -63,6 +67,7 @@ import { loadSubagentIndex, collectSubagents } from './qwen-code-cli/subagents.m
 import { inferProvider } from './qwen-code-cli/provider-inferrer.mjs';
 
 const AGENT_ID = 'qwen-code-cli';
+const MANAGED_PROMPT = cliPromptAttributesEnabled();
 const INVOCATION_RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, {
   agentId: AGENT_ID,
 });
@@ -79,7 +84,7 @@ function bindInvocationContext(state) {
     delete state.resource_attributes;
   }
 
-  if (Object.keys(INVOCATION_SPAN_ATTRIBUTES).length > 0) {
+  if (!MANAGED_PROMPT && Object.keys(INVOCATION_SPAN_ATTRIBUTES).length > 0) {
     state.span_attributes = INVOCATION_SPAN_ATTRIBUTES;
   } else {
     // A session can be resumed by another invocation. Clear the previous
@@ -279,6 +284,9 @@ async function exportSession(state, stopReason) {
   let logHash = INITIAL_HASH;
 
   const baseTurnCount = state.turn_count || 0;
+  const promptAttributes = MANAGED_PROMPT
+    ? readCliPromptAttributes(pilotDataDir(), AGENT_ID, sessionId, parseResult.turns)
+    : new Map();
 
   // First-run guard: on fresh install/reinstall (no turn_count + offset=0), if
   // the transcript has historic turns from before pilot was deployed, only
@@ -287,7 +295,8 @@ async function exportSession(state, stopReason) {
   const isFirstRun = !state.turn_count && baseOffset === 0;
   let turnsToExport = parseResult.turns;
   if (isFirstRun && parseResult.turns.length > 1) {
-    turnsToExport = parseResult.turns.slice(-1);
+    turnsToExport = parseResult.turns.filter((turn, index) =>
+      index === parseResult.turns.length - 1 || promptAttributes.has(turn.promptId));
   }
 
   const cwd = state.cwd || undefined;
@@ -295,19 +304,24 @@ async function exportSession(state, stopReason) {
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
+    const turnIndex = baseTurnCount + (MANAGED_PROMPT && isFirstRun ? parseResult.turns.indexOf(turn) : i);
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
     const { records, hash } = buildTurnRecords(
-      turn, baseTurnCount + i, sessionId, logHash, userId, turnStopReason, cwd,
+      turn, turnIndex, sessionId, logHash, userId, turnStopReason, cwd,
       state.resource_attributes,
       state.span_attributes,
     );
     const children = collectSubagents(turn, records, subagents, (childTurn, options) =>
-      buildTurnRecords(childTurn, baseTurnCount + i, sessionId, INITIAL_HASH, userId,
+      buildTurnRecords(childTurn, turnIndex, sessionId, INITIAL_HASH, userId,
         'end_turn', cwd, state.resource_attributes, state.span_attributes, options).records);
     // Explicit seal is last on disk even when child/parent source times overlap.
     // It prevents intermediate model stop reasons from flushing a partial tree.
-    for (const r of [...records, ...children]) r['agent.qwen-code-cli.collection'] = 'foreground-v1';
+    const attrs = promptAttributes.get(turn.promptId);
+    for (const r of [...records, ...children]) {
+      r['agent.qwen-code-cli.collection'] = 'foreground-v1';
+      if (attrs) r[INVOCATION_ATTRIBUTES_FIELD] = attrs;
+    }
     allRecords.push(...records, ...children);
     if (records.length) allRecords.push({
       ...records[0],
@@ -626,6 +640,16 @@ const SUBCOMMAND = process.argv[2];
 
 async function main() {
   switch (SUBCOMMAND) {
+    case 'user-prompt-submit':
+      if (MANAGED_PROMPT) {
+        const event = tryReadStdin();
+        // This hook also fires for model continuations; only a real submitted
+        // prompt with a native ID may register the one-shot caller's snapshot.
+        if (typeof event?.submitted_prompt === 'string' && event.submitted_prompt.trim()) {
+          registerCliPromptAttributes(pilotDataDir(), AGENT_ID, event, INVOCATION_SPAN_ATTRIBUTES);
+        }
+      }
+      break;
     case 'stop':
       await cmdStop();
       break;

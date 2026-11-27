@@ -10,6 +10,7 @@
     "settingsPath": "~/.qwen/settings.json",
     "settingsSyntax": "jsonc",
     "events": [
+      "UserPromptSubmit",
       "Stop",
       "SubagentStart",
       "SubagentStop"

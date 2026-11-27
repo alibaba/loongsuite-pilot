@@ -2,6 +2,7 @@ import type { AgentActivityEntry, MaskConfig } from '../types/index.js';
 import { shouldMaskField } from './field-whitelist.js';
 import { loadMaskPlan } from './rule-loader.js';
 import { maskString } from './string-masker.js';
+import { projectedInvocationAttributeKeys } from '../../assets/hooks/shared/invocation-attributes.mjs';
 import type {
   CompiledMaskRule,
   MaskPlan,
@@ -28,9 +29,10 @@ export function maskAgentActivityEntry(
   if (plan.rules.length === 0 && plan.piiTypes.size === 0) return entry;
 
   let maskedEntry: AgentActivityEntry | undefined;
+  const invocationKeys = projectedInvocationAttributeKeys(entry);
 
   for (const [field, value] of Object.entries(entry)) {
-    if (!shouldMaskField(field)) continue;
+    if (!shouldMaskField(field) && !invocationKeys.includes(field)) continue;
     const maskedValue = maskJsonSafeValue(value as JsonSafeValue, plan, options);
     if (maskedValue !== value) {
       maskedEntry ??= { ...entry };

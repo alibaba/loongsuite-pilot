@@ -1,3 +1,5 @@
+import { InvocationAttributeJoin } from '../invocation-attributes/join.js';
+import { InvocationAttributeStore, invocationAttributeRoot } from '../../assets/hooks/shared/invocation-attribute-store.mjs';
 import { WorkspacePolicy } from './workspace-policy.js';
 import { EventEmitter } from 'node:events';
 import { ClientType } from '../types/index.js';
@@ -176,6 +178,7 @@ export class Orchestrator extends EventEmitter {
   private readonly dataDir: string;
   private agentControlManager!: AgentControlManager;
   private agentDiscoveryService!: AgentDiscoveryService;
+  private invocationAttributeJoin: InvocationAttributeJoin | null = null;
   private inputManager!: InputManager;
   private stateStore!: StateStore;
   private flusher!: BaseFlusher;
@@ -243,6 +246,17 @@ export class Orchestrator extends EventEmitter {
     // Journal replay during flusher startup must use the current privacy rules.
     this.inputManager = new InputManager();
     this.inputManager.setConfiguredUserId(this.config.userId);
+    const invocationConfig = this.config.invocationAttributes;
+    if (invocationConfig) {
+      let store: InvocationAttributeStore | null = null;
+      try {
+        store = new InvocationAttributeStore({ root: invocationConfig.root ?? invocationAttributeRoot(this.dataDir) });
+      } catch {
+        logger.warn('invocation attributes unavailable; collection continues without managed attributes');
+      }
+      this.invocationAttributeJoin = new InvocationAttributeJoin(store, invocationConfig);
+      this.inputManager.setInvocationAttributeJoin(this.invocationAttributeJoin);
+    }
     const workspacePolicy = new WorkspacePolicy(
       this.config.privacy?.excludeWorkspaces,
       path.join(this.dataDir, 'state', 'workspace-exclusions'),
@@ -606,6 +620,9 @@ export class Orchestrator extends EventEmitter {
     // The runtime writer has exited; stop has also saved any unconfirmed mirror bindings.
     this.interceptorService = null;
     this.verdictStore = null;
+    this.inputManager?.setInvocationAttributeJoin(null);
+    this.invocationAttributeJoin?.close();
+    this.invocationAttributeJoin = null;
     // The final dataflow window must observe the last serialized collect and
     // entry queue drain, while the flusher counters are still available.
     try {

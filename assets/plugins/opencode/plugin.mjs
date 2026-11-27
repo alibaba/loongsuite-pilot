@@ -322,6 +322,8 @@ function buildCommonFields(sessionID, session, userId, cwd = agentCwd) {
     trace_id: turn?.traceId ?? generateTraceId(),
     "gen_ai.session.id": sessionID,
     "gen_ai.turn.id": turn?.turnId,
+    // Private plugin → collector identity; this is the *user* message ID.
+    ...(turn?.userMessageId ? { "pilot.opencode.user_message_id": turn.userMessageId } : {}),
     "user.id": userId,
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": AGENT_TYPE,
@@ -484,6 +486,11 @@ function handleChatMessage(inp, out, userId) {
   if (!sessionID) return;
 
   const session = getSession(sessionID);
+  const msg = out?.message;
+  // V1 keeps one live turn per session. Do not attach the newer invocation's
+  // metadata while an earlier turn is still active in that same session.
+  const userMessageId = !session.currentTurn && typeof msg?.id === "string" && msg.id
+    ? msg.id : undefined;
 
   session.turnSeq += 1;
   if (session.turnSeq === 1) recordUpstreamEnvOnce(sessionID);
@@ -496,6 +503,7 @@ function handleChatMessage(inp, out, userId) {
 
   session.currentTurn = {
     turnId,
+    userMessageId,
     traceId,
     stepSeq: 0,
     userPromptText: null,
@@ -505,7 +513,6 @@ function handleChatMessage(inp, out, userId) {
   session.stepStartTimeMs = null;
   session.lastStepOutputParts = null;
 
-  const msg = out?.message;
   if (msg) {
     session.agentMeta = {
       name:

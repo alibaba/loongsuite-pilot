@@ -399,7 +399,9 @@ Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感�
 - key 会原样作为 span 属性名。**请避免以 `agent.` 开头**及其它保留前缀（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`）——这类 key 会被跳过。
 - 属性为 fill-only，绝不覆盖 span 已有属性。
 
-**3. 按次调用的透传属性。** 上述三个来源都是进程级全局的（一台机器一个共享 pilot daemon），无法按每次 agent 调用区分。若要对单次调用做归因（如哪个用户 / issue 触发了本次运行），由调用方在被拉起的 agent 子进程上设置**按次**环境变量，daemon 再把匹配前缀的 key 透传到该次调用的 span 上。
+**3. 按次自定义属性。** 要给每轮调用设置不同的 `memory.user_id` 或业务请求 ID，推荐使用[按次自定义属性](./invocation-attributes.md)。Pilot 将通过校验的属性和原生回合绑定后直接写入 Span，无需配置字段前缀；同一个 Gateway 或 SDK 进程可服务不同调用方。
+
+**旧版透传（兼容）。** 以下说明适用于只设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`、由旧 Hook/插件写入事件顶层字段的接入。这些字段没有按次登记标记，仍按原有前缀配置进入 Span。
 
 - 宿主进程在 agent 子进程上设置 `LOONGSUITE_PILOT_SPAN_ATTRIBUTES`（同样是 `key=value,key=value` 格式）。agent 的 hook/plugin 在启动时解析它，并把这些键值对作为顶层字段写入它产出的每条 record，因此每次调用都带上各自的值。
 
@@ -436,7 +438,7 @@ Trace span 可能包含 Prompt、回答、工具参数和工具结果等敏感�
 说明：
 - 与来源 #2（仅 span）不同，透传属性是普通的顶层 record 字段，因此会**同时**出现在 event log（SLS / JSONL）和 trace span 上——与 git 字段行为一致。
 - 除上述两个标准身份 key 外，保留前缀 key（`gen_ai.`、`git.`、`workspace.`、`event.`、`trace_`、`user.`、`cost_`、`agent.`）以及敏感命名（token/secret/password/…）会被 hook 丢弃。请使用 `multica.*` 等专用命名空间。
-- 仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。
+- 在旧版透传路径上，仅匹配所配置前缀的 key 会被透传，其它顶层字段不受影响。普通透传目前支持 claude-code、codex、qoder/qoder-cn、qwen-code-cli、opencode 和 openclaw。
 - Codex 会在 `UserPromptSubmit` 时保存这些进程级属性（以 `Stop` 作为 fail-open 兜底），并按 session 与 turn 关联到 transcript 记录，避免同一个 session 被不同调用恢复时沿用上一次调用的属性。
 - Qwen Code CLI 会在当前 `Stop` Hook 中读取这些属性；如果恢复同一 session 的新调用未提供该环境变量，则会清除已保存的旧值，避免属性泄漏到后续 turn。
 - value 不能包含逗号 `,`（逗号是键值对分隔符）；单个 value 长度上限 512 字符。

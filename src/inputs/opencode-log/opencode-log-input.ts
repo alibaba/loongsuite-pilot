@@ -4,6 +4,7 @@ import { BaseHookInput, type HookInputOptions } from '../base/base-hook-input.js
 import { resolveHome, directoryExists } from '../../utils/fs-utils.js';
 import { transformHookRecord } from '../base/hook-record-transform.js';
 import { DEFAULT_POLL_INTERVAL_MS } from '../../utils/poll-interval.js';
+import { INVOCATION_MESSAGE_ID_FIELD } from '../../../assets/hooks/shared/invocation-attributes.mjs';
 
 export class OpenCodeLogInput extends BaseHookInput {
   readonly id = 'opencode-log';
@@ -33,11 +34,17 @@ export class OpenCodeLogInput extends BaseHookInput {
     // V1 serializes structured tool payloads into JSON strings; V2 emits
     // native JSON. Preserve their content with one canonical representation.
     const normalized = { ...record };
+    const nativeMessageId = normalized['pilot.opencode.user_message_id'];
+    delete normalized['pilot.opencode.user_message_id'];
     for (const key of ['gen_ai.tool.call.arguments', 'gen_ai.tool.call.result']) {
       const value = normalized[key];
       if (typeof value !== 'string' || !/^\s*[\[{]/.test(value)) continue;
       try { normalized[key] = JSON.parse(value); } catch { /* Plain/truncated tool text is retained verbatim. */ }
     }
-    return transformHookRecord(normalized, ClientType.OpenCode, 'opencode');
+    const entry = await transformHookRecord(normalized, ClientType.OpenCode, 'opencode');
+    if (entry && typeof nativeMessageId === 'string') {
+      (entry as AgentActivityEntry & { [INVOCATION_MESSAGE_ID_FIELD]?: string })[INVOCATION_MESSAGE_ID_FIELD] = nativeMessageId;
+    }
+    return entry;
   }
 }

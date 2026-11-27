@@ -18,6 +18,12 @@ SUBCOMMAND="${1:-unknown}"
 
 # Only process registered subcommands; early-return for legacy/unregistered ones.
 case "$SUBCOMMAND" in
+  user-prompt-submit)
+    if [ "${LOONGSUITE_PILOT_INVOCATION_ID+x}" != x ]; then
+      printf '%s\n' "$EMPTY_RESULT"
+      exit 0
+    fi
+    ;;
   pre-tool-use|stop|stop-failure|subagent-start|subagent-stop)
     ;;
   *)

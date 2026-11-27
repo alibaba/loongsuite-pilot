@@ -74,6 +74,10 @@ import {
   collectResourceAttributesFromEnv,
   parseSpanAttributesFromEnv,
 } from './shared/resource-context.mjs';
+import { INVOCATION_ATTRIBUTES_FIELD } from './shared/invocation-attributes.mjs';
+import {
+  cliPromptAttributesEnabled, readCliPromptAttributes, registerCliPromptAttributes,
+} from './shared/cli-prompt-attributes.mjs';
 
 // P0 cross-Agent guard: when running inside TRAE-CN (env TRAE_PROJECT_DIR set
 // by TRAE's hook executor), skip processing entirely. Without this, a user who
@@ -88,6 +92,7 @@ if (process.env.TRAE_PROJECT_DIR) {
 }
 
 const AGENT_ID = 'claude-code';
+const MANAGED_PROMPT = cliPromptAttributesEnabled();
 const RESOURCE_ATTRIBUTES = collectResourceAttributesFromEnv(process.env, { agentId: AGENT_ID });
 const RESOURCE_BASE_FIELD_PATCH = agentBaseFieldPatch(RESOURCE_ATTRIBUTES);
 const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
@@ -97,12 +102,13 @@ const RESOURCE_ATTRIBUTE_FIELDS = Object.keys(RESOURCE_ATTRIBUTES).length > 0
 // fields so the trace flusher can pass matching keys through to span attributes.
 const SPAN_ATTRIBUTES = parseSpanAttributesFromEnv(process.env, {
   agentId: AGENT_ID,
-  allowInvocationIdentity: true,
+  allowInvocationIdentity: !MANAGED_PROMPT,
 });
 const RECORD_CONTEXT = {
   resourceBaseFields: RESOURCE_BASE_FIELD_PATCH,
   resourceFields: RESOURCE_ATTRIBUTE_FIELDS,
-  spanAttributes: SPAN_ATTRIBUTES,
+  spanAttributes: MANAGED_PROMPT ? {} : SPAN_ATTRIBUTES,
+  ...(MANAGED_PROMPT ? { managedPrompt: true } : {}),
 };
 const STOP_TRANSCRIPT_GRACE_MS = 60_000;
 const MAX_STOPS_PER_DRAIN = 12;
@@ -810,7 +816,7 @@ function readStopTranscript(state, stop) {
   // established transcript. Keep that behavior up to the confirmed Stop.
   const resumed = offset > 0 && parsed.nextOffset >= offset
     && (!sourceIdentity || sourceIdentity === parsed.sourceIdentity);
-  if (turn && !(resumed && parsed.sawStopPrompt)) parsed = { ...parsed, turns: [turn] };
+  if (turn && !((resumed || stop.context?.managedPrompt) && parsed.sawStopPrompt)) parsed = { ...parsed, turns: [turn] };
   return { parsed, turn, samePath };
 }
 
@@ -1192,13 +1198,18 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
   let logHash = INITIAL_HASH;
 
   const baseTurnCount = state.turn_count || 0;
+  const managedPrompt = (deferredContext ?? RECORD_CONTEXT).managedPrompt === true;
+  const promptAttributes = managedPrompt
+    ? readCliPromptAttributes(pilotDataDir(), AGENT_ID, sessionId, parseResult.turns)
+    : new Map();
 
   // 首次运行防护: 新安装/重装后 state 被清空(offset=0, 无 turn_count),
   // 如果 transcript 包含大量历史 turn, 只上报最后一个(当前对话), 跳过历史。
   const isFirstRun = !state.turn_count && baseOffset === 0;
   let turnsToExport = parseResult.turns;
   if (isFirstRun && parseResult.turns.length > 1) {
-    turnsToExport = parseResult.turns.slice(-1);
+    turnsToExport = parseResult.turns.filter((turn, index) =>
+      index === parseResult.turns.length - 1 || promptAttributes.has(turn.promptId));
   }
 
   // Some Claude transcript versions omit promptId even though Stop carries it.
@@ -1225,6 +1236,9 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
 
   for (let i = 0; i < turnsToExport.length; i++) {
     const turn = turnsToExport[i];
+    const turnRecordContext = managedPrompt
+      ? { ...(deferredContext ?? RECORD_CONTEXT), invocationAttributes: promptAttributes.get(turn.promptId) }
+      : deferredContext;
     const isLast = i === turnsToExport.length - 1;
     const turnStopReason = isLast ? stopReason : 'end_turn';
     const {
@@ -1234,7 +1248,7 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
       consumedAttemptFiles: turnAttemptFiles,
     } = buildTurnRecords(
       turn,
-      baseTurnCount + i,
+      baseTurnCount + (managedPrompt && isFirstRun ? parseResult.turns.indexOf(turn) : i),
       sessionId,
       logHash,
       userId,
@@ -1243,7 +1257,7 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
       intercept,
       promptIdFallback,
       attemptContext,
-      deferredContext,
+      turnRecordContext,
     );
     if (deferredContext) {
       const terminal = records.findLast((record) => record['event.name'] === 'llm.response');
@@ -1279,7 +1293,7 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
           cwd,
           intercept,
           attemptContext,
-          recordContext: deferredContext,
+          recordContext: turnRecordContext,
         });
         if (link.isBackground) {
           extendBackgroundAgentResult(turnRecords, link, childBuild.records);
@@ -1296,7 +1310,7 @@ async function exportSession(state, stopReason, stopPromptId = '', options) {
       state.pending_subagent_turns = state.pending_subagent_turns || [];
       state.pending_subagent_turns.push({
         created_at: nowSec(),
-        ...(deferredContext ? { transcript_path: transcriptPath, cwd, record_context: deferredContext } : {}),
+        ...(turnRecordContext ? { transcript_path: transcriptPath, cwd, record_context: turnRecordContext } : {}),
         trace_id: parentRecord.trace_id,
         turn_id: parentRecord['gen_ai.turn.id'],
         records: cleanRecords(turnRecords, runtimeConfig),
@@ -1491,6 +1505,8 @@ function buildTurnRecords(
     // win over caller-supplied attributes; aligns with qoder's Object.assign order.
     ...recordContext.spanAttributes,
     ...recordContext.resourceFields,
+    ...(recordContext.invocationAttributes
+      ? { [INVOCATION_ATTRIBUTES_FIELD]: recordContext.invocationAttributes } : {}),
   };
 
   // 用户输入: 做法 A (EVENT_LOG_TO_TRACE_SPEC §5.1, 0.1.0-beta.3+)
@@ -1843,6 +1859,10 @@ function buildTurnRecords(
 // ─── dispatcher ───
 
 const DISPATCH = {
+  'user-prompt-submit': () => {
+    if (!MANAGED_PROMPT) return;
+    registerCliPromptAttributes(pilotDataDir(), AGENT_ID, readStdinJson(), SPAN_ATTRIBUTES);
+  },
   'pre-tool-use': cmdPreToolUse,
   'stop': cmdStop,
   'stop-failure': cmdStopFailure,

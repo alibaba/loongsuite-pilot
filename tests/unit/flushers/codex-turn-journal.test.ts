@@ -6,6 +6,9 @@ import { CodexTurnJournal, codexTurnJournalGroupKey } from '../../../src/flusher
 import { buildAgentActivityEntry } from '../../../src/normalization/entry-builder.js';
 import { createTempDir, cleanupTempDir } from '../../helpers/fixture-builder.js';
 import type { AgentActivityEntry } from '../../../src/types/index.js';
+import {
+  projectedInvocationAttributeKeys, projectInvocationAttributes,
+} from '../../../assets/hooks/shared/invocation-attributes.mjs';
 
 function entry(id: string, overrides: Partial<AgentActivityEntry> = {}): AgentActivityEntry {
   return buildAgentActivityEntry({
@@ -82,6 +85,32 @@ describe('CodexTurnJournal', () => {
   afterEach(async () => { await cleanupTempDir(directory); });
   const filename = (dir: string, record: AgentActivityEntry) =>
     path.join(dir, `codex-turn-${codexTurnJournalGroupKey(record)}.jsonl`);
+
+  it('retains the projected keys without changing the legacy event line or trusting inline lookalikes', async () => {
+    const admitted = entry('admitted');
+    projectInvocationAttributes(admitted, { 'audit.label': 'A', 'audit.flag': false });
+    const ordinary = entry('ordinary', { 'audit.label': 'raw', 'pilot-invocation-keys-v1': ['audit.label'] });
+    await new CodexTurnJournal(directory).append([admitted, ordinary]);
+    const lines = (await fs.readFile(filename(directory, admitted), 'utf8')).trimEnd().split('\n');
+    expect(lines.slice(1)).toEqual([JSON.stringify(admitted), JSON.stringify(ordinary)]);
+    const [restored, unmarked] = (await readJournal(new CodexTurnJournal(directory))).flat();
+    expect(projectedInvocationAttributeKeys(restored)).toEqual(['audit.label', 'audit.flag']);
+    expect(projectedInvocationAttributeKeys(unmarked)).toEqual([]);
+  });
+
+  it('does not give an orphan marker to a different payload after a partial write', async () => {
+    const admitted = entry('retry');
+    projectInvocationAttributes(admitted, { 'audit.label': 'trusted' });
+    await new CodexTurnJournal(directory).append([admitted]);
+    const file = filename(directory, admitted);
+    const marker = (await fs.readFile(file, 'utf8')).split('\n')[0];
+    await fs.writeFile(file, marker + '\n{"incomplete":');
+    const ordinary = entry('retry', { 'audit.label': 'raw' });
+    await new CodexTurnJournal(directory).append([ordinary]);
+    const [restored] = (await readJournal(new CodexTurnJournal(directory))).flat();
+    expect(restored).toEqual(ordinary);
+    expect(projectedInvocationAttributeKeys(restored)).toEqual([]);
+  });
 
   it('keeps late OpenClaw cron sender identity in its execution while preserving older journal keys', async () => {
     const early = entry('early', { 'gen_ai.agent.type': 'openclaw', 'agent.openclaw.collection': 'cron-lifecycle-v1' });

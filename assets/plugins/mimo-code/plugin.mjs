@@ -232,8 +232,10 @@ function getSession(sessionID) {
   if (!sessionID) return null;
   let s = sessions.get(sessionID);
   if (!s) {
+    const previous = sessionTurnSeqs.get(sessionID);
     s = {
-      turnSeq: sessionTurnSeqs.get(sessionID) ?? 0,
+      turnSeq: previous?.turnSeq ?? 0,
+      seenUserMessageIDs: previous?.seenUserMessageIDs ?? new Set(),
       currentTurn: null,
       systemPrompt: null,
       systemInstructionsParts: null,
@@ -260,7 +262,7 @@ function clearSession(sessionID) {
   const s = sessions.get(sessionID);
   if (s) {
     sessionTurnSeqs.delete(sessionID);
-    sessionTurnSeqs.set(sessionID, s.turnSeq);
+    sessionTurnSeqs.set(sessionID, { turnSeq: s.turnSeq, seenUserMessageIDs: s.seenUserMessageIDs });
     if (sessionTurnSeqs.size > MAX_SESSIONS) {
       const oldest = sessionTurnSeqs.keys().next().value;
       sessionTurnSeqs.delete(oldest);
@@ -282,6 +284,8 @@ function buildCommonFields(sessionID, session, userId) {
     trace_id: turn?.traceId ?? generateTraceId(),
     "gen_ai.session.id": sessionID,
     "gen_ai.turn.id": turn?.turnId,
+    // Trusted internal producer carrier. The collector must strip it before output.
+    ...(turn?.userMessageID ? { "pilot.invocation.native_message_id": turn.userMessageID } : {}),
     "user.id": userId,
     "gen_ai.agent.type": AGENT_TYPE,
     "gen_ai.agent.name": session.agentMeta?.name || AGENT_TYPE,
@@ -433,6 +437,12 @@ function buildOutputMessages(pendingParts, finishReason) {
 // ---------------------------------------------------------------------------
 
 function startNewTurn(session, sessionID, userMessageID) {
+  if (typeof userMessageID === "string" && userMessageID) {
+    session.seenUserMessageIDs.add(userMessageID);
+    if (session.seenUserMessageIDs.size > 64) {
+      session.seenUserMessageIDs.delete(session.seenUserMessageIDs.values().next().value);
+    }
+  }
   session.turnSeq += 1;
   const turnId = `${sessionID}:t${session.turnSeq}`;
   const traceId = generateTraceId();
@@ -489,6 +499,9 @@ function handleChatMessage(inp, out, userId) {
     return;
   }
 
+  // 0.1.17 can replay a user-message update after the terminal event.
+  // A previously owned native message must not create a new logical turn.
+  if (userMessageID && session.seenUserMessageIDs.has(userMessageID)) return;
   startNewTurn(session, sessionID, userMessageID);
 
   if (msg) {
@@ -791,13 +804,7 @@ function handleMessageUpdated(props, userId) {
   // chat.message hook did not fire (e.g. --pure mode). When chat.message
   // already created a turn for this user message, dedup and return.
   if (info.role === "user") {
-    if (
-      session.currentTurn &&
-      info.id &&
-      session.currentTurn.userMessageID === info.id
-    ) {
-      return;
-    }
+    if (info.id && session.seenUserMessageIDs.has(info.id)) return;
 
     startNewTurn(session, sessionID, info.id);
 
