@@ -99,9 +99,13 @@ export async function restoreSystemHookAssets(agentId: string, pilotDir: string,
     await mkdir(history, { recursive: true, mode: 0o700 });
     await writeTextFileAtomic(path.join(root, CURSOR_SYSTEM_CONFIG_PIN), config + '\n',
       { mode: 0o644, preserveMode: true });
+    // The container payload may ship this exact alias when package and data
+    // roots are shared. The exception belongs only to source path resolution.
+    const bundledHooksRoot = process.platform === 'linux' && path.resolve(pilotDir) === path.resolve(dataDir)
+      ? path.resolve(pilotDir) : undefined;
     // Let the Cursor Input establish its first-run baseline before the first turn.
     await restoreHookRuntimeAssets(pilotDir, dataDir, CURSOR_SYSTEM_HOOK_ASSETS, async (source, target) => {
-      await assertTrustedCursorSystemFile(source);
+      await assertTrustedCursorSystemFile(source, bundledHooksRoot);
       await assertTrustedCursorSystemDirectory(path.dirname(target));
     });
     await writeTextFileAtomic(path.join(root, CURSOR_SYSTEM_MANIFEST), CURSOR_SYSTEM_MANIFEST_TEXT,

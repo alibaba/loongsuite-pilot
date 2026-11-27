@@ -12,8 +12,8 @@ export function isTrustedCursorSystemFile(stat: Stats): boolean {
   return stat.isFile() && canTrustOwner(stat.uid) && (stat.mode & 0o022) === 0;
 }
 
-export async function assertTrustedCursorSystemFile(file: string): Promise<void> {
-  await assertTrustedCursorSystemDirectory(path.dirname(file));
+export async function assertTrustedCursorSystemFile(file: string, bundledHooksRoot?: string): Promise<void> {
+  await assertTrustedCursorSystemDirectory(path.dirname(file), bundledHooksRoot);
   if (!isTrustedCursorSystemFile(await fs.lstat(file))) {
     throw new Error(`Untrusted Cursor system runtime file: ${file}`);
   }
@@ -30,7 +30,7 @@ export async function assertTrustedCursorSystemNodePin(dataDir: string): Promise
   await fs.access(resolved, fs.constants.X_OK);
 }
 
-export async function assertTrustedCursorSystemDirectory(directory: string): Promise<void> {
+export async function assertTrustedCursorSystemDirectory(directory: string, bundledHooksRoot?: string): Promise<void> {
   let current = path.resolve(directory);
   let leaf = true;
   while (true) {
@@ -40,8 +40,18 @@ export async function assertTrustedCursorSystemDirectory(directory: string): Pro
     });
     if (stat) {
       if (!canTrustOwner(stat.uid)) throw new Error(`Untrusted Cursor system directory owner: ${current}`);
-      if (stat.isSymbolicLink() && !leaf) {
-        await assertTrustedCursorSystemDirectory(await fs.realpath(current));
+      // Only the bundled source may use assets/hooks -> ../hooks as its
+      // immediate parent. Continue to validate the resolved directory and
+      // all ancestors of both paths with the normal ownership and mode rules.
+      const bundledAlias = leaf && bundledHooksRoot && stat.isSymbolicLink()
+        && current === path.join(bundledHooksRoot, 'assets', 'hooks')
+        && await fs.readlink(current) === '../hooks';
+      if (stat.isSymbolicLink() && (!leaf || bundledAlias)) {
+        const resolved = await fs.realpath(current);
+        if (bundledAlias && bundledHooksRoot && resolved !== await fs.realpath(path.join(bundledHooksRoot, 'hooks'))) {
+          throw new Error('Cursor bundled hook source must resolve to the installed hooks directory');
+        }
+        await assertTrustedCursorSystemDirectory(resolved);
       } else if (!stat.isDirectory() || ((stat.mode & 0o022) !== 0 && (leaf || (stat.mode & 0o1000) === 0))) {
         // A sticky ancestor such as /tmp protects entries owned by the
         // installer, but the managed directory itself must be exclusive.

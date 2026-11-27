@@ -408,6 +408,30 @@ describe('Cursor enterprise system registration', () => {
     await expect(fs.stat(path.join(home, '.loongsuite-pilot'))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  it.runIf(process.platform === 'linux')('accepts the packaged hooks alias without relaxing permissions', async () => {
+    await fs.chmod(dataDir, 0o755);
+    await fs.cp(path.join(pilotDir, 'assets/hooks'), path.join(dataDir, 'hooks'), { recursive: true });
+    const alias = path.join(dataDir, 'assets/hooks');
+    await fs.mkdir(path.dirname(alias), { mode: 0o755 });
+    await fs.symlink('../hooks', alias);
+
+    const target = systemHookDefinition(def);
+    const manager = new DeploymentManager({ dataDir, pilotDir: dataDir });
+    const settings = target.hook!.settingsPath;
+    expect((await manager.deployHookScope(target)).success).toBe(true);
+    expect(await areSystemHookAssetsHealthy('cursor', dataDir, dataDir)).toBe(true);
+    const registered = await fs.readFile(settings, 'utf8');
+
+    await fs.chmod(dataDir, 0o777);
+    await expect(manager.deployHookScope(target)).rejects.toThrow('Untrusted Cursor system directory permissions');
+    await fs.chmod(dataDir, 0o755);
+
+    await fs.unlink(alias);
+    await fs.symlink(path.join(pilotDir, 'assets/hooks'), alias);
+    await expect(manager.deployHookScope(target)).rejects.toThrow('Untrusted Cursor system directory permissions');
+    expect(await fs.readFile(settings, 'utf8')).toBe(registered);
+  });
+
   it('refuses an untrusted installed asset, Node pin or executable without using the caller fallback', async () => {
     const target = systemHookDefinition(def);
     const manager = new DeploymentManager({ dataDir, pilotDir });
