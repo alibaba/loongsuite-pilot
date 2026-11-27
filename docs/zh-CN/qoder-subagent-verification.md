@@ -37,7 +37,7 @@ Qoder IDE 使用独立子 `sessionId`，其 transcript 没有 CLI sidechain 的 
 
 后台通知必须同时具有原生 `isMeta` 和 `origin.kind=task-notification` 标识；普通用户文本中的 XML 标签不构成结果证据。通知会唤起独立的父模型轮次，不新建委派。重复通知不重复输出同一结果。
 
-invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使用 `gen_ai.output.messages`。原始工具参数/结果继续保留在工具事件，统一经过工作区过滤和脱敏。当前版本始终采集消息内容，旧 `captureMessageContent=false` 不提供关闭内容的能力。
+invoke 的任务使用标准 `gen_ai.input.messages`，result 的交付内容使用 `gen_ai.output.messages`。工具参数和结果统一经过工作区过滤和脱敏。`agents.qoder.captureMessageContent=false` 会从 Pilot 输出中移除消息正文和工具参数、结果，父子关联与观察到的工具执行状态仍保留。原生结果明确失败时，对应 TOOL Span 标记为 ERROR。
 
 模型边界优先读取本次响应的原生 usage；流式多条记录的 usage 不累加。缺少 usage 时沿用已有的精确 ID 补全路径。日志新增审计事件不会额外制造模型、工具、STEP 或 Token。
 

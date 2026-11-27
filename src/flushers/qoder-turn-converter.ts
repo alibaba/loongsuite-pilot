@@ -159,6 +159,22 @@ export function prepareQoderTurn(
       const id = ids.size === 1 ? String([...ids][0]) : stableId('tool', invocation.toolCallId);
       return reserved(id, () => handler.startExecuteTool(invocation, context, start));
     },
+    stopExecuteTool(invocation, end) {
+      const results = (byTool.get(invocation.toolCallId) ?? []).filter(record => record['event.name'] === 'tool.result');
+      const outcome = consensus(results, ['tool.result.status', 'error.type']);
+      const status = outcome['tool.result.status'];
+      if (status === 'success' || status === 'failure') {
+        invocation.span?.setAttributes({ 'tool.result.status': status, 'gen_ai.tool.success': status === 'success' });
+      }
+      if (status === 'failure') {
+        const errorType = outcome['error.type'];
+        return handler.failExecuteTool(invocation, {
+          type: typeof errorType === 'string' && errorType ? errorType : '_OTHER',
+          message: 'Qoder tool call failed',
+        }, end);
+      }
+      return handler.stopExecuteTool(invocation, end);
+    },
   };
   const wrapped = new Proxy(handler, {
     get(target, key) {
