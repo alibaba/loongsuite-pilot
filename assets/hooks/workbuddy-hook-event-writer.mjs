@@ -58,10 +58,14 @@ try {
   const installedDataDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const dataDir = process.env.LOONGSUITE_PILOT_DATA_DIR
     ?? installedDataDir;
+  // Sibling agents that share WorkBuddy's hook contract (e.g. the legacy
+  // CodeBuddy client) reuse this writer and redirect only the state dir via
+  // LOONGSUITE_HOOK_STATE_DIR, keeping the record schema identical.
+  const stateDirName = process.env.LOONGSUITE_HOOK_STATE_DIR || 'workbuddy';
   const dir = path.join(
     dataDir,
     'state',
-    'workbuddy',
+    stateDirName,
     'hook-events',
     safeSessionDirName(sessionId),
   );

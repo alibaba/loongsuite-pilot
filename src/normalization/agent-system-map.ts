@@ -27,6 +27,7 @@ export const AGENT_SYSTEM_MAP: Record<string, string> = {
   'workbuddy': 'workbuddy',
   'doubao-work': 'doubao',
   'doubao': 'doubao',
+  'codebuddy': 'codebuddy',
   'dsh': 'dsh',
   'antigravity': 'antigravity',
   'antigravity-cli': 'antigravity',

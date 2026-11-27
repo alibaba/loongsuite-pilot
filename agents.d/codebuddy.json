@@ -1,0 +1,43 @@
+{
+  "id": "codebuddy",
+  "displayName": "CodeBuddy",
+  "deployMode": "hook",
+  "detection": {
+    "paths": ["~/.codebuddy"],
+    "commands": []
+  },
+  "hook": {
+    "settingsPath": "~/.codebuddy/settings.json",
+    "events": [
+      "SessionStart",
+      "UserPromptSubmit",
+      "PreToolUse",
+      "PostToolUse",
+      "Stop"
+    ],
+    "hookCommand": "$PILOT_DATA/hooks/codebuddy-loongsuite-pilot-hook.sh",
+    "format": "nested",
+    "eventSubcommand": "kebab-case",
+    "eventMatchers": {
+      "PreToolUse": ".*",
+      "PostToolUse": ".*"
+    }
+  },
+  "input": {
+    "type": "codebuddy-hook-events+history+rollout",
+    "eventDir": "$PILOT_DATA/state/codebuddy/hook-events",
+    "historyRoots": [
+      "%LOCALAPPDATA%/CodeBuddyExtension/Data",
+      "%APPDATA%/CodeBuddyExtension/Data",
+      "~/AppData/Local/CodeBuddyExtension/Data",
+      "~/Library/Application Support/CodeBuddyExtension/Data",
+      "~/Library/Caches/CodeBuddyExtension/Data",
+      "~/.config/CodeBuddyExtension/Data",
+      "~/.cache/CodeBuddyExtension/Data",
+      "~/.local/share/CodeBuddyExtension/Data"
+    ],
+    "historyLayout": "<scope>/<product>/<token>/history/<workspace-md5>/<conversationId>/{index.json,messages/*.json} — <product> = CodeBuddyIDE | VSCode | JetBrains, all scanned",
+    "rolloutRoot": "~/.codebuddy/projects",
+    "rolloutLayout": "<cwd-slug>/<sessionId>.jsonl — append-only typed records (message / function_call / function_call_result / reasoning / session-meta / ai-title), per-turn W3C traceparent in _meta, normalized usage in providerData.usage; identical layout on Windows / macOS / Linux"
+  }
+}
