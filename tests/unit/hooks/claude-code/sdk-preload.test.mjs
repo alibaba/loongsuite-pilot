@@ -18,12 +18,15 @@ beforeEach(() => {
 
 afterEach(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
-function run({ executable = '/opt/claude', argv0 = executable, bun = true, env = {} } = {}) {
+function run({
+  executable = '/opt/claude', argv0 = executable, bun = true, env = {},
+  entry = path.join(tmp, 'loader.cjs'),
+} = {}) {
   const marker = path.join(tmp, 'marker');
   const script = `
     if (${JSON.stringify(bun)}) Object.defineProperty(process.versions, 'bun', { value: 'test' });
     Object.defineProperty(process, 'execPath', { value: ${JSON.stringify(executable)} });
-    require(${JSON.stringify(path.join(tmp, 'loader.cjs'))});
+    require(${JSON.stringify(entry)});
     process.stdout.write('business continued');
   `;
   const result = spawnSync(process.execPath, ['-e', script], {
@@ -120,5 +123,40 @@ describe('Claude SDK container preload', () => {
     const result = spawnSync(process.execPath, ['-e', script], { encoding: 'utf8' });
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toBe('once');
+  });
+});
+
+
+describe('Claude Agent SDK container preload example', () => {
+  const entry = path.join(root, 'examples/claude-agent-sdk/pilot-bun-preload.cjs');
+
+  function installExampleAssets(dataDir) {
+    const hooks = path.join(dataDir, 'hooks');
+    fs.mkdirSync(hooks, { recursive: true });
+    fs.copyFileSync(loader, path.join(hooks, 'claude-code-sdk-preload.cjs'));
+    fs.copyFileSync(
+      path.join(tmp, 'claude-code-fetch-intercept.mjs'), path.join(hooks, 'claude-code-fetch-intercept.mjs'),
+    );
+  }
+
+  test('loads the packaged helper from a configured data directory', () => {
+    const dataDir = path.join(tmp, 'shared pilot data');
+    installExampleAssets(dataDir);
+    expect(run({ entry, env: { LOONGSUITE_PILOT_DATA_DIR: dataDir } })).toBe('loaded\n');
+  });
+
+  test('uses the default installation when no data directory is set', () => {
+    installExampleAssets(path.join(tmp, '.loongsuite-pilot'));
+    expect(run({ entry, env: { LOONGSUITE_PILOT_DATA_DIR: '' } })).toBe('loaded\n');
+  });
+
+  test('uses the existing content capture policy', () => {
+    installExampleAssets(path.join(tmp, 'data'));
+    fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({ otlpTrace: { captureMessageContent: false } }));
+    expect(run({ entry })).toBe('');
+  });
+
+  test('does not interrupt Claude startup when Pilot is absent', () => {
+    expect(run({ entry })).toBe('');
   });
 });

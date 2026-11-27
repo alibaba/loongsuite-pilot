@@ -59,3 +59,36 @@ with that identity rather than creating root-owned state and changing it later.
 Existing directories, file ownership and permissions remain authoritative. If
 the identity helper fails, installation reports failure without retrying as root.
 This does not recursively repair ownership left by an earlier installation.
+
+## Claude Agent SDK request enrichment in containers
+
+The SDK can spawn the native Bun Claude binary directly. The interactive
+`claude` shell function is not involved. Installing the lifecycle hooks can
+produce ordinary spans, but does not by itself attach the interceptor that
+supplies `gen_ai.response.time_to_first_token` and `gen_ai.system_instructions`.
+
+Copy the [example preload](../examples/claude-agent-sdk/pilot-bun-preload.cjs)
+into the application image as `/app/pilot-bun-preload.cjs`. In the container's
+startup script, after preparing the Agent's settings and Pilot data directory:
+
+```sh
+loongsuite-pilot hook install --agents claude-code || true
+export BUN_OPTIONS="${BUN_OPTIONS:+$BUN_OPTIONS }--require=/app/pilot-bun-preload.cjs"
+exec node /app/server.mjs
+```
+
+Use the same Pilot data directory for the collector and the Claude child. The
+example uses `LOONGSUITE_PILOT_DATA_DIR`, or `~/.loongsuite-pilot` when unset. If
+the application passes an explicit `options.env` to the SDK, preserve
+`BUN_OPTIONS` and any Pilot data-directory or config-path overrides needed by
+the child. Do not put this entry in `NODE_OPTIONS` instead: it must run inside
+native Claude, not only inside its Node parent.
+
+If you already control a shared Bun preload, it can load the packaged
+`hooks/claude-code-sdk-preload.cjs` in a `try` block instead. Neither example
+starts the Collector or replaces lifecycle hook registration. The packaged
+helper still checks the native Claude process and skips enrichment when its
+assets are unavailable. Disabling Claude or trace content capture also skips
+this enrichment, including TTFT; ordinary lifecycle hooks are unaffected.
+Verify the two attributes on an LLM span from a streaming request with system
+instructions.

@@ -411,6 +411,7 @@ SDK 直接启动 Claude Code 时不会经过交互式 shell 的 `claude` 函数�
 如果业务显式替换了子进程环境，容器的公共预加载也需要保留在新环境中。为避免在
 本地补充记录中写入被禁用的内容，关闭 Claude 或 Trace 内容采集时会跳过此请求补充
 （包括 TTFT）；常规 Claude Hook 不受影响。
+没有公共预加载入口时，参见[容器接入示例](container-onboarding.md#场景一镜像集成)。
 
 ## 注册 Agent
 

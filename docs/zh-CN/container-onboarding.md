@@ -41,6 +41,21 @@ CMD ["sh", "-c", "loongsuite-pilot hook install --agents claude-code || true; ex
 CMD ["sh", "-c", "/app/render-settings.sh && { loongsuite-pilot hook install --agents claude-code || true; } && exec claude -p \"$TASK\""]
 ```
 
+**1-3 Claude Agent SDK 直接启动原生 Claude。** SDK 不经过交互式 shell 的 `claude`
+函数。只执行 `hook install` 可以有普通 Trace，但不会自动补齐 TTFT 和系统提示词。
+把[示例 preload](../../examples/claude-agent-sdk/pilot-bun-preload.cjs)复制到业务镜像的
+`/app/pilot-bun-preload.cjs`，再在启动 Node 服务前追加到现有 `BUN_OPTIONS`：
+
+```sh
+loongsuite-pilot hook install --agents claude-code || true
+export BUN_OPTIONS="${BUN_OPTIONS:+$BUN_OPTIONS }--require=/app/pilot-bun-preload.cjs"
+exec node /app/server.mjs
+```
+
+如果业务显式设置 SDK 的 `options.env`，依然要把 `BUN_OPTIONS` 和实际使用的 Pilot
+数据目录、配置路径传给子进程。示例不会启动 Collector，也不改变内容采集策略。
+更多细节见[容器预加载说明](../runtime-bootstrap.md#claude-agent-sdk-request-enrichment-in-containers)。
+
 ## 场景二：Kubernetes webhook
 
 **2-1 只打 label。** 行为与现在相同：
