@@ -9,7 +9,7 @@ mod claude_code;
 pub(crate) mod codex;
 mod common;
 mod copilot;
-mod cursor;
+pub(crate) mod cursor;
 mod cursor_policy;
 pub(crate) use cursor_policy::{cursor_config_record, CONFIG_MARKER as CURSOR_CONFIG_MARKER};
 mod grok_build;
@@ -20,6 +20,7 @@ mod qoder_wakeup;
 mod qoder_work;
 mod qwen_code_cli;
 mod qwen_work_cn;
+mod qwen_work_cn_reader;
 pub(crate) mod trae_cn;
 mod workbuddy;
 
@@ -34,6 +35,8 @@ pub use qoder::{
     resolve_qoder_collector_cli_identity, resolve_qoder_collector_cli_identity_with_env,
 };
 pub use qoder_wakeup::{publish_qoder_wakeup, with_qoder_wakeup_lock};
+pub(crate) use qwen_work_cn::run_for_sdk as run_qwen_work_cn_for_sdk;
+pub(crate) use qwen_work_cn_reader::TranscriptReadBudget;
 
 use common::{write_empty, Env, HookRequest};
 use std::io::{IsTerminal, Read, Write};
@@ -61,7 +64,7 @@ pub fn run_hook_process(agent: &str) -> i32 {
     let mut raw = Vec::new();
     if !terminal {
         if bounded_qoder || agent == "trae-cn" {
-            let limit = if bounded_qoder {
+            let limit = if agent != "trae-cn" {
                 1024 * 1024
             } else {
                 4 * 1024 * 1024
@@ -171,12 +174,14 @@ pub(crate) fn dispatch(
         stdout,
     };
     let code = match agent {
+        #[cfg(test)]
         "cursor" => cursor::run(&mut request),
         "claude-code" => claude_code::run(&mut request),
         #[cfg(test)]
         "codex" => codex::run(&mut request),
         "copilot" => copilot::run(&mut request),
         "qwen-code-cli" => qwen_code_cli::run(&mut request),
+        #[cfg(test)]
         "qwen-work-cn" => qwen_work_cn::run(&mut request),
         "grok-build" => grok_build::run(&mut request),
         "qoder" | "qoder-cn" => qoder::run(&mut request),

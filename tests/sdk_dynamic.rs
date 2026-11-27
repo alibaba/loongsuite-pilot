@@ -88,7 +88,24 @@ unsafe extern "C" fn on_hook(
         std::slice::from_raw_parts(request.data, request.len)
     })
     .unwrap_or(Value::Null);
-    let allow = value["command"] == "echo approved";
+    let verdict: &[u8] = if value["kind"] == "managed_local"
+        && matches!(
+            value["request"]["agent"].as_str(),
+            Some("openclaw" | "qwen-work-cn")
+        ) {
+        let response = value["request"]["toolResponse"].to_string();
+        if response.contains("SDK fixture managed block") {
+            br#"{"action":"block","matched":true,"reason":"SDK fixture managed rule"}"#
+        } else if response.contains("SDK fixture managed log") {
+            br#"{"action":"allow","matched":true,"ruleId":"fixture-log","ruleVersion":"1"}"#
+        } else {
+            br#"{"action":"allow","matched":false}"#
+        }
+    } else if value["command"] == "echo approved" {
+        br#"{"action":"allow"}"#
+    } else {
+        br#"{"action":"block","reason":"SDK foreign host test"}"#
+    };
     c.hook_requests.lock().unwrap().push(value);
     c.hook_entered.fetch_add(1, Ordering::SeqCst);
     while c.hook_hold.load(Ordering::SeqCst) {
@@ -102,11 +119,6 @@ unsafe extern "C" fn on_hook(
         unsafe { *len = cap + 1 };
         return OK;
     }
-    let verdict: &[u8] = if allow {
-        br#"{"action":"allow"}"#
-    } else {
-        br#"{"action":"block","reason":"SDK foreign host test"}"#
-    };
     if cap < verdict.len() {
         return FAILURE;
     }
@@ -281,6 +293,1374 @@ impl Drop for Host {
 fn empty_policy() -> Value {
     json!({"version":"original","agents":[],"hcd":{"agent_configs":{}}})
 }
+
+#[test]
+fn four_migrated_agents_share_one_sdk_and_resume_independent_cursors() {
+    let fixture = tempfile::tempdir().unwrap();
+    let root = fixture.path().canonicalize().unwrap();
+    let data = root.join("sdk");
+    let profiles = [
+        ("opencode", "opencode_plugin_v1"),
+        ("openclaw", "openclaw_plugin_v1"),
+        ("cursor", "cursor_hook_v1"),
+        ("qwen-work-cn", "qwen_work_cn_trace_v1"),
+    ];
+    let mut policy = json!({
+        "agents": profiles.map(|(agent, _)| agent),
+        "hcd": {"agent_configs": {}},
+        "sdk_options": {"delivery": {"flush_interval_ms": 10}},
+    });
+    let day = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let log_path = |agent| root.join(agent).join(format!("{agent}-{day}.jsonl"));
+    for (agent, profile) in profiles {
+        let history = root.join(agent);
+        std::fs::create_dir(&history).unwrap();
+        std::fs::File::create(log_path(agent)).unwrap();
+        policy["hcd"]["agent_configs"][agent] = json!({"collection": {
+            "enabled": true,
+            "profile": profile,
+            "allowed_roots": [history],
+            "sources": [{"id": "history", "type":"hook_jsonl", "path": history}],
+            "limits": {"poll_interval_ms": 100},
+        }});
+    }
+    let ready = |host: &Host| {
+        host.ready();
+        until(|| {
+            let snapshot = host.snapshot();
+            let statuses = snapshot["agents"].as_array().unwrap();
+            statuses.len() == profiles.len()
+                && statuses
+                    .iter()
+                    .all(|entry| entry["status"]["state"] == "running")
+        });
+    };
+    let append = |phase| {
+        let now = chrono::Utc::now()
+            .timestamp_nanos_opt()
+            .unwrap()
+            .to_string();
+        for (index, (agent, _)) in profiles.iter().enumerate() {
+            let row = json!({
+                "event.name": "llm.response", "event.id": format!("{agent}-{phase}"),
+                "gen_ai.agent.type": agent, "gen_ai.session.id": "same-native-session",
+                "gen_ai.turn.id": format!("turn-{phase}"), "gen_ai.step.id": "step",
+                "gen_ai.usage.input_tokens": 100 + index,
+                "time_unix_nano": now,
+            });
+            writeln!(
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(log_path(agent))
+                    .unwrap(),
+                "{row}"
+            )
+            .unwrap();
+        }
+    };
+    let assert_delivered = |host: &mut Host, phase| {
+        until(|| host.ctx.rows.lock().unwrap().len() >= profiles.len());
+        until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+        host.stop();
+        let rows = host.ctx.rows.lock().unwrap();
+        assert_eq!(rows.len(), profiles.len());
+        for (index, (agent, _)) in profiles.iter().enumerate() {
+            let id = format!("{agent}-{phase}");
+            let row = rows
+                .iter()
+                .map(|row| serde_json::from_slice::<Value>(row).unwrap())
+                .find(|entry| entry["event.id"] == id)
+                .unwrap_or_else(|| panic!("missing {id}"));
+            assert_eq!(row["gen_ai.agent.type"], *agent);
+            assert_eq!(row["gen_ai.usage.input_tokens"], 100 + index);
+        }
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    ready(&host);
+    append("original");
+    assert_delivered(&mut host, "original");
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    ready(&resumed);
+    append("resumed");
+    assert_delivered(&mut resumed, "resumed");
+}
+
+#[test]
+fn opencode_profile_delivers_and_resumes_existing_plugin_events() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let append = |id: &str| {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "{}",
+            json!({"event.id": id, "event.name":"llm.response",
+                "gen_ai.agent.type":"opencode","gen_ai.session.id":"sample","gen_ai.turn.id":"turn",
+                "gen_ai.step.id":"turn:s1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,
+                "time_unix_nano":"1780000000000000000","observed_time_unix_nano":"1780000000000000000"})
+        ).unwrap();
+    };
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-first");
+    until(|| host.ctx.rows.lock().unwrap().len() >= 2);
+    {
+        let rows = host.ctx.rows.lock().unwrap();
+        assert_eq!(rows[0], rows[1]);
+        let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+        assert_eq!(row["event.id"], "sample-first");
+        assert_eq!(row["gen_ai.usage.input_tokens"], 100);
+    }
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-second");
+    until(|| {
+        resumed.ctx.rows.lock().unwrap().iter().any(|row| {
+            serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] == "sample-second")
+        })
+    });
+    assert!(resumed.ctx.rows.lock().unwrap().iter().all(|row| {
+        serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] != "sample-first")
+    }));
+    resumed.stop();
+}
+
+#[test]
+fn opencode_hosted_mask_is_applied_before_activity_is_queued() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let mask = json!({"mode":"custom","types":["apiKey"],"replacementMode":"placeholder"});
+    let manifest = json!({"version":1,"rules":[{
+        "id":"local-sentinel","type":"apiKey","kind":"regex","replacement":"[LOCAL_MASKED]",
+        "prefilter":["private-fixture-"],"pattern":"private-fixture-[0-9]+"
+    }]});
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[root],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":25},
+        "pilot_host":{"data_dir":root,"mask_rule_manifest":manifest}
+    }}}}, "sdk_options":{"mask":mask,"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy, ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    let text = "private-fixture-654321";
+    let entry = json!({"event.id":"mask-fixture","event.name":"llm.response",
+        "gen_ai.agent.type":"opencode","gen_ai.session.id":"mask-session","gen_ai.turn.id":"mask-turn",
+        "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":text}]}],
+        "time_unix_nano":"1780000000000000000"});
+    std::fs::write(&log, format!("{entry}\n")).unwrap();
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    let db = rusqlite::Connection::open_with_flags(
+        data.join("outbox/delivery.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let payload: Vec<u8> = db
+        .query_row("SELECT payload FROM event", [], |row| row.get(0))
+        .unwrap();
+    let stored = String::from_utf8(payload.clone()).unwrap();
+    assert!(stored.contains("[LOCAL_MASKED]"), "{stored}");
+    assert!(!stored.contains(text));
+    assert_eq!(host.ctx.rows.lock().unwrap()[0], payload);
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+}
+
+#[test]
+fn opencode_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["opencode"],"hcd":{"agent_configs":{"opencode":{"collection":{
+        "enabled":true,"profile":"opencode_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":1024}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("opencode-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"opencode", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 2048), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
+fn openclaw_policy(history: &Path) -> Value {
+    json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
+}
+#[test]
+fn openclaw_profile_delivers_and_resumes_existing_plugin_events() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = openclaw_policy(&history);
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let append = |id: &str| {
+        writeln!(
+            std::fs::OpenOptions::new().append(true).open(&log).unwrap(),
+            "{}",
+            json!({"event.id": id, "event.name":"llm.response",
+                "gen_ai.agent.type":"openclaw","gen_ai.session.id":"sample","gen_ai.turn.id":"turn",
+                "gen_ai.step.id":"turn:s1","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":20,
+                "time_unix_nano":"1780000000000000000","observed_time_unix_nano":"1780000000000000000"})
+        ).unwrap();
+    };
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-first");
+    until(|| host.ctx.rows.lock().unwrap().len() >= 2);
+    {
+        let rows = host.ctx.rows.lock().unwrap();
+        assert_eq!(rows[0], rows[1]);
+        let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+        assert_eq!(row["event.id"], "sample-first");
+        assert_eq!(row["gen_ai.usage.input_tokens"], 100);
+    }
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    append("sample-second");
+    until(|| {
+        resumed.ctx.rows.lock().unwrap().iter().any(|row| {
+            serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] == "sample-second")
+        })
+    });
+    assert!(resumed.ctx.rows.lock().unwrap().iter().all(|row| {
+        serde_json::from_slice::<Value>(row).is_ok_and(|row| row["event.id"] != "sample-first")
+    }));
+    resumed.stop();
+}
+
+#[test]
+fn openclaw_drains_history_larger_than_one_sdk_memory_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    let output = "bounded response ".repeat(150);
+    let expected = (0..48)
+        .map(|number| format!("bulk-response-{number}"))
+        .collect::<Vec<_>>();
+    let mut file = std::fs::File::create(&log).unwrap();
+    for id in &expected {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":"sample","gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","gen_ai.usage.output_tokens":20,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let memory_limit = 64 * 1024;
+    assert!(std::fs::metadata(&log).unwrap().len() > memory_limit);
+    let mut policy = openclaw_policy(&history);
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| host.ctx.rows.lock().unwrap().len() >= expected.len());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    let actual = rows
+        .iter()
+        .map(|bytes| {
+            let row: Value = serde_json::from_slice(bytes).unwrap();
+            assert_eq!(row["gen_ai.usage.output_tokens"], 20);
+            assert_eq!(
+                row["gen_ai.output.messages"][0]["parts"][0]["content"],
+                output
+            );
+            row["event.id"].as_str().unwrap().to_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn openclaw_advances_past_an_oversized_excluded_entry() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    let excluded = root.join("excluded");
+    std::fs::create_dir(&history).unwrap();
+    std::fs::create_dir(&excluded).unwrap();
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let mut file = std::fs::File::create(history.join(format!("openclaw-{day}.jsonl"))).unwrap();
+    let memory_limit = 64 * 1024;
+    for (id, workspace, output) in [
+        ("excluded", &excluded, "x".repeat(memory_limit * 2)),
+        ("allowed", &root, "small response".to_owned()),
+    ] {
+        let row = json!({
+            "event.id":id,"event.name":"llm.response","gen_ai.agent.type":"openclaw",
+            "gen_ai.session.id":id,"gen_ai.turn.id":"turn","gen_ai.step.id":"turn:s1",
+            "time_unix_nano":"1780000000000000000","workspace.path":workspace,
+            "gen_ai.output.messages":[{"role":"assistant","parts":[{"type":"text","content":output}]}],
+        });
+        writeln!(file, "{row}").unwrap();
+    }
+    drop(file);
+    let mut policy = openclaw_policy(&history);
+    policy["hcd"]["agent_configs"]["openclaw"]["collection"]["pilot_host"] = json!({
+        "data_dir": history, "capture_message_content": true, "exclude_workspaces": [excluded],
+    });
+    policy["sdk_options"]["delivery"]["max_batch_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["max_event_bytes"] = json!(memory_limit);
+    policy["sdk_options"]["delivery"]["queue_memory_bytes"] = json!(memory_limit);
+    let mut host = Host::start(&root.join("instance"), policy, Box::default());
+    host.ready();
+    until(|| !host.ctx.rows.lock().unwrap().is_empty());
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    let rows = host.ctx.rows.lock().unwrap();
+    assert_eq!(rows.len(), 1);
+    let row: Value = serde_json::from_slice(&rows[0]).unwrap();
+    assert_eq!(row["event.id"], "allowed");
+}
+
+#[test]
+fn openclaw_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["openclaw"],"hcd":{"agent_configs":{"openclaw":{"collection":{
+        "enabled":true,"profile":"openclaw_plugin_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":4096}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("openclaw-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"openclaw", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 10 * 1024), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
+#[test]
+fn cursor_native_inbox_filters_before_disk_and_recovers_independent_sessions() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let pilot = root.join("pilot");
+    let data = pilot.join("state/standalone-cursor-sdk");
+    let history = pilot.join("logs/cursor/history");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::create_dir(pilot.join("hooks")).unwrap();
+    let config = root.join("cursor-policy.json");
+    std::fs::write(
+        &config,
+        json!({"agents":{
+            "cursor":{"captureMessageContent":false},
+            "cursor-cli":{"captureMessageContent":true},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        pilot.join("hooks/cursor-config-path"),
+        json!({"path":config,
+        "implicitDefault":false})
+        .to_string(),
+    )
+    .unwrap();
+    let queue = |session, generation, version, name, field: &str, value| {
+        let mut body = json!({"conversation_id":session,"generation_id":generation,
+            "cursor_version":version,"cwd":root,"model":"cursor-test"});
+        body[field] = json!(value);
+        let reply = sdk_hook_command(&pilot, "observe", "cursor", name, &body)
+            .wait_with_output()
+            .unwrap();
+        assert!(reply.status.success() && reply.stderr.is_empty());
+        assert_eq!(String::from_utf8_lossy(&reply.stdout).trim(), "{}");
+    };
+    let cli = "2026.11.25-abcd";
+    let ide = "3.30.14";
+    queue(
+        "ide-session",
+        "a",
+        ide,
+        "beforeSubmitPrompt",
+        "prompt",
+        "private-ide",
+    );
+    queue(
+        "cli-session",
+        "b",
+        cli,
+        "beforeSubmitPrompt",
+        "prompt",
+        "collect-cli",
+    );
+    queue(
+        "ambiguous",
+        "c",
+        "unknown",
+        "beforeSubmitPrompt",
+        "prompt",
+        "private-ambiguous",
+    );
+    let (late, guard) = hold_test_rollback_ingress(&root, &pilot);
+    queue("cli-session", "b", cli, "stop", "status", "completed");
+    queue(
+        "ide-session",
+        "a",
+        ide,
+        "afterAgentResponse",
+        "text",
+        "private-ide-answer",
+    );
+    queue("ide-session", "a", ide, "stop", "status", "completed");
+    queue(
+        "cli-session",
+        "b",
+        cli,
+        "afterAgentResponse",
+        "text",
+        "collect-cli-answer",
+    );
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 4);
+    drop(guard);
+    let inbox = pilot.join("state/cursor/deferred/inbox");
+    let files: Vec<_> = std::fs::read_dir(&inbox)
+        .unwrap()
+        .chain(std::fs::read_dir(&late).unwrap())
+        .map(|f| f.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 7);
+    for file in files {
+        let raw = std::fs::read_to_string(file).unwrap();
+        assert!(!raw.contains("private-"));
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        if value["cursor_hook"]["conversation_id"] != "cli-session" {
+            assert_eq!(value["content_omitted"], true);
+        }
+    }
+
+    let policy = json!({"agents":["cursor"],"hcd":{"agent_configs":{"cursor":{"collection":{
+        "enabled":true,"profile":"cursor_hook_v1","allowed_roots":[pilot],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100},"pilot_host":{"data_dir":pilot}
+    }}}},"sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    let response_sessions = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|row| {
+                let entry: Value = serde_json::from_slice(row).unwrap();
+                (entry["event.name"] == "llm.response")
+                    .then(|| entry["gen_ai.session.id"].as_str().unwrap().to_owned())
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    until(|| response_sessions(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 0);
+    assert_eq!(
+        response_sessions(&host),
+        ["cli-session".to_owned(), "ide-session".to_owned()].into()
+    );
+    let rows = host.ctx.rows.lock().unwrap();
+    let ids: std::collections::HashSet<_> = rows
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(ids.len(), rows.len());
+    assert!(rows
+        .iter()
+        .any(|row| String::from_utf8_lossy(row).contains("collect-cli-answer")));
+    assert!(rows
+        .iter()
+        .all(|row| !String::from_utf8_lossy(row).contains("private-")));
+    drop(rows);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    queue(
+        "after-restart",
+        "d",
+        cli,
+        "beforeSubmitPrompt",
+        "prompt",
+        "next prompt",
+    );
+    queue(
+        "after-restart",
+        "d",
+        cli,
+        "afterAgentResponse",
+        "text",
+        "next answer",
+    );
+    queue("after-restart", "d", cli, "stop", "status", "completed");
+    until(|| !response_sessions(&resumed).is_empty());
+    assert_eq!(
+        response_sessions(&resumed),
+        ["after-restart".to_owned()].into()
+    );
+    resumed.stop();
+}
+
+fn hold_test_rollback_ingress(root: &Path, owner: &Path) -> (std::path::PathBuf, std::fs::File) {
+    let cache = root.join("rollback-cache");
+    let installed = cache.join("versions/native");
+    std::fs::create_dir_all(&installed).unwrap();
+    std::fs::write(cache.join("current"), b"native\n").unwrap();
+    std::fs::write(
+        installed.join("runtime-manifest.json"),
+        br#"{"runtime":"rust"}"#,
+    )
+    .unwrap();
+    let late = cache.join(".sdk-hook-rollback-inbox");
+    std::fs::create_dir(&late).unwrap();
+    std::fs::write(
+        owner.join(".sdk-hook-ingress-install.json"),
+        json!(cache.canonicalize().unwrap()).to_string(),
+    )
+    .unwrap();
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(owner.join(".sdk-hook-ingress.lock"))
+        .unwrap();
+    fs2::FileExt::try_lock_exclusive(&lock).unwrap();
+    (late, lock)
+}
+
+#[test]
+fn cursor_history_advances_past_a_record_larger_than_the_poll_budget() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let data = root.join("instance");
+    let policy = json!({"agents":["cursor"],"hcd":{"agent_configs":{"cursor":{"collection":{
+        "enabled":true,"profile":"cursor_hook_v1","allowed_roots":[history],
+        "sources":[{"id":"history","type":"hook_jsonl","path":history}],
+        "limits":{"poll_interval_ms":100,"max_read_bytes":8388608}
+    }}}}, "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let day = chrono::Local::now().format("%Y-%m-%d");
+    let log = history.join(format!("cursor-{day}.jsonl"));
+    std::fs::File::create(&log).unwrap();
+    let row = |id: &str, padding: usize| {
+        json!({"event.id":id, "event.name":"llm.response",
+            "gen_ai.agent.type":"cursor", "gen_ai.session.id":"large-line-session",
+            "gen_ai.turn.id":"turn", "gen_ai.step.id":"turn:s1",
+            "gen_ai.usage.input_tokens":10, "time_unix_nano":"1780000000000000000",
+            "source_padding":"x".repeat(padding)})
+    };
+    let ids = |host: &Host| {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|raw| {
+                let row: Value = serde_json::from_slice(raw).unwrap();
+                assert_eq!(row["gen_ai.usage.input_tokens"], 10);
+                row["event.id"].as_str().unwrap().to_owned()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+    std::fs::write(
+        &log,
+        format!("{}\n{}\n", row("long", 9 * 1024 * 1024), row("short", 0)),
+    )
+    .unwrap();
+    until(|| ids(&host).len() >= 2);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    assert_eq!(ids(&host), ["long", "short"]);
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(log).unwrap(),
+        "{}",
+        row("next", 0)
+    )
+    .unwrap();
+    until(|| !ids(&resumed).is_empty());
+    resumed.stop();
+    assert_eq!(ids(&resumed), ["next"]);
+}
+
+#[test]
+fn qwen_history_and_segments_use_the_dynamic_sdk_with_restart_and_retry() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let history = root.join("history");
+    let segments = root.join("segments");
+    std::fs::create_dir(&history).unwrap();
+    std::fs::create_dir(&segments).unwrap();
+    let policy = json!({"version":"qwen-v1","agents":["qwen-work-cn"],
+        "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
+            "enabled":true,"profile":"qwen_work_cn_trace_v1",
+            "allowed_roots":[history,segments],
+            "sources":[{"id":"history","type":"hook_jsonl","path":history},
+                       {"id":"segments","type":"segments","path":segments}],
+            "limits":{"poll_interval_ms":100}}}}},
+        "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let data = root.join("data");
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| host.snapshot()["agents"][0]["status"]["state"] == "running");
+
+    let segment_dir = segments.join("-workspace/session-1/segments");
+    std::fs::create_dir_all(&segment_dir).unwrap();
+    let segment = [
+        json!({"ts":"2026-08-06T06:00:00.000Z","type":"model.request.started",
+            "turn_id":"turn-1","request_id":"request-1","data":{"model":"qmodel_latest"}}),
+        json!({"ts":"2026-08-06T06:00:05.000Z","type":"model.response.completed",
+            "turn_id":"turn-1","request_id":"request-1",
+            "data":{"model":"qmodel_latest","input_tokens":100,"output_tokens":20}}),
+    ];
+    std::fs::write(
+        segment_dir.join("run.jsonl"),
+        format!("{}\n{}\n", segment[0], segment[1]),
+    )
+    .unwrap();
+    let mut request = json!({"event.id":"qwen-sdk-request","event.name":"llm.request",
+        "time_unix_nano":"1785996005000000000","gen_ai.agent.type":"qwen-work-cn",
+        "gen_ai.session.id":"session-1","gen_ai.turn.id":"turn-1",
+        "gen_ai.step.id":"turn-1:s1","agent.qwenworkcn.cwd":"/workspace"});
+    request["gen_ai.request.model"] = json!("unknown");
+    let mut response = request.clone();
+    response["event.id"] = json!("qwen-sdk-response");
+    response["event.name"] = json!("llm.response");
+    response["gen_ai.response.id"] = json!("qwen-response-1");
+    let history_file = history.join(format!(
+        "qwen-work-cn-{}.jsonl",
+        chrono::Local::now().format("%Y-%m-%d")
+    ));
+    std::fs::write(&history_file, format!("{request}\n{response}\n")).unwrap();
+    until(|| host.ctx.rows.lock().unwrap().len() >= 4);
+    let retry = host.ctx.rows.lock().unwrap().clone();
+    assert_eq!(retry[0], retry[2]);
+    assert_eq!(retry[1], retry[3]);
+    let rows: Vec<Value> = retry[..2]
+        .iter()
+        .map(|row| serde_json::from_slice(row).unwrap())
+        .collect();
+    let response = rows
+        .iter()
+        .find(|row| row["event.id"] == "qwen-sdk-response")
+        .unwrap();
+    assert_eq!(response["gen_ai.usage.input_tokens"], 100);
+    assert_eq!(response["gen_ai.usage.output_tokens"], 20);
+    assert_eq!(response["gen_ai.request.model"], "qmodel_latest");
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.snapshot()["agents"][0]["status"]["state"] == "running");
+    request["event.id"] = json!("qwen-sdk-next");
+    request["gen_ai.turn.id"] = json!("turn-2");
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(history_file)
+            .unwrap(),
+        "{request}"
+    )
+    .unwrap();
+    until(|| !resumed.ctx.rows.lock().unwrap().is_empty());
+    let delivered = resumed.ctx.rows.lock().unwrap().clone();
+    let ids: Vec<Value> = delivered
+        .iter()
+        .map(|row| serde_json::from_slice::<Value>(row).unwrap()["event.id"].clone())
+        .collect();
+    assert_eq!(ids, vec![json!("qwen-sdk-next")]);
+    resumed.stop();
+}
+
+#[test]
+fn qwen_history_and_collaboration_share_sdk_with_independent_recovery() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let history = base.join("history");
+    let collaboration = base.join("collaboration");
+    let allowed = collaboration.join("test-env/account-a/channel-v1");
+    let excluded = collaboration.join("test-env/account-b/channel-v1");
+    std::fs::create_dir_all(&history).unwrap();
+    std::fs::create_dir_all(&allowed).unwrap();
+    std::fs::create_dir_all(&excluded).unwrap();
+    let policy = json!({"version":"qwen-collaboration","agents":["qwen-work-cn"],
+        "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
+            "enabled":true,"profile":"qwen_work_cn_trace_v1",
+            "allowed_roots":[history,collaboration],
+            "sources":[{"id":"history","type":"hook_jsonl","path":history},
+                       {"id":"collaboration","type":"collaboration","path":collaboration}],
+            "include_conversation_ids":["allowed"],"capture_message_content":false,
+            "limits":{"poll_interval_ms":100}}}}},
+        "sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}});
+    let data = base.join("data");
+    let ctx = Box::<Context>::default();
+    ctx.retry.store(true, Ordering::SeqCst);
+    let mut host = Host::start(&data, policy.clone(), ctx);
+    host.ready();
+    until(|| {
+        let snapshot = host.snapshot();
+        snapshot["agents"].as_array().is_some_and(|agents| {
+            agents.len() == 2
+                && agents
+                    .iter()
+                    .all(|agent| agent["status"]["state"] == "running")
+        })
+    });
+    let now = chrono::Utc::now().timestamp() + 2;
+    let fixture = |conversation: &str, reply: &str| {
+        json!({"version":1,"accounts":{"account":{
+        "userId":"owner","orgId":"org","messages":{
+            "prompt":{"messageId":"prompt","conversationId":conversation,"text":"private prompt",
+                "createdAt":{"seconds":now,"nanos":1},"sender":{"id":"owner","type":"HUMAN"}},
+            reply:{"messageId":reply,"conversationId":conversation,"replyToMessageId":"prompt",
+                "sender":{"id":"agent","type":"AGENT"},"cardRef":{"cardId":"card"}}},
+        "cards":{"card":{"cardId":"card","resourceState":"AVAILABLE","contentStatus":"FINAL",
+            "messageLink":{"cid":conversation,"messageId":reply},
+            "terminalAt":{"seconds":now+1,"nanos":0},"content":"private answer"}}}}})
+    };
+    std::fs::write(
+        allowed.join("state.json"),
+        fixture("allowed", "first").to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        excluded.join("state.json"),
+        fixture("excluded", "ignored").to_string(),
+    )
+    .unwrap();
+    let history_file = history.join(format!(
+        "qwen-work-cn-{}.jsonl",
+        chrono::Local::now().format("%Y-%m-%d")
+    ));
+    let record = json!({"event.id":"qwen-history-independent","event.name":"llm.request",
+        "time_unix_nano":"1785996005000000000","gen_ai.agent.type":"qwen-work-cn",
+        "gen_ai.session.id":"session-1","gen_ai.turn.id":"turn-1","gen_ai.step.id":"turn-1:s1"});
+    std::fs::write(history_file, format!("{record}\n")).unwrap();
+    until(|| {
+        let rows = host.ctx.rows.lock().unwrap();
+        let parsed: Vec<Value> = rows
+            .iter()
+            .filter_map(|row| serde_json::from_slice(row).ok())
+            .collect();
+        parsed
+            .iter()
+            .any(|row| row["event.id"] == "qwen-history-independent")
+            && parsed
+                .iter()
+                .filter(|row| row["agent.source"] == "qwen-work-cn-collaboration")
+                .map(|row| row["event.id"].as_str().unwrap_or(""))
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == 2
+    });
+    let retry = host.ctx.rows.lock().unwrap().clone();
+    let mut original = std::collections::HashMap::<String, Vec<u8>>::new();
+    for row in &retry {
+        let value: Value = serde_json::from_slice(row).unwrap();
+        let id = value["event.id"].as_str().unwrap().to_owned();
+        if let Some(before) = original.insert(id, row.clone()) {
+            assert_eq!(&before, row, "RETRY changed delivered bytes");
+        }
+        assert!(!String::from_utf8_lossy(row).contains("private prompt"));
+        assert!(!String::from_utf8_lossy(row).contains("private answer"));
+    }
+    host.ctx.retry.store(false, Ordering::SeqCst);
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    host.stop();
+    drop(host);
+
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| {
+        resumed.snapshot()["agents"]
+            .as_array()
+            .is_some_and(|agents| {
+                agents.len() == 2
+                    && agents
+                        .iter()
+                        .all(|agent| agent["status"]["state"] == "running")
+            })
+    });
+    std::fs::write(
+        allowed.join("state.json"),
+        fixture("allowed", "second").to_string(),
+    )
+    .unwrap();
+    until(|| {
+        resumed
+            .ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| {
+                serde_json::from_slice::<Value>(row)
+                    .is_ok_and(|value| value["agent.source"] == "qwen-work-cn-collaboration")
+            })
+            .count()
+            == 2
+    });
+    let delivered = resumed.ctx.rows.lock().unwrap();
+    assert_eq!(delivered.len(), 2);
+    assert!(delivered.iter().all(|row| {
+        let value: Value = serde_json::from_slice(row).unwrap();
+        !original.contains_key(value["event.id"].as_str().unwrap())
+            && !String::from_utf8_lossy(row).contains("private ")
+    }));
+    drop(delivered);
+    resumed.stop();
+}
+
+#[test]
+fn qwen_passive_prompt_leaves_no_hook_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let data = temporary.path().canonicalize().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"))
+        .args([
+            "sdk-hook",
+            "--data-dir",
+            data.to_str().unwrap(),
+            "--channel",
+            "observe",
+            "--agent",
+            "qwen-work-cn",
+            "--event",
+            "UserPromptSubmit",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+    assert!(std::fs::read_dir(data).unwrap().next().is_none());
+}
+
+#[test]
+fn qwen_stop_accepts_a_replacement_after_the_queued_transcript_is_removed() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = root.join("transcripts");
+    let data = root.join("data");
+    std::fs::create_dir(&source).unwrap();
+    let policy = json!({"version":"qwen-replacement","agents":["qwen-work-cn"],
+        "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
+            "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[source],
+            "sources":[{"id":"transcript","type":"transcript","path":source}],
+            "limits":{"poll_interval_ms":100}}}}},
+        "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let mut initialized = Host::start(&data, policy.clone(), Box::default());
+    initialized.ready();
+    initialized.stop();
+    drop(initialized);
+
+    let session = "qwen-same-session";
+    let publish = |path: &Path| {
+        let payload = json!({"hook_event_name":"Stop","session_id":session,
+            "transcript_path":path,"cwd":"/workspace"});
+        let output = sdk_hook_command(&data, "observe", "qwen-work-cn", "Stop", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    };
+    let old = source.join("old.jsonl");
+    std::fs::write(&old, "{}\n").unwrap();
+    publish(&old);
+    let wakeups = data.join("wakeups/qwen-work-cn");
+    let old_marker = std::fs::read_dir(&wakeups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    std::fs::remove_file(&old).unwrap();
+
+    let expired = wakeups.join("000-expired.json");
+    let expired_file = std::fs::File::create(&expired).unwrap();
+    (&expired_file)
+        .write_all(
+            &serde_json::to_vec(&json!({"session_id":session,
+        "transcript_path":source.join("expired.jsonl"),"snapshot_bytes":1}))
+            .unwrap(),
+        )
+        .unwrap();
+    expired_file
+        .set_modified(std::time::SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+    drop(expired_file);
+
+    let replacement = source.join("replacement.jsonl");
+    let before = json!({"type":"user","uuid":"prompt","promptId":"p1","sessionId":session,
+        "cwd":"/workspace","message":{"role":"user","content":"replacement prompt"}});
+    let after = json!({"type":"assistant","uuid":"response","sessionId":session,
+        "cwd":"/workspace","message":{"id":"r1","role":"assistant","model":"qwen-test",
+            "content":[{"type":"text","text":"replacement accepted"}],"stop_reason":"end_turn"}});
+    std::fs::write(&replacement, format!("{before}\n{after}\n")).unwrap();
+    publish(&replacement);
+    assert_eq!(std::fs::read_dir(&wakeups).unwrap().count(), 3);
+
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    until(|| {
+        host.ctx.rows.lock().unwrap().iter().any(|row| {
+            let entry: Value = serde_json::from_slice(row).unwrap();
+            entry["event.name"] == "llm.response" && entry["gen_ai.session.id"] == session
+        })
+    });
+    until(|| std::fs::read_dir(&wakeups).unwrap().count() == 1);
+    assert!(
+        old_marker.is_file(),
+        "a new missing marker remains retryable"
+    );
+    assert!(!expired.exists());
+    assert!(replacement.is_file());
+    host.stop();
+}
+
+#[test]
+fn qwen_native_stop_is_durable_while_sdk_is_stopped_and_resumes_after_restart() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let projects = root.join("projects");
+    let source = root.join("logs/hooks");
+    std::fs::create_dir(&projects).unwrap();
+    std::fs::create_dir_all(&source).unwrap();
+    let transcript = source.join("session.jsonl");
+    let data = root.join("data");
+    let user = |turn: &str| {
+        json!({"type":"user","uuid":turn,"promptId":turn,
+        "sessionId":"sdk-qwen-session","cwd":"/workspace",
+        "message":{"role":"user","content":[{"type":"text","text":"private-prompt"}]}})
+    };
+    let assistant = |turn: &str| {
+        json!({"type":"assistant","uuid":format!("{turn}-response"),
+        "sessionId":"sdk-qwen-session","cwd":"/workspace",
+        "message":{"role":"assistant","id":format!("{turn}-model"),"model":"qwen-test",
+            "content":[{"type":"text","text":"private-answer"}]}})
+    };
+    std::fs::write(
+        &transcript,
+        format!("{}\n{}\n", user("turn-1"), assistant("turn-1")),
+    )
+    .unwrap();
+    // Many valid short native rows make this Stop larger than the SDK's
+    // default 8 MiB read budget without exceeding the per-record limit.
+    let padding = json!({"type":"progress","data":"x".repeat(1024)}).to_string();
+    {
+        let mut transcript = std::io::BufWriter::new(
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&transcript)
+                .unwrap(),
+        );
+        for _ in 0..9000 {
+            writeln!(transcript, "{padding}").unwrap();
+        }
+    }
+    assert!(std::fs::metadata(&transcript).unwrap().len() > 9 * 1024 * 1024);
+    let payload = json!({"hook_event_name":"Stop","session_id":"sdk-qwen-session",
+        "transcript_path":transcript,"cwd":"/workspace","prompt":"private-prompt"});
+    let publish = || {
+        let output = sdk_hook_command(&data, "observe", "qwen-work-cn", "Stop", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stdout.is_empty());
+    };
+    publish();
+    let wakeups = data.join("wakeups/qwen-work-cn");
+    assert!(!wakeups.exists(), "no collection policy must fail closed");
+    let policy = json!({"version":"qwen-native","agents":["qwen-work-cn"],
+        "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
+            "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[projects,source],
+            "sources":[{"id":"transcript","type":"transcript","path":projects},
+                {"id":"flash-transcript","type":"transcript","path":source}],
+            "capture_message_content":false,"limits":{"poll_interval_ms":500}}}}},
+        "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let mut initialized = Host::start(&data, policy.clone(), Box::default());
+    initialized.ready();
+    initialized.stop();
+    drop(initialized);
+    publish();
+    let saved = std::fs::read_dir(&wakeups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let marker = std::fs::read_to_string(&saved).unwrap();
+    assert!(!marker.contains("private-prompt"));
+    // One damaged or unauthorized SDK-owned marker must not permanently
+    // block a valid wakeup behind it or delete the external source.
+    std::fs::write(wakeups.join("000-invalid.json"), b"{").unwrap();
+    let outside = root.join("outside.jsonl");
+    std::fs::write(&outside, b"not an authorized source").unwrap();
+    std::fs::write(
+        wakeups.join("001-outside.json"),
+        json!({"session_id":"outside","transcript_path":outside}).to_string(),
+    )
+    .unwrap();
+    let missing = wakeups.join("002-missing.json");
+    std::fs::write(
+        &missing,
+        json!({"session_id":"missing",
+        "transcript_path":source.join("missing.jsonl"),"snapshot_bytes":1})
+        .to_string(),
+    )
+    .unwrap();
+    // Shut down on the first partial pass. The input keeps the marker while
+    // the paused reader is joined, then resumes from the durable boundary.
+    let mut interrupted = Host::start(&data, policy.clone(), Box::default());
+    interrupted.ready();
+    until(|| interrupted.snapshot()["agents"][0]["status"]["state"] == "running");
+    assert!(saved.is_file());
+    interrupted.stop();
+    assert!(saved.is_file());
+    assert!(interrupted.ctx.rows.lock().unwrap().is_empty());
+    drop(interrupted);
+
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    until(|| host.ctx.rows.lock().unwrap().len() >= 3);
+    let first = host.ctx.rows.lock().unwrap().clone();
+    let event_ids = first
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        event_ids.len(),
+        first.len(),
+        "each recovered event was delivered once"
+    );
+    assert!(first
+        .iter()
+        .all(|row| !String::from_utf8_lossy(row).contains("private-")));
+    assert!(first
+        .iter()
+        .any(|row| serde_json::from_slice::<Value>(row).unwrap()["event.name"] == "llm.response"));
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    assert!(missing.exists(), "unavailable source must remain retryable");
+    std::fs::remove_file(&missing).unwrap();
+    until(|| std::fs::read_dir(&wakeups).unwrap().next().is_none());
+    assert!(outside.exists());
+    host.stop();
+    drop(host);
+
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+        "{}\n{}",
+        user("turn-2"),
+        assistant("turn-2")
+    )
+    .unwrap();
+    publish();
+    let mut resumed = Host::start(&data, policy, Box::default());
+    resumed.ready();
+    until(|| resumed.ctx.rows.lock().unwrap().len() >= 3);
+    let next = resumed.ctx.rows.lock().unwrap().clone();
+    assert!(next
+        .iter()
+        .all(|row| serde_json::from_slice::<Value>(row).unwrap()["gen_ai.turn.id"] == "turn-2"));
+    until(|| std::fs::read_dir(&wakeups).unwrap().next().is_none());
+    assert_eq!(resumed.apply(empty_policy()).0, OK);
+    publish();
+    assert!(std::fs::read_dir(&wakeups).unwrap().next().is_none());
+    resumed.stop();
+}
+
+#[test]
+fn qwen_sdk_can_share_authorized_node_cursor_for_cutover_and_rollback() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = root.join("transcripts");
+    let old_pilot = root.join("old-pilot");
+    let data = root.join("sdk");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::create_dir_all(old_pilot.join("state/hooks")).unwrap();
+    let transcript = source.join("session.jsonl");
+    let user = |turn: &str| {
+        json!({"type":"user","uuid":turn,"promptId":turn,
+        "sessionId":"shared-session","timestamp":"2026-11-17T10:00:00Z",
+        "message":{"role":"user","content":[{"type":"text","text":turn}]}})
+    };
+    let assistant = |turn: &str| {
+        json!({"type":"assistant","uuid":format!("{turn}-answer"),
+        "sessionId":"shared-session","timestamp":"2026-11-17T10:00:01Z",
+        "message":{"role":"assistant","id":format!("{turn}-model"),"model":"qwen-test",
+            "content":[{"type":"text","text":"ok"}]}})
+    };
+    std::fs::write(
+        &transcript,
+        format!("{}\n{}\n", user("old"), assistant("old")),
+    )
+    .unwrap();
+    let mut shadow = serde_json::Map::new();
+    shadow.insert(
+        transcript.to_string_lossy().into_owned(),
+        json!({
+            "session_id":"shared-session","last_line_count":2,"updated_at":"2026-11-17 10:00:01"
+        }),
+    );
+    std::fs::write(
+        old_pilot.join("state/hooks/qwen-work-cn-line-records.json"),
+        Value::Object(shadow).to_string(),
+    )
+    .unwrap();
+    let policy = json!({"version":"shared-node-cursor","agents":["qwen-work-cn"],
+        "hcd":{"agent_configs":{"qwen-work-cn":{"collection":{
+            "enabled":true,"profile":"qwen_work_cn_trace_v1","allowed_roots":[source,old_pilot],
+            "sources":[{"id":"transcript","type":"transcript","path":source}],
+            "pilot_host":{"data_dir":old_pilot},"limits":{"poll_interval_ms":100}}}}},
+        "sdk_options":{"delivery":{"flush_interval_ms":10}}});
+    let payload = json!({"hook_event_name":"Stop","session_id":"shared-session",
+        "transcript_path":transcript,"cwd":"/tmp"});
+    let publish = || {
+        let output = sdk_hook_command(&data, "observe", "qwen-work-cn", "Stop", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+    };
+    let mut host = Host::start(&data, policy.clone(), Box::default());
+    host.ready();
+    publish();
+    let wakeups = data.join("wakeups/qwen-work-cn");
+    until(|| std::fs::read_dir(&wakeups).unwrap().next().is_none());
+    assert!(
+        host.ctx.rows.lock().unwrap().is_empty(),
+        "old turn must not be replayed"
+    );
+    host.stop();
+    drop(host);
+    writeln!(
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&transcript)
+            .unwrap(),
+        "{}\n{}",
+        user("sdk-turn"),
+        assistant("sdk-turn")
+    )
+    .unwrap();
+    let (late, guard) = hold_test_rollback_ingress(&root, &data);
+    publish();
+    assert_eq!(std::fs::read_dir(&wakeups).unwrap().count(), 0);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 1);
+    drop(guard);
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    until(|| host.ctx.rows.lock().unwrap().len() >= 3);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 0);
+    let recovered = host.ctx.rows.lock().unwrap().clone();
+    let recovered_ids: std::collections::HashSet<_> = recovered
+        .iter()
+        .map(|row| {
+            serde_json::from_slice::<Value>(row).unwrap()["event.id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        recovered_ids.len(),
+        "late Qwen activity must be delivered once"
+    );
+    assert!(host
+        .ctx
+        .rows
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|row| serde_json::from_slice::<Value>(row).unwrap()["gen_ai.turn.id"] == "sdk-turn"));
+    until(|| host.snapshot()["delivery"]["pending_events"] == 0);
+    until(|| std::fs::read_dir(&wakeups).unwrap().next().is_none());
+    host.stop();
+    drop(host);
+
+    // The pinned Node release uses this cursor format. Verify bytes written
+    // by the SDK, without invoking a retired Rust producer as a Node stand-in.
+    let cursor: Value = serde_json::from_slice(
+        &std::fs::read(old_pilot.join("state/hooks/qwen-work-cn-line-records.json")).unwrap(),
+    )
+    .unwrap();
+    let shadow = &cursor[transcript.to_string_lossy().as_ref()];
+    assert_eq!(shadow["session_id"], "shared-session");
+    assert_eq!(shadow["last_line_count"], 4);
+    assert!(!old_pilot.join("logs/qwen-work-cn/history").exists());
+}
+
 fn qoder_policy(source: &Path) -> Value {
     json!({"version":"qoder-v1","agents":["qoder"],"hcd":{"agent_configs":{"qoder":{"collection":{"enabled":true,"profile":"qoder_trace_v1","allowed_roots":[source],"sources":[{"id":"hook","type":"hook_jsonl","path":source}],"limits":{"poll_interval_ms":100}}}}},"sdk_options":{"delivery":{"flush_interval_ms":10,"retry_initial_ms":20,"retry_max_ms":40}}})
 }
@@ -2453,4 +3833,189 @@ fn codex_sdk_deploys_trusted_hooks_and_cleans_only_its_own() {
     assert_eq!(cleanup.apply(empty_policy()).0, OK);
     assert_eq!(std::fs::read(&settings).unwrap(), cleared);
     cleanup.stop();
+}
+
+#[test]
+fn openclaw_native_local_command_preserves_allow_block_and_unavailable_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {"hooks": {"local": {"mode": "all", "types": []}}},
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |content: &str| {
+        let payload = json!({"openclaw_hook":"tool_result_persist","session_id":"native-edge","tool_name":"read","tool_response":content});
+        sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap()
+    };
+    let allowed = call("ordinary tool result");
+    assert!(allowed.status.success());
+    assert!(allowed.stdout.is_empty());
+    assert!(call("LTAI1234567890ABCD").stdout.is_empty());
+    let denied = call("SDK fixture managed block");
+    assert!(denied.status.success());
+    let post: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert!(post["action"] == "block");
+    assert!(post.to_string().contains("SDK fixture managed rule"));
+    host.stop();
+    let offline = call("SDK fixture managed block");
+    assert!(offline.status.success());
+    assert!(offline.stdout.is_empty());
+}
+
+#[test]
+fn openclaw_native_post_tool_audits_coalesce_only_two_clean_allows() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["openclaw"],
+        "hcd": {"agent_configs": {"openclaw": {"collection": {"enabled": false}}}},
+        "sdk_options": {
+            "delivery": {"flush_interval_ms": 1},
+            "hooks": {"local": {"mode": "all", "types": []}},
+        },
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |hook: &str, session: &str, key: &str, response: Value| {
+        let payload = json!({
+            "openclaw_hook": hook, "session_id": session, "tool_use_id": "test-call",
+            "tool_name": "read", "tool_response": response, "openclaw_post_tool_audit_key": key,
+        });
+        let output = sdk_hook_command(&data, "local", "openclaw", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap();
+        assert!(output.status.success());
+        output.stdout
+    };
+    let audits = || {
+        host.ctx
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|row| serde_json::from_slice::<Value>(row).ok())
+            .filter(|row| row["event.kind"] == "interceptor.result")
+            .collect::<Vec<_>>()
+    };
+    let remembered = "a".repeat(64);
+    let other = "b".repeat(64);
+    let result = json!({
+        "content": [{"type": "text", "text": "ordinary"}], "details": {"elapsed": 1},
+    });
+    let mut message = result.clone();
+    message["role"] = json!("toolResult");
+    message["toolCallId"] = json!("test-call");
+    message["toolName"] = json!("read");
+    message["isError"] = json!(false);
+    message["timestamp"] = json!(1000);
+    message["__openclaw"] = json!({"runId": "run-1"});
+    assert!(call("tool_result_middleware", "first", &remembered, result).is_empty());
+    until(|| {
+        audits()
+            .iter()
+            .any(|row| row["gen_ai.session.id"] == "first")
+    });
+    assert!(call(
+        "tool_result_persist",
+        "other-session",
+        &remembered,
+        message.clone()
+    )
+    .is_empty());
+    let denied = call(
+        "tool_result_persist",
+        "first",
+        &remembered,
+        json!({"details": {"nested":["SDK fixture managed block"]}}),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&denied).unwrap()["action"],
+        "block"
+    );
+    assert!(call("tool_result_persist", "", &remembered, message).is_empty());
+    assert!(call("tool_result_persist", "unpaired", &other, json!("ordinary")).is_empty());
+    assert!(call(
+        "tool_result_persist",
+        "consumed",
+        &remembered,
+        json!("ordinary")
+    )
+    .is_empty());
+    let log_key = "c".repeat(64);
+    for hook in ["tool_result_middleware", "tool_result_persist"] {
+        assert!(call(hook, "logged", &log_key, json!("SDK fixture managed log")).is_empty());
+    }
+    until(|| {
+        let rows = audits();
+        ["first", "other-session", "unpaired", "consumed"]
+            .into_iter()
+            .all(|session| rows.iter().any(|row| row["gen_ai.session.id"] == session))
+            && rows.iter().any(|row| row["hook.action"] == "block")
+            && rows
+                .iter()
+                .filter(|row| row["gen_ai.session.id"] == "logged")
+                .count()
+                == 2
+    });
+    // Both paired callbacks receive real SDK verdicts. Only the second
+    // identical clean allow omits its extra interceptor.result event.
+    let replies = || {
+        hook_trace(&data, "hook-verdict.jsonl")
+            .into_iter()
+            .filter(|row| row["stage"] == "reply")
+            .collect::<Vec<_>>()
+    };
+    let deadline = Instant::now() + Duration::from_secs(4);
+    while replies().len() < 8 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let replies = replies();
+    assert_eq!(replies.len(), 8, "SDK replies: {replies:?}");
+    assert!(
+        replies
+            .iter()
+            .all(|row| row["detail"]["status"] == "verdict"),
+        "SDK replies: {replies:?}"
+    );
+    assert_eq!(audits().len(), 7, "paired clean allows produced two audits");
+    host.stop();
+}
+
+#[test]
+fn qwen_work_cn_native_local_command_preserves_allow_block_and_unavailable_behavior() {
+    let root = tempfile::tempdir().unwrap();
+    let data = root.path().join("sdk");
+    let policy = json!({
+        "agents": ["qwen-work-cn"],
+        "hcd": {"agent_configs": {"qwen-work-cn": {"collection": {"enabled": false}}}},
+        "sdk_options": {"hooks": {"local": {"mode": "all", "types": []}}},
+    });
+    let mut host = Host::start(&data, policy, Box::default());
+    host.ready();
+    let call = |content: &str| {
+        let payload =
+            json!({"session_id":"native-edge","tool_name":"read","tool_response":content});
+        sdk_hook_command(&data, "local", "qwen-work-cn", "PostToolUse", &payload)
+            .wait_with_output()
+            .unwrap()
+    };
+    let allowed = call("ordinary tool result");
+    assert!(allowed.status.success());
+    assert!(allowed.stdout.is_empty());
+    assert!(call("SDK fixture managed log").stdout.is_empty());
+    assert!(call("LTAI1234567890ABCD").stdout.is_empty());
+    let denied = call("SDK fixture managed block");
+    assert!(denied.status.success());
+    let post: Value = serde_json::from_slice(&denied.stdout).unwrap();
+    assert!(post["hookSpecificOutput"]["hookEventName"] == "PostToolUse");
+    assert!(post.to_string().contains("SDK fixture managed rule"));
+    host.stop();
+    let offline = call("SDK fixture managed block");
+    assert!(offline.status.success());
+    assert!(offline.stdout.is_empty());
 }

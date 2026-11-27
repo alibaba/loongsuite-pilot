@@ -17,6 +17,8 @@ impl AgentHook {
             "qoder-cn" => InterceptorAgent::QoderCn,
             "qoderclicn" => InterceptorAgent::QoderCliCn,
             "codex" => InterceptorAgent::Codex,
+            "openclaw" => InterceptorAgent::OpenClaw,
+            "qwen-work-cn" => InterceptorAgent::QwenWorkCn,
             _ => return None,
         }))
     }
@@ -35,10 +37,11 @@ impl AgentHook {
             | InterceptorAgent::QoderCli
             | InterceptorAgent::QoderCn
             | InterceptorAgent::QoderCliCn
-            | InterceptorAgent::Codex => {
+            | InterceptorAgent::Codex
+            | InterceptorAgent::OpenClaw
+            | InterceptorAgent::QwenWorkCn => {
                 matches!(event, "PreToolUse" | "PostToolUse" | "UserPromptSubmit")
             }
-            _ => false,
         }
     }
 
@@ -47,7 +50,9 @@ impl AgentHook {
     }
 
     pub(super) fn parse(self, payload: &Map<String, Value>, event: &str) -> Option<HookRequest> {
-        // These adapters share the current session/tool field names.
+        if self.0 == InterceptorAgent::OpenClaw {
+            return crate::interceptor::adapters::parse_openclaw_hook_request(payload, Some(event));
+        }
         parse_hook_request(payload, self.0, Some(event))
     }
 
@@ -191,10 +196,28 @@ pub(crate) fn codex_command(
     if !supported {
         return None;
     }
+    sdk_hook_command(executable, data_dir, "codex", event, channel)
+}
+
+pub(crate) fn sdk_hook_command(
+    executable: &Path,
+    data_dir: &Path,
+    agent: &str,
+    event: &str,
+    channel: &str,
+) -> Option<String> {
+    if ![agent, event, channel].iter().all(|value| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    }) {
+        return None;
+    }
     let executable = quote_codex_path(executable)?;
     let data_dir = quote_codex_path(data_dir)?;
     Some(format!(
-        "{executable} sdk-hook --channel {channel} --agent codex --event {event} --data-dir {data_dir} --pilot-sdk-managed"
+        "{executable} sdk-hook --channel {channel} --agent {agent} --event {event} --data-dir {data_dir} --pilot-sdk-managed"
     ))
 }
 

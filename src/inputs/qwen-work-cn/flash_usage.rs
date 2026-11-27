@@ -1,14 +1,41 @@
-use crate::inputs::base::{is_event, query_readonly};
+use crate::inputs::base::{is_event, query_readonly_sync};
 use crate::interceptor::prompt_verdict::{digest, lookup_from_entry};
 use crate::types::AgentActivityEntry;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const PROMPT_SKEW_MS: i64 = 5_000;
 const MAX_PROMPT_ROWS: usize = 32;
 const MAX_CALL_PARTS: usize = 1_024;
 const JS_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+async fn query_readonly(
+    path: &str,
+    sql: &'static str,
+    params: &[Value],
+) -> Result<Vec<Value>, String> {
+    use crate::utils::source_access::{current, install, SourceScope};
+    let scope = current();
+    let path = path.to_owned();
+    let params = params.to_vec();
+    tokio::task::spawn_blocking(move || {
+        struct Restore(Option<Arc<SourceScope>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                install(self.0.take());
+            }
+        }
+        // The SDK source allowlist is thread-local. Keep it in force for
+        // SQLite's check and read-only, no-follow open on the blocking worker.
+        let _restore = Restore(current());
+        install(scope);
+        query_readonly_sync(&path, sql, &params)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
 
 pub(super) struct FlashSource {
     pub desktop_db: String,
@@ -283,6 +310,26 @@ mod tests {
     use super::*;
     use crate::inputs::base::entry_from;
     use rusqlite::{params, Connection};
+
+    #[tokio::test]
+    async fn qwen_flash_worker_preserves_sdk_source_scope() {
+        use crate::utils::source_access::{current, install, SourceScope};
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let allow = root.join("allowed.db");
+        let deny = root.join("unlisted.db");
+        for path in [&allow, &deny] {
+            Connection::open(path).unwrap();
+        }
+        let previous = current();
+        install(Some(SourceScope::new(vec![allow.clone()], 4, 1024)));
+        let accepted = query_readonly(allow.to_str().unwrap(), "SELECT 1 AS fixture", &[]).await;
+        let rejected = query_readonly(deny.to_str().unwrap(), "SELECT 1 AS fixture", &[]).await;
+        install(previous);
+        assert_eq!(accepted.unwrap(), [json!({"fixture":1})]);
+        assert!(rejected.unwrap_err().contains("outside authorized roots"));
+    }
 
     #[tokio::test]
     async fn qwen_flash_usage_matches_one_owner_and_preserves_authoritative_usage() {

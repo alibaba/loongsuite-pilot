@@ -10,11 +10,8 @@ struct Hook {
 }
 
 enum Mode {
-    Payload,
     Event(&'static [&'static str]),
     Identity,
-    FixedIdentity,
-    Interceptor,
     SdkHook(&'static str),
 }
 
@@ -33,11 +30,6 @@ const HOOKS: &[Hook] = &[
             "stop",
             "agent-stop",
         ]),
-    },
-    Hook {
-        file: "cursor-loongsuite-pilot-hook",
-        agent: "cursor",
-        mode: Mode::Payload,
     },
     Hook {
         file: "claude-code-loongsuite-pilot-hook",
@@ -96,28 +88,15 @@ const HOOKS: &[Hook] = &[
         mode: Mode::Identity,
     },
     Hook {
-        file: "qwenworkcn-loongsuite-pilot-hook",
-        agent: "qwen-work-cn",
-        mode: Mode::FixedIdentity,
-    },
-    Hook {
         file: "interceptor-hook",
         agent: "qoder-auto",
         mode: Mode::SdkHook("local"),
-    },
-    Hook {
-        file: "interceptor-qwenworkcn-hook",
-        agent: "qwen-work-cn",
-        mode: Mode::Interceptor,
     },
 ];
 
 fn powershell(hook: &Hook) -> String {
     let agent = hook.agent;
-    let empty = if matches!(
-        hook.mode,
-        Mode::Identity | Mode::FixedIdentity | Mode::Interceptor | Mode::SdkHook(_)
-    ) {
+    let empty = if matches!(hook.mode, Mode::Identity | Mode::SdkHook(_)) {
         ""
     } else {
         "{}"
@@ -131,7 +110,6 @@ fn powershell(hook: &Hook) -> String {
         script.push_str("$NativeArgs += '--wakeup-only'\n");
     }
     match hook.mode {
-        Mode::Payload => {}
         Mode::Event(allowed) => {
             script.push_str("$Event = if ($args.Count -gt 0) { $args[0] } else { 'unknown' }\n");
             if !allowed.is_empty() {
@@ -149,19 +127,9 @@ fn powershell(hook: &Hook) -> String {
         Mode::Identity => {
             script.push_str(&format!("$AgentId = if ($args.Count -gt 0) {{ $args[0] }} else {{ '{agent}' }}\n$NativeArgs += @('--agent-id', $AgentId, '--log-prefix', $AgentId)\n"));
         }
-        Mode::FixedIdentity => {
-            script.push_str(&format!(
-                "$NativeArgs += @('--agent-id', '{agent}', '--log-prefix', '{agent}')\n"
-            ));
-        }
         Mode::SdkHook(channel) => script.push_str(&format!(
             "$NativeArgs = @('sdk-hook', '--channel', '{channel}', '--agent', '{agent}')\n"
         )),
-        Mode::Interceptor => {
-            script.push_str(&format!(
-                "$NativeArgs = @('interceptor', 'hook', '--agent', '{agent}') + $args\n"
-            ));
-        }
     }
     script.push_str("try {\n    . (Join-Path $PSScriptRoot 'shared\\native.ps1')\n    Invoke-PilotNative -HookDir $PSScriptRoot -Arguments $NativeArgs -EmptyResult $EmptyResult\n} catch {\n    Write-Error '[loongsuite-pilot] native hook bootstrap failed' -ErrorAction Continue\n    if ($EmptyResult) { Write-Output $EmptyResult }\n}\nexit 0\n");
     script
@@ -169,10 +137,7 @@ fn powershell(hook: &Hook) -> String {
 
 fn shell(hook: &Hook) -> String {
     let agent = hook.agent;
-    let empty = if matches!(
-        hook.mode,
-        Mode::Identity | Mode::Interceptor | Mode::SdkHook(_)
-    ) {
+    let empty = if matches!(hook.mode, Mode::Identity | Mode::SdkHook(_)) {
         ""
     } else {
         "{}"
@@ -190,7 +155,6 @@ fn shell(hook: &Hook) -> String {
         script.push_str("NATIVE_ARGS+=('--wakeup-only')\n");
     }
     match hook.mode {
-        Mode::Payload => {}
         Mode::Event(allowed) => {
             script.push_str("EVENT=\"${1:-unknown}\"\n");
             if !allowed.is_empty() {
@@ -201,19 +165,9 @@ fn shell(hook: &Hook) -> String {
         Mode::Identity => {
             script.push_str(&format!("AGENT_ID=\"${{1:-{agent}}}\"\nNATIVE_ARGS+=('--agent-id' \"$AGENT_ID\" '--log-prefix' \"$AGENT_ID\")\n"));
         }
-        Mode::FixedIdentity => {
-            script.push_str(&format!(
-                "NATIVE_ARGS+=('--agent-id' '{agent}' '--log-prefix' '{agent}')\n"
-            ));
-        }
         Mode::SdkHook(channel) => script.push_str(&format!(
             "NATIVE_ARGS=('sdk-hook' '--channel' '{channel}' '--agent' '{agent}')\n"
         )),
-        Mode::Interceptor => {
-            script.push_str(&format!(
-                "NATIVE_ARGS=('interceptor' 'hook' '--agent' '{agent}' \"$@\")\n"
-            ));
-        }
     }
     script.push_str(
         r#"HOOK_DIR="${BASH_SOURCE[0]%/*}"
@@ -221,16 +175,6 @@ fn shell(hook: &Hook) -> String {
 if HOOK_DIR="$(cd -- "$HOOK_DIR" && pwd -P)" && source "$HOOK_DIR/shared/native.sh"; then
 "#,
     );
-    if hook.file == "qwenworkcn-loongsuite-pilot-hook" {
-        script.push_str(
-            r#"  # The installed dedicated entrypoint owns its data root even when the caller
-  # inherited a stale Pilot environment. Source/package assets keep explicit env.
-  if [[ "${HOOK_DIR##*/}" == hooks && "${HOOK_DIR%/*}" != */assets ]]; then
-    export LOONGSUITE_PILOT_DATA_DIR="${HOOK_DIR%/*}"
-  fi
-"#,
-        );
-    }
     script.push_str(
         r#"  pilot_invoke_native "$HOOK_DIR" "$EMPTY_RESULT" "${NATIVE_ARGS[@]}"
 "#,
@@ -329,7 +273,7 @@ mod tests {
         sync(root.path(), true).unwrap();
         let path = root
             .path()
-            .join("assets/hooks/cursor-loongsuite-pilot-hook.ps1");
+            .join("assets/hooks/claude-code-loongsuite-pilot-hook.ps1");
         fs::write(&path, "modified").unwrap();
         assert!(sync(root.path(), true).is_err());
         assert_eq!(fs::read_to_string(path).unwrap(), "modified");

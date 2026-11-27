@@ -16,11 +16,13 @@ use std::time::{Duration, Instant};
 const CODEX_SHELL_MIGRATED: &str = "__pilot_codex_shell_migrated_v1";
 const CODEX_LEGACY_EXPORTED: &str = "__pilot_codex_legacy_exported_v1";
 const QODER_LEGACY_EXPORTED: &str = "__pilot_qoder_legacy_exported_v1";
+const HOOK_HISTORY_LEGACY_EXPORTED: &str = "__pilot_hook_history_legacy_exported_v1";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LegacyCheckpointHandoff {
     Codex,
     Qoder,
+    HookHistory(&'static str),
 }
 
 impl LegacyCheckpointHandoff {
@@ -28,6 +30,7 @@ impl LegacyCheckpointHandoff {
         match self {
             Self::Codex => CODEX_LEGACY_EXPORTED,
             Self::Qoder => QODER_LEGACY_EXPORTED,
+            Self::HookHistory(_) => HOOK_HISTORY_LEGACY_EXPORTED,
         }
     }
 
@@ -35,18 +38,58 @@ impl LegacyCheckpointHandoff {
         match input {
             "codex-transcript" | "codex-aborted-turn" => Some(Self::Codex),
             "qoder-trace" => Some(Self::Qoder),
+            "openclaw-plugin-log" => Some(Self::HookHistory("openclaw")),
+            "opencode-log" => Some(Self::HookHistory("opencode")),
+            "cursor-hook" => Some(Self::HookHistory("cursor")),
+            "qwen-work-cn-trace" => Some(Self::HookHistory("qwen-work-cn")),
+            "qwen-work-cn-collaboration" => Some(Self::HookHistory("qwen-work-cn-collaboration")),
             _ => None,
+        }
+    }
+
+    pub(crate) fn data_dir(self, pilot_dir: &Path, input: &str) -> PathBuf {
+        let suffix = match self {
+            Self::Qoder => return pilot_dir.join(super::STANDALONE_QODER_DATA),
+            Self::Codex => input,
+            Self::HookHistory(agent) => agent,
+        };
+        pilot_dir
+            .join("state")
+            .join(format!("standalone-{suffix}-sdk"))
+    }
+
+    pub(crate) fn legacy_cursor(self) -> Option<LegacyCursor> {
+        use crate::inputs::rest_support::has_usable_hook_log_cursor;
+        let Self::HookHistory(agent) = self else {
+            return None;
+        };
+        match agent {
+            "qwen-work-cn" => Some(("qwen-work-cn-trace", has_usable_hook_log_cursor)),
+            "qwen-work-cn-collaboration" => Some((
+                "qwen-work-cn-collaboration",
+                crate::inputs::qwen_work_cn::has_usable_collaboration_cursor,
+            )),
+            agent => super::hook_history::find(agent)
+                .map(|profile| (profile.listener, has_usable_hook_log_cursor as _)),
         }
     }
 }
 
-enum ShellCheckpoint {
+type LegacyCursor = (&'static str, fn(&crate::checkpoints::InputState) -> bool);
+
+enum CheckpointImport {
     Existing(Option<String>),
     Handoff(Option<String>),
     Consolidated(String),
 }
 
 type DeliveryRows = Vec<(i64, Vec<u8>)>;
+
+pub(crate) enum ShellCheckpoint {
+    Pending,
+    Exported { has_progress: bool },
+    Ready(Option<String>),
+}
 
 const SAVE_CHECKPOINT: &str = "INSERT INTO checkpoint VALUES(?1,?2)
     ON CONFLICT(source) DO UPDATE SET json=excluded.json WHERE checkpoint.json<>excluded.json";
@@ -460,10 +503,7 @@ impl Outbox {
             .optional()?)
     }
 
-    pub(crate) fn read_persisted_checkpoint(
-        root: &Path,
-        source: &str,
-    ) -> anyhow::Result<Option<String>> {
+    fn open_checkpoint_database(root: &Path) -> anyhow::Result<Connection> {
         let db = Connection::open_with_flags(
             Self::database_path(root)?,
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -471,7 +511,104 @@ impl Outbox {
                 | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         db.busy_timeout(Duration::from_secs(1))?;
-        Self::find_checkpoint(&db, source)
+        Ok(db)
+    }
+
+    pub(crate) fn read_persisted_checkpoint(
+        root: &Path,
+        source: &str,
+    ) -> anyhow::Result<Option<String>> {
+        Self::find_checkpoint(&Self::open_checkpoint_database(root)?, source)
+    }
+
+    pub(crate) fn read_acknowledged_checkpoint(
+        root: &Path,
+        source: &str,
+    ) -> anyhow::Result<Option<String>> {
+        use rusqlite::OptionalExtension;
+        let db = Self::open_checkpoint_database(root)?;
+        // The source checkpoint and queue depth must agree in the same snapshot.
+        // Fail closed while even one event from this SDK instance awaits ACK.
+        let checkpoint = db
+            .query_row(
+                "SELECT checkpoint.json FROM checkpoint, queue_size
+                 WHERE source=?1 AND singleton=1 AND events=0",
+                [source],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(checkpoint)
+    }
+
+    /// Read the durable queue and its corresponding cursor under collector
+    /// ownership. The exported marker guards later progress by a legacy reader.
+    pub(crate) fn checkpoint_for_shell(
+        root: &Path,
+        source: &str,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        Self::drained_shell_checkpoint(root, Some(source), handoff)
+    }
+
+    // Qwen uses one standalone SDK instance per input. Its namespace includes
+    // configured source paths that need not be available to the installer.
+    // When no current namespace is known, accept only one durable source.
+    pub(crate) fn drained_shell_checkpoint(
+        root: &Path,
+        source: Option<&str>,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<ShellCheckpoint> {
+        let db = Self::open_checkpoint_database(root)?;
+        let pending: i64 = db.query_row("SELECT events FROM queue_size", [], |row| row.get(0))?;
+        if pending != 0 {
+            return Ok(ShellCheckpoint::Pending);
+        }
+        if Self::find_checkpoint(&db, handoff.marker())?.is_some() {
+            let has_progress = Self::has_checkpoint_progress(&db, handoff)?;
+            return Ok(ShellCheckpoint::Exported { has_progress });
+        }
+        let Some(source) = source else {
+            let mut query =
+                db.prepare("SELECT source, json FROM checkpoint WHERE json <> '{}' LIMIT 2")?;
+            let mut rows = query.query([])?;
+            let checkpoint = rows
+                .next()?
+                .map(|row| {
+                    let namespace: String = row.get(0)?;
+                    anyhow::ensure!(
+                        namespace.len() == 64
+                            && namespace.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                        "invalid SDK source checkpoint namespace"
+                    );
+                    Ok::<String, anyhow::Error>(row.get(1)?)
+                })
+                .transpose()?;
+            anyhow::ensure!(rows.next()?.is_none(), "SDK history has multiple source checkpoints; start it and stop cleanly before retrying");
+            return Ok(ShellCheckpoint::Ready(checkpoint));
+        };
+        let checkpoint = Self::find_checkpoint(&db, source)?;
+        if checkpoint.is_none() {
+            let has_other_checkpoint: bool =
+                db.query_row("SELECT EXISTS (SELECT 1 FROM checkpoint)", [], |row| {
+                    row.get(0)
+                })?;
+            anyhow::ensure!(
+                !has_other_checkpoint,
+                "SDK history checkpoint belongs to a different source"
+            );
+        }
+        Ok(ShellCheckpoint::Ready(checkpoint))
+    }
+
+    fn has_checkpoint_progress(
+        db: &Connection,
+        handoff: LegacyCheckpointHandoff,
+    ) -> anyhow::Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS (SELECT 1 FROM checkpoint WHERE source<>?1 AND json<>'{}')",
+            [handoff.marker()],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn restore(&self, source: &str, path: &Path) -> anyhow::Result<()> {
@@ -508,16 +645,16 @@ impl Outbox {
         let tx = db.transaction()?;
         let checkpoint =
             match Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)? {
-                ShellCheckpoint::Existing(checkpoint) => return Ok(checkpoint),
-                ShellCheckpoint::Handoff(checkpoint) => {
-                    if handoff == LegacyCheckpointHandoff::Qoder {
+                CheckpointImport::Existing(checkpoint) => return Ok(checkpoint),
+                CheckpointImport::Handoff(checkpoint) => {
+                    if handoff != LegacyCheckpointHandoff::Codex {
                         tx.execute("DELETE FROM checkpoint WHERE source=?1", [handoff.marker()])?;
                     } else {
                         tx.execute("DELETE FROM checkpoint", [])?;
                     }
                     checkpoint
                 }
-                ShellCheckpoint::Consolidated(checkpoint) => {
+                CheckpointImport::Consolidated(checkpoint) => {
                     tx.execute("DELETE FROM checkpoint WHERE source<>?1", [source])?;
                     Some(checkpoint)
                 }
@@ -540,8 +677,8 @@ impl Outbox {
         let checkpoint =
             Self::resolve_shell_checkpoint(&tx, source, handoff, read_shell_checkpoint)?;
         Ok(match checkpoint {
-            ShellCheckpoint::Existing(value) | ShellCheckpoint::Handoff(value) => value,
-            ShellCheckpoint::Consolidated(value) => Some(value),
+            CheckpointImport::Existing(value) | CheckpointImport::Handoff(value) => value,
+            CheckpointImport::Consolidated(value) => Some(value),
         })
     }
 
@@ -550,7 +687,7 @@ impl Outbox {
         source: &str,
         handoff: LegacyCheckpointHandoff,
         read_shell_checkpoint: impl FnOnce() -> anyhow::Result<Option<String>>,
-    ) -> anyhow::Result<ShellCheckpoint> {
+    ) -> anyhow::Result<CheckpointImport> {
         let handed_off = Self::find_checkpoint(db, handoff.marker())?.is_some()
             || (handoff == LegacyCheckpointHandoff::Codex
                 && Self::find_checkpoint(db, CODEX_SHELL_MIGRATED)?.is_some());
@@ -562,16 +699,32 @@ impl Outbox {
                 "checkpoint handoff retains unacknowledged activity"
             );
             let checkpoint = read_shell_checkpoint()?;
-            // A missing legacy namespace cannot advance Qoder's saved cursor.
-            let checkpoint = if checkpoint.is_none() && handoff == LegacyCheckpointHandoff::Qoder {
+            if let Some((listener, validate)) = handoff.legacy_cursor() {
+                let decoded = checkpoint
+                    .as_deref()
+                    .map(serde_json::from_str::<serde_json::Map<String, Value>>)
+                    .transpose()?;
+                let empty = decoded.as_ref().is_none_or(serde_json::Map::is_empty);
+                let valid = decoded
+                    .and_then(|mut state| state.remove(listener))
+                    .and_then(crate::checkpoints::InputState::from_json)
+                    .is_some_and(|state| validate(&state));
+                anyhow::ensure!(
+                    valid || (empty && !Self::has_checkpoint_progress(db, handoff)?),
+                    "authoritative legacy checkpoint for {} is missing or invalid; restore it before restarting SDK history",
+                    listener
+                );
+            }
+            // A missing legacy namespace cannot advance the saved cursor.
+            let checkpoint = if checkpoint.is_none() && handoff != LegacyCheckpointHandoff::Codex {
                 Self::find_checkpoint(db, source)?
             } else {
                 checkpoint
             };
-            return Ok(ShellCheckpoint::Handoff(checkpoint));
+            return Ok(CheckpointImport::Handoff(checkpoint));
         }
-        if handoff == LegacyCheckpointHandoff::Qoder {
-            return Ok(ShellCheckpoint::Existing(Self::find_checkpoint(
+        if handoff != LegacyCheckpointHandoff::Codex {
+            return Ok(CheckpointImport::Existing(Self::find_checkpoint(
                 db, source,
             )?));
         }
@@ -584,7 +737,7 @@ impl Outbox {
             checkpoints.push(current);
         }
         if checkpoints.is_empty() {
-            return Ok(ShellCheckpoint::Existing(None));
+            return Ok(CheckpointImport::Existing(None));
         }
         let mut merged = serde_json::Map::new();
         for checkpoint in checkpoints {
@@ -598,7 +751,7 @@ impl Outbox {
                 }
             }
         }
-        Ok(ShellCheckpoint::Consolidated(
+        Ok(CheckpointImport::Consolidated(
             Value::Object(merged).to_string(),
         ))
     }

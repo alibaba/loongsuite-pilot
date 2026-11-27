@@ -702,6 +702,13 @@ mod tests {
             "scripts/collector-daemon.js",
             "assets/plugins/dsh/cleanup.mjs",
             "assets/hooks/cursor-hook-processor.mjs",
+            "assets/hooks/qwen-work-cn-hook-processor.mjs",
+            "assets/hooks/cursor-loongsuite-pilot-hook.sh",
+            "assets/hooks/cursor-loongsuite-pilot-hook.ps1",
+            "assets/hooks/qwenworkcn-loongsuite-pilot-hook.sh",
+            "assets/hooks/qwenworkcn-loongsuite-pilot-hook.ps1",
+            "assets/hooks/interceptor-qwenworkcn-hook.sh",
+            "assets/hooks/interceptor-qwenworkcn-hook.ps1",
         ] {
             assert!(!files.contains(legacy));
         }

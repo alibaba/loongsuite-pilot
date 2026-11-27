@@ -59,12 +59,6 @@ static TAG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"<[^>]+>").expect(
 static WHITESPACE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("whitespace"));
 static THOUGHT_SUFFIX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+)-(\d+)-([a-z0-9]{4,})$").expect("thought suffix"));
-static WINDOWS_JSON_COMMA_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?,"#).expect("windows comma"));
-static WINDOWS_JSON_OBJECT_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?}"#).expect("windows object"));
-static WINDOWS_JSON_ARRAY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#""?\?]"#).expect("windows array"));
 
 pub(super) struct TurnOptions<'a> {
     pub user_id: &'a str,
@@ -172,18 +166,16 @@ pub(super) fn windows_context(env: &Env, path_hint: &str) -> bool {
     cfg!(windows) || env_says_windows(env) || path_says_windows(path_hint)
 }
 
+#[cfg(test)]
+#[path = "cursor_payload.rs"]
+mod cursor_payload;
+
+#[cfg(test)]
 pub(super) fn repaired_windows_object(raw: &str, env: &Env) -> Option<Obj> {
     if !windows_context(env, raw) {
         return None;
     }
-    let repaired = repair_windows_json(raw);
-    if repaired == raw {
-        return None;
-    }
-    match serde_json::from_str::<Value>(repaired.trim()) {
-        Ok(Value::Object(map)) => Some(map),
-        _ => None,
-    }
+    cursor_payload::parse(raw, || true).ok()
 }
 
 pub(super) fn assemble_parent_turn(
@@ -251,13 +243,17 @@ pub(super) fn assemble_parent_turn(
         transcript_user_prompt.or_else(|| event_str(prompt, "prompt").map(str::to_owned));
 
     let mut records = Vec::new();
-    if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+    if user_prompt.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(prompt_text)]),
-        );
+        if let Some(prompt_text) = user_prompt.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(prompt_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
@@ -523,17 +519,21 @@ pub(super) fn build_cursor_records_from_transcript(
         .clone()
         .or_else(|| event_str(prompt, "prompt").map(str::to_owned));
     let mut records = Vec::new();
-    if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+    if user_text.as_deref().is_some_and(|text| !text.is_empty())
+        || prompt.get("_pilot_redacted_prompt") == Some(&Value::Bool(true))
+    {
         let nanos = event_ts_nanos(prompt);
         let mut fields = timed_identity(&nanos, "other");
         fields.insert(
             "gen_ai.provider.name".into(),
             Value::String(infer_provider(&model)),
         );
-        fields.insert(
-            "gen_ai.input.messages_delta".into(),
-            json!([user_text_message(user_text)]),
-        );
+        if let Some(user_text) = user_text.as_deref().filter(|text| !text.is_empty()) {
+            fields.insert(
+                "gen_ai.input.messages_delta".into(),
+                json!([user_text_message(user_text)]),
+            );
+        }
         fields.insert(
             "agent.cursor.hook_event_name".into(),
             Value::String("beforeSubmitPrompt".into()),
@@ -3200,12 +3200,6 @@ fn merge_skill_exchange(
     Value::Array(merged)
 }
 
-fn repair_windows_json(raw: &str) -> String {
-    let step = WINDOWS_JSON_COMMA_RE.replace_all(raw, "\",");
-    let step = WINDOWS_JSON_OBJECT_RE.replace_all(&step, "\"}");
-    WINDOWS_JSON_ARRAY_RE.replace_all(&step, "\"]").into_owned()
-}
-
 fn env_says_windows(env: &Env) -> bool {
     for key in ["LOONGSUITE_CURSOR_PLATFORM", "LOONGSUITE_PLATFORM", "OS"] {
         if let Some(value) = env.get(key).map(|value| value.trim()) {
@@ -5522,15 +5516,21 @@ mod skill_config_history_contracts {
                     r["event.name"] == "tool.call" && r["gen_ai.skill.name"] == "private-skill"
                 })
                 .unwrap();
-            assert_eq!(call["gen_ai.tool.call.arguments"], json!({"path":path}));
+            if setting == Some(false) {
+                assert!(call.get("gen_ai.tool.call.arguments").is_none());
+            } else {
+                assert_eq!(call["gen_ai.tool.call.arguments"], json!({"path":path}));
+            }
             assert_eq!(call["gen_ai.skill.id"], "private-skill");
             let id = call["gen_ai.tool.call.id"].clone();
             assert!(records.iter().any(|r| r["event.name"] == "tool.result"
                 && r["gen_ai.skill.name"] == "private-skill"
                 && r["gen_ai.tool.call.id"] == id));
-            assert!(records.iter().any(|r| r["event.name"] == "llm.response"
-                && r.get("gen_ai.output.messages")
-                    .is_some_and(|m| m.to_string().contains(id.as_str().unwrap()))));
+            if setting != Some(false) {
+                assert!(records.iter().any(|r| r["event.name"] == "llm.response"
+                    && r.get("gen_ai.output.messages")
+                        .is_some_and(|m| m.to_string().contains(id.as_str().unwrap()))));
+            }
             let later = records
                 .iter()
                 .find(|r| {
@@ -5538,14 +5538,19 @@ mod skill_config_history_contracts {
                         && r["gen_ai.step.id"].as_str().unwrap_or("").ends_with(":s2")
                 })
                 .unwrap();
-            assert!(later["gen_ai.input.messages_delta"].is_array());
-            assert!(later["gen_ai.input.messages"].is_array());
-            assert!(later["gen_ai.input.messages"]
-                .to_string()
-                .contains("private prompt"));
-            assert!(later["gen_ai.input.messages"]
-                .to_string()
-                .contains(id.as_str().unwrap()));
+            if setting == Some(false) {
+                assert!(later.get("gen_ai.input.messages_delta").is_none());
+                assert!(later.get("gen_ai.input.messages").is_none());
+            } else {
+                assert!(later["gen_ai.input.messages_delta"].is_array());
+                assert!(later["gen_ai.input.messages"].is_array());
+                assert!(later["gen_ai.input.messages"]
+                    .to_string()
+                    .contains("private prompt"));
+                assert!(later["gen_ai.input.messages"]
+                    .to_string()
+                    .contains(id.as_str().unwrap()));
+            }
             assert_eq!(fs::read(&config_file).unwrap(), original_config);
         }
     }

@@ -46,6 +46,15 @@ impl WorkspacePolicy {
     }
 
     pub fn allows(&mut self, record: &Map<String, Value>, fallback_agent: &str) -> bool {
+        self.allows_with_native_session(record, fallback_agent, None)
+    }
+
+    pub(crate) fn allows_with_native_session(
+        &mut self,
+        record: &Map<String, Value>,
+        fallback_agent: &str,
+        native_session: Option<&str>,
+    ) -> bool {
         if self.roots.is_empty() {
             return true;
         }
@@ -59,8 +68,8 @@ impl WorkspacePolicy {
             .or_else(|| record.get("session_id"))
             .or_else(|| record.get("sessionId"))
             .or_else(|| record.get("conversation_id"));
-        let key = session
-            .and_then(Value::as_str)
+        let key = native_session
+            .or_else(|| session.and_then(Value::as_str))
             .filter(|value| !value.is_empty())
             .map(|session| sha256_hex(&format!("{agent}\0{session}")));
         let marker = key.as_ref().and_then(|key| {

@@ -109,6 +109,42 @@ SDK 公告 `PILOT_CAP_CODEX_HOOK_CONTROL` 时，宿主可以向 `apply_policy` �
 
 脱敏沿用原 `MaskConfig` 和处理管道。启用本地拦截的敏感类型也会纳入活动脱敏。嵌入实例使用库内置规则，不从宿主工作目录或 HOME 搜索规则文件。SDK 日志按实例保存、轮转并脱敏，不接管宿主日志出口。
 
+### OpenCode plug-in history
+
+The development profile `opencode_plugin_v1` accepts one authorized `hook_jsonl` directory from the existing OpenCode plug-in. Both the V1 and V2 plug-in callbacks write this format. The full Pilot uses this SDK collector on the regular path and continues to own plug-in deployment, workspace metadata, and output. The adapter reuses the existing parser and imports its input checkpoint. A host acknowledges delivered batches through the activity callback.
+
+### OpenClaw plug-in history
+
+The development profile `openclaw_plugin_v1` accepts one authorized `hook_jsonl` directory from the OpenClaw host plug-in. The full Pilot uses this SDK collector on the regular path and continues to own plug-in deployment and output. Streaming events, subagent identifiers, invocation logs, and the existing interceptor are supplied by the host plug-in. The collector reuses the existing parser and imports its input checkpoint.
+
+### Cursor Hook history and optional deferred assembly
+
+The development profile `cursor_hook_v1` accepts one authorized `hook_jsonl` directory. The full Pilot uses the SDK collector for the ordinary Cursor history path, including activity emitted by Cursor CLI.
+
+The installed command is `loongsuite-pilot-sdk-hook sdk-hook --agent cursor --channel observe`. It returns after staging one bounded event in Pilot's private inbox. The selected collector imports it into a durable journal and assembles the turn in the background. The old wrapper paths in the agent definition identify registrations to replace or clean up; the Rust package does not ship or invoke those wrappers. Node rollback uses the selected Node package's own assets.
+
+### 千问办公普通会话和协作会话
+
+`qwen_work_cn_trace_v1` 接受一个 `hook_jsonl` 或 `transcript` 主来源，可附带 `segments` 补充模型用量。要补充 Flash CLI 用量，宿主同时声明 `desktop_database` 和 `flash_database`，并授权读取这两个数据库。完整版常规模式从已有 Hook history 读取，并导入已有 input checkpoint。宿主提供允许读取的目录、内容策略和工作目录排除规则。协作会话 `qwen_work_cn_collaboration_v1` 使用独立来源和进度，可与普通会话同时使用。
+
+开发验证原生会话时，宿主可以向已配置 `transcript` 的实例安装 Stop 观察命令。这个入口只发布不含正文的会话和文件进度元数据，读 transcript、关联和重试由采集器处理。
+
+```sh
+loongsuite-pilot-sdk-hook sdk-hook --agent qwen-work-cn --event Stop --channel observe --data-dir /path/to/sdk-instance
+```
+
+完整 Pilot 的 Stop 观察入口只唤醒，采集器读取并组装 history。启用本地裁决后，UserPromptSubmit 和工具事件走原生 Hook 的 local 通道；未启用裁决时保留空操作的 UserPromptSubmit，供客户端写入提示。普通和协作实例分别保存队列与游标；回滚到 Node 前两路均需排空并交接，不能用一个实例状态推断另一个。
+
+### Runtime compatibility and retirement
+
+| Retained path | Caller and selection | Retirement condition |
+| --- | --- | --- |
+| OpenClaw legacy loopback and `INTERCEPTOR_CLI` | The existing Gateway plug-in's compatibility path. A selected native SDK command owns the decision; an unavailable SDK endpoint fails open, not through a second service. Without a selected native SDK path, an active legacy runtime can handle the async HTTP path and the sync path via a usable CLI, including an explicitly configured legacy JS adapter. | Remove after supported legacy plug-in hosts and explicitly configured legacy CLI consumers migrate; do not remove compatibility from prior installed packages. |
+| Shell-hosted OpenClaw and Cursor history | Full Pilot in a non-standalone mode, or with upstream correlation or the Agent's supported multimodal handling selected. The SDK-backed standalone path and the shell history collector do not run concurrently on the same Pilot source. | Remove only after matching host metadata, multimodal and upstream correlation in SDK modes, with checkpoint and deployment coverage. |
+| Shell-hosted Qwen Work CN trace and collaboration | Same host-only mode selection, including supported multimodal on the personal history path. The separate SQLite fallback is selected only when the trace listener is off and the SQLite listener is enabled. | Remove after the SDK covers the remaining host modes and the corresponding source and checkpoint contracts. |
+
+OpenCode's default history collector is the SDK-backed one; there is no parallel legacy history registration.
+
 ## 活动、监控与背压
 
 `on_activity` 接收多条独立 JSON 视图，沿用现有 Pilot 事件格式作为 `aah.activity.v2` 的兼容基线。数据在交付前序列化一次，SQLite 事务同时接收事件和对应进度；重试、恢复复用原始字节及 `event.id`。

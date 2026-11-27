@@ -21,15 +21,15 @@ fn cursor_package(fixture: &Fixture) {
     fixture.package_with(&[
         (
             "agents.d/cursor.json",
-            include_str!("../../agents.d/cursor.json"),
+            include_str!("../fixtures/legacy-cursor-agent.json"),
         ),
         (
             "assets/hooks/cursor-loongsuite-pilot-hook.sh",
-            include_str!("../../assets/hooks/cursor-loongsuite-pilot-hook.sh"),
+            include_str!("../fixtures/legacy-migrated-hooks/cursor-loongsuite-pilot-hook.sh"),
         ),
         (
             "assets/hooks/cursor-loongsuite-pilot-hook.ps1",
-            include_str!("../../assets/hooks/cursor-loongsuite-pilot-hook.ps1"),
+            include_str!("../fixtures/legacy-migrated-hooks/cursor-loongsuite-pilot-hook.ps1"),
         ),
         (
             "assets/hooks/shared/native.sh",
@@ -211,7 +211,7 @@ fn postinstall_l25_missing_required_native_hook_assets_fails_without_success_or_
     let fixture = Fixture::new();
     fixture.package_with(&[(
         "agents.d/cursor.json",
-        include_str!("../../agents.d/cursor.json"),
+        include_str!("../fixtures/legacy-cursor-agent.json"),
     )]);
     let cursor = fixture.root.path().join(".cursor/hooks.json");
     fs::create_dir_all(cursor.parent().unwrap()).unwrap();

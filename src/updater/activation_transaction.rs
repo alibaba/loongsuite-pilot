@@ -12,7 +12,18 @@ const MAX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
 // Thirty-one registered resource roles plus at most six activation targets.
 // Includes the nine Codex Node Hook resources that can be restored on rollback.
 const MAX_TARGETS: usize = 47;
+// Agent settings also use the fixed byte budget below. Give recorded settings
+// their own target slots so a full package does not crowd them out.
+const MAX_NATIVE_HOOK_SETTINGS: usize = MAX_TARGETS;
 const MAX_JOURNAL_BYTES: usize = MAX_TARGETS * MAX_SNAPSHOT_BYTES * 4 + 64 * 1024;
+
+fn target_count_valid(targets: &BTreeMap<String, PathBuf>) -> bool {
+    let settings = targets
+        .keys()
+        .filter(|key| key.starts_with(binding::NATIVE_HOOK_SETTINGS_PREFIX))
+        .count();
+    settings <= MAX_NATIVE_HOOK_SETTINGS && targets.len() - settings <= MAX_TARGETS
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -33,6 +44,8 @@ struct Change {
 struct Journal {
     schema: u32,
     committed: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hook_ingress_armed: bool,
     targets: BTreeMap<String, PathBuf>,
     changes: BTreeMap<String, Change>,
 }
@@ -46,14 +59,11 @@ pub(crate) struct ActivationTransaction {
 
 impl ActivationTransaction {
     pub fn begin(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<Self> {
-        ensure!(targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        ensure!(target_count_valid(&targets), "更新目标数量无效");
         let targets = binding::bind_all(targets)?;
         let journal_path = binding::bind(&cache.join("update-recovery.json"))?;
         binding::validate(&targets, &journal_path)?;
-        ensure!(
-            !targets.is_empty() && targets.len() <= MAX_TARGETS,
-            "更新目标数量无效"
-        );
+        ensure!(!targets.is_empty(), "更新目标数量无效");
         ensure!(
             targets.values().all(|path| path.is_absolute()),
             "更新目标必须为绝对路径"
@@ -86,6 +96,7 @@ impl ActivationTransaction {
             journal: Journal {
                 schema: 2,
                 committed: false,
+                hook_ingress_armed: false,
                 targets,
                 changes,
             },
@@ -93,6 +104,55 @@ impl ActivationTransaction {
         };
         transaction.persist()?;
         Ok(transaction)
+    }
+
+    /// Enroll discovered settings after the caller holds the Hook asset and file locks.
+    pub(crate) fn enroll_native_hook_settings(
+        &mut self,
+        settings: BTreeMap<String, PathBuf>,
+    ) -> Result<()> {
+        if settings.is_empty() {
+            return Ok(());
+        }
+        ensure!(!self.finished, "更新事务已结束");
+        let mut targets = self.targets.clone();
+        for (key, path) in &settings {
+            ensure!(
+                key.starts_with(binding::NATIVE_HOOK_SETTINGS_PREFIX) && !targets.contains_key(key),
+                "Hook 恢复目标角色无效或重复"
+            );
+            // The corresponding lock authorizes this physical path only.
+            binding::ensure_bound(path)?;
+            targets.insert(key.clone(), path.clone());
+        }
+        ensure!(target_count_valid(&targets), "更新目标数量无效");
+        binding::validate(&targets, &self.path)?;
+        let changes = settings
+            .iter()
+            .map(|(key, path)| {
+                Ok((
+                    key.clone(),
+                    Change {
+                        original: snapshot(path)?,
+                        intended: None,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        self.targets = targets;
+        self.journal.targets.extend(settings);
+        self.journal.changes.extend(changes);
+        self.persist()
+    }
+
+    pub(crate) fn has_target_prefix(cache: &Path, prefix: &str) -> Result<bool> {
+        let path = binding::bind(&cache.join("update-recovery.json"))?;
+        let Some(bytes) = read_bounded(&path, MAX_JOURNAL_BYTES)? else {
+            return Ok(false);
+        };
+        let journal: Journal =
+            serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
+        Ok(journal.targets.keys().any(|key| key.starts_with(prefix)))
     }
 
     pub fn recover(cache: &Path, targets: BTreeMap<String, PathBuf>) -> Result<()> {
@@ -124,7 +184,7 @@ impl ActivationTransaction {
         };
         let journal: Journal =
             serde_json::from_slice(&bytes).context("更新恢复记录损坏，保留当前版本和恢复材料")?;
-        ensure!(journal.targets.len() <= MAX_TARGETS, "更新目标数量无效");
+        ensure!(target_count_valid(&journal.targets), "更新目标数量无效");
         // Keep the original physical authority. Never canonicalize a recorded path
         // again and silently authorize the new destination of a replaced ancestor.
         for recorded in journal.targets.values() {
@@ -169,7 +229,6 @@ impl ActivationTransaction {
             journal.schema == 2
                 && journal.targets.len() == targets.len()
                 && !targets.is_empty()
-                && targets.len() <= MAX_TARGETS
                 && targets.values().all(|path| path.is_absolute())
                 && targets
                     .values()
@@ -205,7 +264,10 @@ impl ActivationTransaction {
             journal,
             finished: false,
         };
-        if transaction.journal.committed {
+        if transaction.journal.committed
+            || (transaction.journal.hook_ingress_armed
+                && transaction.rollback_ingress_is_closed()?)
+        {
             transaction.finished = true;
             fs::remove_file(&transaction.path)?;
             return Ok(());
@@ -289,6 +351,35 @@ impl ActivationTransaction {
     }
 
     pub fn commit(&mut self) -> Result<()> {
+        self.commit_with_mode(false)
+    }
+
+    pub(crate) fn commit_node_rollback(&mut self) -> Result<()> {
+        self.commit_with_mode(true)
+    }
+
+    fn rollback_ingress(&self) -> Result<PathBuf> {
+        let root = self.path.parent().context("更新恢复记录缺少安装根目录")?;
+        let path = root
+            .canonicalize()?
+            .join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+        crate::utils::source_access::private_path(&path)?;
+        Ok(path)
+    }
+
+    fn rollback_ingress_is_closed(&self) -> Result<bool> {
+        let path = self.rollback_ingress()?;
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                ensure!(meta.is_dir(), "Hook rollback ingress is not a directory");
+                Ok(false)
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(err) => Err(err.into()),
+        }
+    }
+
+    fn commit_with_mode(&mut self, node_rollback: bool) -> Result<()> {
         let _resource_lock = binding::resource_lock(&self.targets)?;
         self.check_bound()?;
         ensure!(!self.finished, "更新事务已结束");
@@ -307,10 +398,21 @@ impl ActivationTransaction {
                 "更新目标在提交前被外部修改，保留恢复材料：{key}"
             );
         }
-        self.journal.committed = true;
-        if let Err(err) = self.persist() {
-            self.journal.committed = false;
-            return Err(err);
+        if node_rollback {
+            // All version/Hook changes are written and verified. Arm recovery
+            // BEFORE the final decision: removing the directory only succeeds
+            // if no publisher has inserted a durable late record. There is no
+            // further fallible commit write after a successful remove.
+            let ingress = self.rollback_ingress()?;
+            self.journal.hook_ingress_armed = true;
+            self.persist()?;
+            fs::remove_dir(ingress).context("Hook notifications arrived during rollback or ingress could not be closed; current Rust version retained")?;
+        } else {
+            self.journal.committed = true;
+            if let Err(err) = self.persist() {
+                self.journal.committed = false;
+                return Err(err);
+            }
         }
         self.finished = true;
         // 提交记录已落盘，清理失败不会把成功更新误回滚。
@@ -376,6 +478,137 @@ impl Drop for ActivationTransaction {
                 "更新回滚失败，恢复材料保留在 {}：{err:#}",
                 self.path.display()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn node_rollback_recovery_respects_the_atomic_hook_cutover() {
+    for gate_closed in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().canonicalize().unwrap();
+        let current = cache.join("current");
+        let gate = cache.join(crate::sdk::hook_ingress::ROLLBACK_INBOX);
+        fs::write(&current, b"rust\n").unwrap();
+        fs::create_dir(&gate).unwrap();
+        let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+        let mut txn = ActivationTransaction::begin(&cache, targets.clone()).unwrap();
+        txn.write("current", b"node\n", 0o600).unwrap();
+        txn.journal.hook_ingress_armed = true;
+        txn.persist().unwrap();
+        if gate_closed {
+            fs::remove_dir(&gate).unwrap();
+        } else {
+            fs::write(gate.join("qwen-kept.json"), b"{}").unwrap();
+        }
+        // Simulate exit without the normal Drop rollback or clearing journal.
+        txn.finished = true;
+        drop(txn);
+        ActivationTransaction::recover(&cache, targets).unwrap();
+        assert_eq!(
+            fs::read(&current).unwrap(),
+            if gate_closed { b"node\n" } else { b"rust\n" }
+        );
+        assert_eq!(gate.join("qwen-kept.json").exists(), !gate_closed);
+        assert!(!cache.join("update-recovery.json").exists());
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn node_rollback_cannot_commit_while_an_accepted_hook_is_paused_before_publish() {
+    use crate::sdk::hook_ingress::{
+        lock_for_rollback, lock_writer, publish_transition, WriterLease, ROLLBACK_INBOX,
+    };
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().canonicalize().unwrap();
+    let current = cache.join("current");
+    let sdk = cache.join("sdk");
+    fs::create_dir(&sdk).unwrap();
+    fs::write(&current, b"rust\n").unwrap();
+    let installer = lock_for_rollback(&sdk, &cache).unwrap();
+    let WriterLease::Switching(slot) = lock_writer(&sdk).unwrap() else {
+        panic!("publisher must reserve during the cutover")
+    };
+    let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+    let mut txn = ActivationTransaction::begin(&cache, targets.clone()).unwrap();
+    txn.write("current", b"node\n", 0o600).unwrap();
+    // The old Hook is deliberately paused before any bytes are written.
+    assert!(txn.commit_node_rollback().is_err());
+    txn.rollback().unwrap();
+    drop(installer);
+    assert_eq!(fs::read(&current).unwrap(), b"rust\n");
+    let gate = cache.join(ROLLBACK_INBOX);
+    let record = br#"{"session_id":"capture-once"}"#;
+    publish_transition(slot, "qwen-restored.json", record).unwrap();
+    assert_eq!(fs::read_dir(&gate).unwrap().count(), 1);
+    assert_eq!(fs::read(gate.join("qwen-restored.json")).unwrap(), record);
+}
+
+#[cfg(test)]
+#[test]
+fn node_rollback_routes_hook_paused_before_reserving_to_the_committed_owner() {
+    use crate::sdk::hook_ingress::{
+        lock_for_rollback, lock_writer_before_reserve, publish_transition, WriterLease,
+        ROLLBACK_INBOX,
+    };
+
+    for (commit, release_lease) in [(false, false), (false, true), (true, false), (true, true)] {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().canonicalize().unwrap();
+        let root = cache.join("sdk");
+        let rust = cache.join("versions/native");
+        let node = cache.join("versions/legacy");
+        for dir in [&root, &rust, &node] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::write(rust.join("runtime-manifest.json"), br#"{"runtime":"rust"}"#).unwrap();
+        fs::write(
+            node.join("package.json"),
+            br#"{"name":"loongsuite-pilot","version":"1.20.0"}"#,
+        )
+        .unwrap();
+        fs::write(node.join("VERSION"), b"version=1.20.0\n").unwrap();
+        let current = cache.join("current");
+        fs::write(&current, b"native\n").unwrap();
+        let gate = cache.join(ROLLBACK_INBOX);
+        let mut installer = Some(lock_for_rollback(&root, &cache).unwrap());
+        let targets = BTreeMap::from([("current".to_owned(), current.clone())]);
+        let mut txn = ActivationTransaction::begin(&cache, targets).unwrap();
+        let owner = lock_writer_before_reserve(&root, || {
+            // The Hook has observed contention, but it has not created any
+            // file. Commit/abort the actual activation at that exact point.
+            assert_eq!(fs::read_dir(&gate).unwrap().count(), 0);
+            txn.write("current", b"legacy\n", 0o600).unwrap();
+            if commit {
+                txn.commit_node_rollback().unwrap();
+            } else {
+                let blocker = gate.join("cursor-existing.json");
+                fs::write(&blocker, b"{}").unwrap();
+                assert!(txn.commit_node_rollback().is_err());
+                txn.rollback().unwrap();
+                fs::remove_file(blocker).unwrap();
+            }
+            if release_lease {
+                drop(installer.take());
+            }
+        })
+        .unwrap();
+        if commit {
+            assert!(matches!(owner, WriterLease::Node(_)));
+            assert_eq!(fs::read(&current).unwrap(), b"legacy\n");
+            assert!(!gate.exists(), "do not recreate the retired Rust queue");
+        } else {
+            let WriterLease::Switching(slot) = owner else {
+                panic!("the original Rust runtime must still own the callback");
+            };
+            let original = br#"{"session_id":"paused-before-reserve"}"#;
+            publish_transition(slot, "qwen-late.json", original).unwrap();
+            assert_eq!(fs::read(&current).unwrap(), b"native\n");
+            assert_eq!(fs::read_dir(&gate).unwrap().count(), 1);
+            assert_eq!(fs::read(gate.join("qwen-late.json")).unwrap(), original);
         }
     }
 }
@@ -457,6 +690,31 @@ mod tests {
             ("service".into(), root.join("bin/service")),
         ]
         .into()
+    }
+
+    #[test]
+    fn registered_hook_settings_fit_when_the_existing_target_budget_is_full() {
+        let root = tempfile::tempdir().unwrap();
+        let base: BTreeMap<_, _> = (0..MAX_TARGETS)
+            .map(|index| {
+                (
+                    format!("base-{index}"),
+                    root.path().join(format!("base-{index}")),
+                )
+            })
+            .collect();
+        let key = format!("{}fixture", binding::NATIVE_HOOK_SETTINGS_PREFIX);
+        let settings = root.path().join("agent-settings.json");
+        let registered = BTreeMap::from([(key.clone(), settings.clone())]);
+        let mut targets = base.clone();
+        targets.extend(registered.clone());
+        fs::write(&settings, b"original").unwrap();
+        let mut tx = ActivationTransaction::begin(root.path(), targets).unwrap();
+        tx.write_preserving_mode(&key, b"retired", 0o600).unwrap();
+        std::mem::forget(tx);
+
+        ActivationTransaction::recover_registered(root.path(), &[base], &registered).unwrap();
+        assert_eq!(fs::read(settings).unwrap(), b"original");
     }
 
     #[test]

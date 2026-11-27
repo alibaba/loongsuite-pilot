@@ -120,13 +120,23 @@ pub fn block_reason(reason: &str) -> &str {
 }
 
 pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
+    if agent == "openclaw" && matches!(event, "UserPromptSubmit" | "PreToolUse" | "PostToolUse") {
+        let output = json!({"action":"block","reason":reason});
+        return Some(format!("{output}\n"));
+    }
     if !matches!(
         agent,
-        "qoder" | "qodercli" | "qoder-cn" | "qoderclicn" | "codex"
+        "qoder" | "qodercli" | "qoder-cn" | "qoderclicn" | "codex" | "qwen-work-cn"
     ) {
         return None;
     }
-    let reason = block_reason(reason);
+    let host_reason;
+    let reason = if agent == "qwen-work-cn" {
+        host_reason = wrapped_host_reason(event, Some(reason));
+        &host_reason
+    } else {
+        block_reason(reason)
+    };
     let output = match event {
         "UserPromptSubmit" => {
             json!({"decision":if matches!(agent, "qodercli" | "qoderclicn") {"deny"} else {"block"},"reason":reason})
@@ -141,6 +151,25 @@ pub fn render_block(agent: &str, event: &str, reason: &str) -> Option<String> {
         _ => return None,
     };
     Some(format!("{output}\n"))
+}
+
+/// Match the native Qwen Work command-hook response, including its localized message.
+pub fn wrapped_host_reason(event: &str, reason: Option<&str>) -> String {
+    let detail = reason.unwrap_or("").trim();
+    let detail = if detail.is_empty() {
+        String::new()
+    } else {
+        format!("：{detail}")
+    };
+    match event {
+        "UserPromptSubmit" => format!("检测到敏感信息{detail}，本轮对话终止"),
+        "PostToolUse" => format!(
+            "检测到非预期行为{detail}，本次工具调用结果已拦截，且不允许通过其它手段重新发起直接或间接调用。"
+        ),
+        _ => format!(
+            "检测到非预期行为{detail}，本次工具调用终止，且不允许通过其它手段重新发起直接或间接调用。"
+        ),
+    }
 }
 pub fn reply_action(reply: &Value) -> Option<(&str, &str)> {
     let action = reply.get("action").and_then(Value::as_str)?;

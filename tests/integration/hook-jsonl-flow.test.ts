@@ -23,7 +23,7 @@ function getTodayDateString(): string {
 }
 
 function runCursorHook(input: string, env: Record<string, string>) {
-  return spawnSync('bash', [path.resolve(process.cwd(), 'assets/hooks/cursor-loongsuite-pilot-hook.sh')], {
+  return spawnSync(process.execPath, [path.resolve('assets/hooks/cursor-hook-processor.mjs')], {
     input,
     env: { ...process.env, ...env },
     encoding: 'utf-8',
@@ -851,7 +851,7 @@ describe('Hook JSONL integration flow', () => {
   });
 });
 
-describe('Cursor hook script integration flow', () => {
+describe('Historical Cursor Node processor integration flow', () => {
   let tmpDir: string;
 
   beforeEach(async () => {

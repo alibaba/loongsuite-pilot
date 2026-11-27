@@ -90,8 +90,10 @@ fn source_interceptor_l46_powershell_has_no_standalone_task_or_restart_dispatch(
 }
 #[test]
 fn source_interceptor_l58_qwen_hook_assets_use_the_exact_surface_in_both_shells() {
-    let shell = include_str!("../../assets/hooks/interceptor-qwenworkcn-hook.sh");
-    let ps = include_str!("../../assets/hooks/interceptor-qwenworkcn-hook.ps1");
+    let shell =
+        include_str!("../../tests/fixtures/legacy-migrated-hooks/interceptor-qwenworkcn-hook.sh");
+    let ps =
+        include_str!("../../tests/fixtures/legacy-migrated-hooks/interceptor-qwenworkcn-hook.ps1");
     assert!(shell.contains("NATIVE_ARGS=('interceptor' 'hook' '--agent' 'qwen-work-cn' \"$@\")"));
     assert!(
         ps.contains("$NativeArgs = @('interceptor', 'hook', '--agent', 'qwen-work-cn') + $args")
@@ -145,7 +147,7 @@ fn actual_qwen_interceptor_shell_wrapper_forwards_agent_and_extra_args_to_pinned
     let script = hooks.join("interceptor-qwenworkcn-hook.sh");
     fs::write(
         &script,
-        include_bytes!("../../assets/hooks/interceptor-qwenworkcn-hook.sh"),
+        include_bytes!("../../tests/fixtures/legacy-migrated-hooks/interceptor-qwenworkcn-hook.sh"),
     )
     .unwrap();
     fs::write(

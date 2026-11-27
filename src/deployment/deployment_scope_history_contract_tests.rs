@@ -1,4 +1,5 @@
 use serde_json::json;
+
 use std::{collections::HashMap, path::Path};
 #[tokio::test]
 async fn scope_l31_actual_build_and_eager_never_create_or_overwrite_hook_install_report_or_signal()
@@ -7,9 +8,11 @@ async fn scope_l31_actual_build_and_eager_never_create_or_overwrite_hook_install
     if std::env::var_os(CHILD).is_none() {
         let run = tempfile::tempdir().unwrap();
         let home = run.path().join("home");
+        let pilot = crate::deployment::legacy_cursor_test_assets::stage(run.path());
         let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
         command.args(["--exact","deployment::deployment_scope::history_contract_tests::scope_l31_actual_build_and_eager_never_create_or_overwrite_hook_install_report_or_signal","--nocapture"])
             .env_clear().env(CHILD,"1").env("HOME",&home).env("USERPROFILE",&home).env("PATH",run.path().join("no-runtimes"))
+            .env("LOONGSUITE_PILOT_RESOURCE_ROOT", &pilot)
             .kill_on_drop(true);
         for (key, relative) in [
             ("APPDATA", "AppData/Roaming"),
@@ -71,9 +74,9 @@ async fn scope_l31_actual_build_and_eager_never_create_or_overwrite_hook_install
             agents.insert(def.id.clone(), json!({"enabled":false}));
         }
         agents.insert("cursor".into(), json!({"enabled":true}));
-        let mut cursor: crate::types::AgentDefinition = serde_json::from_slice(
-            &std::fs::read(Path::new(&pilot).join("agents.d/cursor.json")).unwrap(),
-        )
+        let mut cursor: crate::types::AgentDefinition = serde_json::from_str(include_str!(
+            "../../tests/fixtures/legacy-cursor-agent.json"
+        ))
         .unwrap();
         cursor.detection.paths = vec![home.to_string_lossy().into_owned()];
         cursor.detection.commands.clear();

@@ -24,7 +24,10 @@ const MAX_COMPLETED: usize = 50_000;
 const RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
 const MAX_CACHED_FILES: usize = 256;
 
-pub(crate) struct QwenWorkCnCollaborationInput(Arc<HostedInput<CollaborationBody>>, String);
+pub(crate) struct QwenWorkCnCollaborationInput(
+    pub(crate) Arc<HostedInput<CollaborationBody>>,
+    String,
+);
 
 impl QwenWorkCnCollaborationInput {
     pub(crate) fn new(
@@ -77,6 +80,15 @@ impl QwenWorkCnCollaborationInput {
         self.0.on_entries(on_entries);
         self.0.on_runtime_delta(on_delta);
     }
+
+    pub(crate) fn bind_sdk_collector(
+        &self,
+        on_entries: impl Fn(Vec<AgentActivityEntry>) + Send + Sync + 'static,
+        on_delta: impl Fn(&InputRuntimeDelta) + Send + Sync + 'static,
+    ) {
+        self.0.set_owned_entries_handler(on_entries);
+        self.0.on_runtime_delta(on_delta);
+    }
 }
 
 pub(crate) fn resolve_root() -> PathBuf {
@@ -95,7 +107,7 @@ pub(crate) fn resolve_root() -> PathBuf {
     base.join("QwenWorkCN/data/collaboration")
 }
 
-struct CollaborationBody {
+pub(crate) struct CollaborationBody {
     root: PathBuf,
     included: Option<HashSet<String>>,
     state: Mutex<CollectorState>,
@@ -146,6 +158,15 @@ struct Checkpoint {
     completed: BTreeMap<String, i64>,
 }
 
+pub(crate) fn has_usable_collaboration_cursor(state: &crate::checkpoints::InputState) -> bool {
+    state
+        .extra()
+        .and_then(|mut extra| {
+            serde_json::from_value::<Checkpoint>(extra.get_mut("collaboration")?.take()).ok()
+        })
+        .is_some_and(|checkpoint| checkpoint.version == 1 && checkpoint.since_ms >= 0)
+}
+
 struct DirectoryScan {
     root: Arc<PathBuf>,
     environments: tokio::fs::ReadDir,
@@ -161,7 +182,9 @@ enum ScanStep {
 
 impl DirectoryScan {
     async fn new(root: &Path) -> io::Result<Self> {
+        crate::utils::source_access::check(root)?;
         let root = tokio::fs::canonicalize(root).await?;
+        crate::utils::source_access::check(&root)?;
         let environments = tokio::fs::read_dir(&root).await?;
         Ok(Self {
             root: Arc::new(root),
@@ -179,6 +202,7 @@ impl DirectoryScan {
             if let Some(account) = accounts.next_entry().await? {
                 if account.file_type().await?.is_dir() {
                     let account = account.path();
+                    crate::utils::source_access::check(&account)?;
                     let channel = account.join("channel-v1");
                     if tokio::fs::symlink_metadata(&channel)
                         .await
@@ -197,7 +221,9 @@ impl DirectoryScan {
             return Ok(ScanStep::Done);
         };
         if environment.file_type().await?.is_dir() {
-            self.accounts = Some(tokio::fs::read_dir(environment.path()).await?);
+            let path = environment.path();
+            crate::utils::source_access::check(&path)?;
+            self.accounts = Some(tokio::fs::read_dir(path).await?);
         }
         Ok(ScanStep::Empty)
     }
@@ -229,7 +255,11 @@ fn open_stamp(root: &Path, path: &Path) -> anyhow::Result<(File, FileStamp)> {
         use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
-    let file = options.open(path)?;
+    let file = if crate::utils::source_access::current().is_some() {
+        crate::utils::source_access::open(path)?
+    } else {
+        options.open(path)?
+    };
     anyhow::ensure!(
         path_from_opened_file(&file)?.starts_with(root),
         "source is outside the collaboration directory"
@@ -275,7 +305,8 @@ fn read_snapshot(root: &Path, path: &Path, cached: Option<&FileStamp>) -> anyhow
     if cached == Some(&stamp) {
         return Ok(Snapshot::None);
     }
-    if stamp.size > MAX_FILE_BYTES {
+    let read_limit = crate::utils::source_access::read_limit(MAX_FILE_BYTES as usize) as u64;
+    if stamp.size > read_limit {
         return Ok(Snapshot::TooLarge);
     }
     let mut bytes = Vec::with_capacity(stamp.size as usize);
@@ -411,7 +442,16 @@ impl InputBody for CollaborationBody {
                 .iter()
                 .find(|(saved, _)| saved == &file)
                 .map(|(_, stamp)| stamp.clone());
+            let scope = crate::utils::source_access::current();
             let result = tokio::task::spawn_blocking(move || {
+                struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+                impl Drop for Restore {
+                    fn drop(&mut self) {
+                        crate::utils::source_access::install(self.0.take());
+                    }
+                }
+                let _restore = Restore(crate::utils::source_access::current());
+                crate::utils::source_access::install(scope);
                 read_snapshot(&root, &read_file, cached.as_ref())
             })
             .await?;
@@ -422,7 +462,7 @@ impl InputBody for CollaborationBody {
                     state.warn_once(
                         rt,
                         "size",
-                        "Collaboration state exceeds 16 MiB; retaining source progress",
+                        "Collaboration state exceeds the configured read limit; retaining source progress",
                     );
                     continue;
                 }
@@ -621,5 +661,125 @@ mod tests {
         assert!(restarted[2..]
             .iter()
             .all(|entry| !first.contains(&entry.event_id)));
+    }
+
+    #[tokio::test]
+    async fn failed_sdk_accept_freezes_progress_and_restart_replays_same_events() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("collaboration");
+        let account = root.join("environment/account");
+        std::fs::create_dir_all(&account).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        std::fs::write(
+            account.join("state.json"),
+            fixture(now + 1, "allowed", "owner", "first").to_string(),
+        )
+        .unwrap();
+        let checkpoint = sandbox.path().join("checkpoint.json");
+        let store = Arc::new(StateStore::new(&checkpoint));
+        store.update(
+            SOURCE,
+            InputStatePatch {
+                extra: Some(json!({"collaboration": {
+                    "version": 1, "sinceMs": (now - 1) * 1000, "completed": {}
+                }})),
+                ..Default::default()
+            },
+        );
+        store.save().await.unwrap();
+        let input =
+            QwenWorkCnCollaborationInput::new(root.clone(), None, Arc::clone(&store), Some(60_000));
+        let seen = Arc::new(SyncMutex::new(Vec::new()));
+        let subscriber = Arc::clone(&seen);
+        input.bind_collector(
+            move |entries| {
+                subscriber.lock().unwrap().push(
+                    entries
+                        .iter()
+                        .map(|entry| entry.event_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            },
+            |_| {},
+        );
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let accept_attempts = Arc::clone(&attempts);
+        input.0.set_cycle_hooks(
+            Arc::new(|| Box::pin(async { Ok(()) })),
+            Arc::new(move || {
+                let attempt = accept_attempts.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if attempt == 0 {
+                        anyhow::bail!("simulated outbox failure");
+                    }
+                    Ok(())
+                })
+            }),
+        );
+        input.start().await.unwrap();
+        input.0.run_cycle().await;
+        assert!(
+            store.save_failed_for(SOURCE),
+            "failed acceptance must freeze mutated progress"
+        );
+        input.stop().await.unwrap();
+
+        let store = Arc::new(StateStore::new(&checkpoint));
+        store.load().await;
+        let restarted = QwenWorkCnCollaborationInput::new(root, None, store, Some(60_000));
+        let subscriber = Arc::clone(&seen);
+        restarted.bind_collector(
+            move |entries| {
+                subscriber.lock().unwrap().push(
+                    entries
+                        .iter()
+                        .map(|entry| entry.event_id.clone())
+                        .collect::<Vec<_>>(),
+                )
+            },
+            |_| {},
+        );
+        restarted.start().await.unwrap();
+        restarted.0.run_cycle().await;
+        restarted.stop().await.unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "only the rejected and recovered batches should be observed"
+        );
+        assert_eq!(seen[0].len(), 2);
+        assert_eq!(seen[0], seen[1], "retry must keep stable event IDs");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collaboration_sdk_source_rejects_symlinks_outside_authorized_root() {
+        use std::os::unix::fs::symlink;
+
+        struct Restore(Option<Arc<crate::utils::source_access::SourceScope>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                crate::utils::source_access::install(self.0.take());
+            }
+        }
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("collaboration");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let outside = sandbox.path().join("outside.json");
+        std::fs::write(&outside, b"{}").unwrap();
+        let link = root.join("state.json");
+        symlink(&outside, &link).unwrap();
+        let _restore = Restore(crate::utils::source_access::current());
+        crate::utils::source_access::install(Some(crate::utils::source_access::SourceScope::new(
+            vec![root.clone()],
+            4,
+            1024,
+        )));
+        assert!(read_snapshot(&root, &link, None).is_err());
     }
 }

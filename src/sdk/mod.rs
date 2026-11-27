@@ -1,10 +1,17 @@
 //! Shared collector dynamic-library boundary. See include/pilot_sdk.h.
 pub mod abi;
 mod api;
+pub(crate) fn linked_api() -> &'static abi::PilotApiV2 {
+    &api::API
+}
+pub(crate) mod hook_history;
+pub(crate) mod hook_ingress;
 pub(crate) mod host_loader;
 mod monitoring;
-mod policy;
+pub(crate) mod policy;
+pub(crate) mod qwen_handoff;
 mod runtime;
+pub(crate) use runtime::configure_qwen_wakeups;
 
 pub(crate) mod outbox;
 

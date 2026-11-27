@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+
 struct World {
     _temp: tempfile::TempDir,
     root: std::path::PathBuf,
@@ -16,7 +17,7 @@ impl World {
         std::fs::create_dir_all(&data).unwrap();
         for id in ["cursor", "claude-code"] {
             let mut def: AgentDefinition = serde_json::from_str(if id == "cursor" {
-                include_str!("../../agents.d/cursor.json")
+                include_str!("../../tests/fixtures/legacy-cursor-agent.json")
             } else {
                 include_str!("../../agents.d/claude-code.json")
             })
@@ -33,9 +34,10 @@ impl World {
             )
             .unwrap();
         }
+        let pilot = crate::deployment::legacy_cursor_test_assets::stage(&root);
         let manager = Arc::new(DeploymentManager::new(DeploymentManagerOptions {
             data_dir: data.to_string_lossy().into_owned(),
-            pilot_dir: env!("CARGO_MANIFEST_DIR").into(),
+            pilot_dir: pilot.to_string_lossy().into_owned(),
             builtin_agents_dir: Some(defs.to_string_lossy().into_owned()),
             installed_by: None,
         }));

@@ -3,7 +3,7 @@
  * Manual performance runner for Cursor hook processor.
  *
  * Usage:
- *   npm run perf:cursor-hook
+ *   PILOT_NODE_RELEASE_ROOT=/path/to/unpacked/v1.20.0 npm run perf:cursor-hook
  *
  * Measures both the processor and the shell entrypoint, using real captured
  * Cursor payloads plus synthetic large tool outputs up to 20MB.
@@ -23,8 +23,13 @@ const fixturePath = path.join(
   'cursor-hook',
   'raw-cursor-hooks-2026-04-30.jsonl',
 );
-const processorPath = path.join(repoRoot, 'assets', 'hooks', 'cursor-hook-processor.mjs');
-const shellPath = path.join(repoRoot, 'assets', 'hooks', 'cursor-loongsuite-pilot-hook.sh');
+const nodeReleaseRoot = process.env.PILOT_NODE_RELEASE_ROOT;
+if (!nodeReleaseRoot) {
+  throw new Error('Set PILOT_NODE_RELEASE_ROOT to the unpacked Node.js release; the Rust SDK does not ship the old entrypoint.');
+}
+const processorPath = path.join(nodeReleaseRoot, 'assets', 'hooks', 'cursor-hook-processor.mjs');
+const shellPath = path.join(nodeReleaseRoot, 'assets', 'hooks', 'cursor-loongsuite-pilot-hook.sh');
+await Promise.all([fs.access(processorPath), fs.access(shellPath)]);
 
 function percentile(values, p) {
   if (values.length === 0) return 0;

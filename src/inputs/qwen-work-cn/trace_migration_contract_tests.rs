@@ -106,6 +106,40 @@ fn segment_pair(input: i64, output: i64, cache: bool) -> Vec<Value> {
         json!({"ts":"2026-08-06T06:00:05.000Z","type":"model.response.completed","turn_id":"turn-1","request_id":"request-1","data":data}),
     ]
 }
+
+#[tokio::test]
+async fn sdk_owned_history_survives_crash_before_first_checkpoint() {
+    let f = Fixture::new();
+    // Simulate a producer append followed by a crash before the SDK commits
+    // its first input checkpoint. This is SDK-owned history, not old history
+    // which a newly installed host should baseline.
+    f.store.set("qwen-work-cn-trace", InputState::new());
+    f.history(&[request(), response("recovered-response")]);
+    let wakeups = f.root.join("wakeups");
+    std::fs::create_dir_all(&wakeups).unwrap();
+    let input = f.input();
+    input.set_native_wakeups(QwenWorkCnNativeWakeups {
+        directory: wakeups,
+        pilot_policy_dir: None,
+        transcript_roots: vec![f.root.clone()],
+        transition_inbox: None,
+        producer_data_dir: f.root.clone(),
+        user_id: "test".into(),
+        legacy_cursor_root: None,
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let captured = events.clone();
+    input.bind_collector(
+        move |batch| captured.lock().unwrap().extend_from_slice(batch),
+        |_| {},
+    );
+    input.start().await.unwrap();
+    input.stop().await.unwrap();
+    let events = events.lock().unwrap();
+    assert!(events.iter().any(|event| event.event_id == "request"));
+    assert!(events.iter().any(|event| event.event_id == "response"));
+}
+
 #[tokio::test]
 async fn source_l74_real_trace_identity_and_default_and_explicit_native_watch_paths() {
     let f = Fixture::new();

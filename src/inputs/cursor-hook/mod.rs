@@ -86,8 +86,8 @@ async fn transform_cursor_record(
         }
     }
     let payload = payload_of(&record);
-    let hook_event = hook_event(&record, &payload);
-    let attributes = build_attributes(&payload, &hook_event);
+    let hook_event = hook_event(&record, payload);
+    let attributes = build_attributes(payload, &hook_event);
     let Some(mut entry) = build_canonical_hook_entry(
         &record,
         ClientType::Cursor.as_str(),
@@ -126,11 +126,11 @@ fn infer_cursor_variant(record: &Map<String, Value>) -> ClientType {
     ClientType::Cursor
 }
 
-fn payload_of(record: &Map<String, Value>) -> Map<String, Value> {
-    if let Some(Value::Object(data)) = record.get("data") {
-        return data.clone();
-    }
-    record.clone()
+fn payload_of(record: &Map<String, Value>) -> &Map<String, Value> {
+    record
+        .get("data")
+        .and_then(Value::as_object)
+        .unwrap_or(record)
 }
 
 fn non_empty(value: Option<&Value>) -> Option<&str> {

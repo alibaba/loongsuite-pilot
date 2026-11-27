@@ -478,3 +478,724 @@ fn current_rollback_helper_rejects_unbound_source_and_configuration_mutation_bef
         assert!(!cache.join("update-recovery.json").exists());
     }
 }
+
+#[test]
+fn failed_node_switch_restores_current_cursor_hooks_and_retry_retires_only_the_installed_hooks() {
+    let fixture = Fixture::new();
+    let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(
+        thin,
+        fixture
+            .candidate
+            .join("bin")
+            .join(thin.file_name().unwrap()),
+    )
+    .unwrap();
+    fixture.package_with(&[(
+        "agents.d/cursor.json",
+        include_str!("../../agents.d/cursor.json"),
+    )]);
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let name = String::from_utf8(stage.stdout).unwrap();
+    let current = cache.join("versions").join(name.trim());
+    success(&fixture.helper("publish-package", &fixture.runtime_options(&current), true));
+    let settings = fixture.root.path().join(".cursor/hooks.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let user_hook = json!({"type":"command","command":"keep-user-hook"});
+    let foreign = json!({"version":1,"private":"keep","hooks":{
+        "stop":[user_hook]
+    }});
+    fs::write(&settings, foreign.to_string()).unwrap();
+    let binary = current
+        .join("bin")
+        .join(fixture.binary.file_name().unwrap());
+    let mut command = fixture.command(&binary);
+    command
+        .args(["hook", "install", "--agents", "cursor", "--json"])
+        .env("LOONGSUITE_PILOT_RESOURCE_ROOT", &current)
+        .env(
+            "AGENT_DATA_COLLECTION_CONFIG",
+            fixture.data.join("config.json"),
+        );
+    let installed = bounded(command);
+    success(&installed);
+    let report: Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(report["agents"][0]["status"], "ok", "{report}");
+    let original = fs::read(&settings).unwrap();
+    assert!(String::from_utf8_lossy(&original).contains("loongsuite-pilot-sdk-hook"));
+
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.sh"),
+        "#!/bin/sh\n# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let service = fixture.root.path().join(if cfg!(windows) {
+        ".local/bin/loongsuite-pilot-service.ps1"
+    } else {
+        ".local/bin/loongsuite-pilot"
+    });
+    let original_service = fs::read(&service).unwrap();
+    let mode = fs::metadata(&service).unwrap().permissions();
+    let mut read_only = mode.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&service, read_only).unwrap();
+    let mut edited: Value = serde_json::from_slice(&original).unwrap();
+    edited["private"] = json!("edited during repair");
+    let edited_bytes = edited.to_string();
+    let added_settings = fixture.root.path().join(".cursor/other-hooks.json");
+    let mut added = edited;
+    added["private"] = json!("created during repair");
+    let added_bytes = added.to_string();
+    let rollback_while_repairing = |repair: &dyn Fn()| {
+        std::thread::scope(|scope| {
+            let asset_lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fixture.data.join(".hook-assets.lock"))
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&asset_lock).unwrap();
+            let rollback = scope.spawn(|| {
+                fixture.helper("rollback-package", &fixture.runtime_options(&node), true)
+            });
+            // The installer has opened its activation transaction while repair holds the lock.
+            let journal = cache.join("update-recovery.json");
+            let started = Instant::now();
+            while !journal.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                journal.exists(),
+                "rollback did not open its activation transaction"
+            );
+            repair();
+            drop(asset_lock);
+            rollback.join().unwrap()
+        })
+    };
+    let output = rollback_while_repairing(&|| {
+        fs::write(&settings, &edited_bytes).unwrap();
+    });
+    fs::set_permissions(&service, mode).unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("只读") && error.contains("service"),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), edited_bytes);
+    assert_eq!(fs::read(&service).unwrap(), original_service);
+    assert_eq!(
+        fs::read_to_string(cache.join("current")).unwrap().trim(),
+        name.trim()
+    );
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), b"1.0.9_legacy\n");
+    assert!(!cache.join("update-recovery.json").exists());
+
+    success(&rollback_while_repairing(&|| {
+        fs::write(&added_settings, &added_bytes).unwrap();
+        let state_path = fixture.data.join("deployed-agents.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["cursor"]["hookSettingsPaths"] = json!([&settings, &added_settings]);
+        fs::write(state_path, state.to_string()).unwrap();
+    }));
+    for (settings, private) in [
+        (&settings, "edited during repair"),
+        (&added_settings, "created during repair"),
+    ] {
+        let cleaned: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        let mut expected = foreign.clone();
+        expected["private"] = json!(private);
+        assert_eq!(cleaned, expected);
+    }
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    assert_eq!(
+        fs::read_to_string(cache.join("previous")).unwrap().trim(),
+        name.trim()
+    );
+}
+
+#[test]
+fn node_rollback_waits_for_both_qwen_outboxes_and_exports_both_cursors() {
+    let fixture = Fixture::new();
+    fixture.package();
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let current = String::from_utf8(stage.stdout).unwrap();
+    success(&fixture.helper(
+        "publish-package",
+        &fixture.runtime_options(&cache.join("versions").join(current.trim())),
+        true,
+    ));
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(node.join("scripts/loongsuite-pilot.sh"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let service = fixture.root.path().join(if cfg!(windows) {
+        ".local/bin/loongsuite-pilot-service.ps1"
+    } else {
+        ".local/bin/loongsuite-pilot"
+    });
+    let baseline_service = fs::read(&service).unwrap();
+    let baseline_current = fs::read(cache.join("current")).unwrap();
+    let baseline_previous = fs::read(cache.join("previous")).unwrap();
+    let checkpoint = fixture.data.join("logs/input-state.json");
+    fs::create_dir_all(checkpoint.parent().unwrap()).unwrap();
+    let original = json!({"unrelated":{"lastOffset":7}});
+    fs::write(&checkpoint, original.to_string()).unwrap();
+    let qwen_trace = json!({"lastFile":"qwen-work-cn-2026-11-26.jsonl","lastOffset":131});
+    let qwen_collab =
+        json!({"extra":{"collaboration":{"version":1,"sinceMs":111,"completed":{"turn":222}}}});
+    let sources = [
+        (
+            "qwen-work-cn-trace",
+            "standalone-qwen-work-cn-sdk",
+            &qwen_trace,
+        ),
+        (
+            "qwen-work-cn-collaboration",
+            "standalone-qwen-work-cn-collaboration-sdk",
+            &qwen_collab,
+        ),
+    ];
+    let outboxes: Vec<_> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (input, dir, cursor))| {
+            let sdk = fixture.data.join("state").join(dir);
+            fs::create_dir_all(sdk.join("outbox")).unwrap();
+            fs::File::create(sdk.join("collector.lock")).unwrap();
+            let db = rusqlite::Connection::open(sdk.join("outbox/delivery.sqlite")).unwrap();
+            db.execute_batch(
+                "CREATE TABLE queue_size (singleton INTEGER PRIMARY KEY, events INTEGER NOT NULL);
+         INSERT INTO queue_size VALUES (1, 0);
+         CREATE TABLE checkpoint (source TEXT PRIMARY KEY, json TEXT NOT NULL);",
+            )
+            .unwrap();
+            db.execute(
+                "INSERT INTO checkpoint VALUES (?1, ?2)",
+                (
+                    index.to_string().repeat(64),
+                    json!({(*input): cursor}).to_string(),
+                ),
+            )
+            .unwrap();
+            db
+        })
+        .collect();
+    let rollback = || fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    for (blocked, (input, _, _)) in sources.iter().enumerate() {
+        outboxes[blocked]
+            .execute("UPDATE queue_size SET events = 1", [])
+            .unwrap();
+        let attempt = rollback();
+        assert!(!attempt.status.success());
+        let stderr = String::from_utf8_lossy(&attempt.stderr);
+        assert!(
+            stderr.contains(&format!("{input} SDK activity is still queued")),
+            "{stderr}"
+        );
+        assert_eq!(
+            fs::read(&checkpoint).unwrap(),
+            original.to_string().into_bytes()
+        );
+        assert_eq!(fs::read(cache.join("current")).unwrap(), baseline_current);
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), baseline_previous);
+        assert_eq!(fs::read(&service).unwrap(), baseline_service);
+        for db in &outboxes {
+            assert_eq!(
+                db.query_row("SELECT COUNT(*) FROM checkpoint", [], |r| r
+                    .get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
+        }
+        outboxes[blocked]
+            .execute("UPDATE queue_size SET events = 0", [])
+            .unwrap();
+    }
+    success(&rollback());
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    let transferred: Value = serde_json::from_slice(&fs::read(&checkpoint).unwrap()).unwrap();
+    assert_eq!(
+        transferred,
+        json!({"unrelated":{"lastOffset":7},
+        "qwen-work-cn-trace": qwen_trace, "qwen-work-cn-collaboration": qwen_collab})
+    );
+    for db in &outboxes {
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM checkpoint", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+}
+
+#[test]
+fn node_rollback_protects_durable_hook_ingress_before_outbox_and_fences_stale_hooks() {
+    let fixture = Fixture::new();
+    fixture.package();
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let current = String::from_utf8(stage.stdout).unwrap();
+    let installed = cache.join("versions").join(current.trim());
+    let publish = || {
+        fixture.helper(
+            "publish-package",
+            &fixture.runtime_options(&installed),
+            true,
+        )
+    };
+    success(&publish());
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(node.join("scripts/loongsuite-pilot.sh"), "#!/bin/sh\n").unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let pointer = fs::read(cache.join("current")).unwrap();
+    let previous = fs::read(cache.join("previous")).unwrap();
+
+    let data = fixture.data.canonicalize().unwrap();
+    let qwen = data.join("state/standalone-qwen-work-cn-sdk");
+    let wakeups = qwen.join("wakeups/qwen-work-cn");
+    let transcripts = fixture
+        .root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("transcripts");
+    fs::create_dir_all(&transcripts).unwrap();
+    fs::create_dir_all(wakeups.parent().unwrap()).unwrap();
+    fs::write(
+        qwen.join("wakeups/qwen-work-cn-policy.json"),
+        json!({"schema":1,"enabled":true,"transcript_root":transcripts}).to_string(),
+    )
+    .unwrap();
+    let transcript = transcripts.join("native.jsonl");
+    fs::write(&transcript, "{\"type\":\"user\"}\n").unwrap();
+    let hook = |root: &Path, agent: &str, event: &str, payload: Value| {
+        let input = fixture.root.path().join("native-hook.json");
+        fs::write(&input, payload.to_string()).unwrap();
+        let mut cmd = fixture.command(Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook")));
+        cmd.args([
+            "sdk-hook",
+            "--agent",
+            agent,
+            "--channel",
+            "observe",
+            "--event",
+            event,
+        ])
+        .arg("--data-dir")
+        .arg(root)
+        .env("AGENT_DATA_COLLECTION_CONFIG", data.join("config.json"))
+        .stdin(fs::File::open(input).unwrap());
+        bounded(cmd)
+    };
+    let qwen_stop = || {
+        hook(
+            &qwen,
+            "qwen-work-cn",
+            "Stop",
+            json!({
+                "hook_event_name":"Stop","session_id":"offline-qwen","transcript_path":transcript
+            }),
+        )
+    };
+    let cursor_prompt = || {
+        hook(
+            &data,
+            "cursor",
+            "beforeSubmitPrompt",
+            json!({
+                "conversation_id":"offline-cursor","generation_id":"one","prompt":"offline test"
+            }),
+        )
+    };
+    let rollback = || fixture.helper("rollback-package", &fixture.runtime_options(&node), true);
+    let refuse = |wanted: &str| {
+        let output = rollback();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(wanted), "{error}");
+        assert_eq!(fs::read(cache.join("current")).unwrap(), pointer);
+        assert_eq!(fs::read(cache.join("previous")).unwrap(), previous);
+        assert!(!data.join("logs/input-state.json").exists());
+        assert!(!qwen.join("outbox/delivery.sqlite").exists());
+        assert!(!data
+            .join("state/standalone-cursor-sdk/outbox/delivery.sqlite")
+            .exists());
+    };
+    // The actual thin binaries publish even though no collector/outbox ever
+    // started. Move the observed records aside only to isolate each guard;
+    // the SDK delivery and retry are verified separately in sdk_dynamic.
+    assert!(qwen_stop().status.success());
+    let marker = fs::read_dir(&wakeups)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let bytes = fs::read(&marker).unwrap();
+    refuse("Qwen Work Stop notifications are still pending");
+    assert_eq!(fs::read(&marker).unwrap(), bytes);
+    fs::rename(marker, fixture.root.path().join("qwen-queued-record")).unwrap();
+    assert!(cursor_prompt().status.success());
+    let inbox = data.join("state/cursor/deferred/inbox");
+    let queued = fs::read_dir(&inbox)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let payload = fs::read(&queued).unwrap();
+    refuse("Cursor deferred Hook activity is still pending");
+    assert_eq!(fs::read(&queued).unwrap(), payload);
+    fs::rename(queued, fixture.root.path().join("cursor-queued-record")).unwrap();
+    let journal = inbox.with_file_name("event-journal.jsonl");
+    let assembled_input =
+        b"{\"hook_event\":\"beforeSubmitPrompt\",\"conversation_id\":\"offline-cursor\"}\n";
+    fs::write(&journal, assembled_input).unwrap();
+    refuse("Cursor deferred Hook activity is still pending");
+    assert_eq!(fs::read(&journal).unwrap(), assembled_input);
+    fs::rename(
+        journal,
+        fixture.root.path().join("cursor-unassembled-record"),
+    )
+    .unwrap();
+
+    // Pause the real activation *after* the first inbox/outbox inspection.
+    // Both thin Hooks must return promptly and persist to the shared gate.
+    let gate = cache.join(".sdk-hook-rollback-inbox");
+    let output = std::thread::scope(|scope| {
+        let asset_lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data.join(".hook-assets.lock"))
+            .unwrap();
+        fs2::FileExt::try_lock_exclusive(&asset_lock).unwrap();
+        let switching = scope.spawn(rollback);
+        let started = Instant::now();
+        while !cache.join("update-recovery.json").is_file() {
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "rollback did not enter activation"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(qwen_stop().status.success());
+        assert!(cursor_prompt().status.success());
+        let files: Vec<_> = fs::read_dir(&gate)
+            .unwrap()
+            .map(|f| f.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        assert!(files.iter().any(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("qwen-")));
+        assert!(files.iter().any(|f| f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("cursor-")));
+        drop(asset_lock);
+        switching.join().unwrap()
+    });
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("Hook notifications arrived during rollback"),
+        "{error}"
+    );
+    assert_eq!(fs::read(cache.join("current")).unwrap(), pointer);
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), previous);
+    assert!(!cache.join("update-recovery.json").exists());
+    assert_eq!(fs::read_dir(&gate).unwrap().count(), 2);
+    refuse("Hook notifications from a previous rollback are still pending");
+    // Decoder/restart/ACK of real pending bytes is exercised by sdk_dynamic.
+    // Keep these receipt files as fixture evidence while checking the empty cut.
+    for item in fs::read_dir(&gate).unwrap() {
+        let item = item.unwrap();
+        fs::rename(item.path(), fixture.root.path().join(item.file_name())).unwrap();
+    }
+    // A transport fixture substitutes /bin/sh for Node so offline Rust
+    // installation tests do not require a system Node. The full package
+    // side of the bridge is validated separately with official v1.20.0.
+    #[cfg(unix)]
+    {
+        let hooks = node.join("assets/hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        fs::write(data.join("node-bin"), "\u{feff}/bin/sh\r\n").unwrap();
+        for (script, target) in [
+            ("qwen-work-cn-hook-processor.mjs", "node-qwen-hook.jsonl"),
+            ("cursor-hook-processor.mjs", "node-cursor-hook.jsonl"),
+        ] {
+            fs::write(
+                hooks.join(script),
+                format!(
+                    "/bin/cat >> \"$LOONGSUITE_PILOT_DATA_DIR/{target}\"\nprintf '\\n' >> \"$LOONGSUITE_PILOT_DATA_DIR/{target}\"\n"
+                ),
+            )
+            .unwrap();
+        }
+        let config = data.join("cursor-policy.json");
+        fs::write(
+            &config,
+            br#"{"agents":{"cursor":{"captureMessageContent":false}}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(data.join("hooks")).unwrap();
+        fs::write(
+            data.join("hooks/cursor-config-path"),
+            json!({"path":config,"implicitDefault":false}).to_string(),
+        )
+        .unwrap();
+    }
+    success(&rollback());
+    assert!(!gate.exists());
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    // An Agent that cached the previous native command uses the selected
+    // Node capture once, and never appends to a Rust-only queue.
+    assert!(qwen_stop().status.success());
+    assert!(cursor_prompt().status.success());
+    #[cfg(unix)]
+    {
+        let observed = |name: &str| {
+            let bytes = fs::read_to_string(data.join(name)).unwrap();
+            let mut rows = bytes.lines();
+            let row: Value = serde_json::from_str(rows.next().unwrap()).unwrap();
+            assert!(
+                rows.next().is_none(),
+                "legacy capture must receive one body"
+            );
+            row
+        };
+        let qwen = observed("node-qwen-hook.jsonl");
+        assert_eq!(qwen["session_id"], "offline-qwen");
+        assert_eq!(qwen["hook_event_name"], "Stop");
+        let cursor = observed("node-cursor-hook.jsonl");
+        assert_eq!(cursor["conversation_id"], "offline-cursor");
+        assert_eq!(cursor["generation_id"], "one");
+        assert_eq!(cursor["hook_event_name"], "beforeSubmitPrompt");
+        assert!(cursor["prompt"]
+            .as_str()
+            .is_some_and(|text| text.trim().is_empty()));
+    }
+    assert_eq!(fs::read_dir(&wakeups).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    success(&publish());
+    assert!(qwen_stop().status.success());
+    assert!(cursor_prompt().status.success());
+    assert_eq!(fs::read_dir(wakeups).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(inbox).unwrap().count(), 1);
+}
+
+#[test]
+fn failed_node_switch_restores_current_qwen_hooks_and_retry_retires_only_the_installed_hooks() {
+    let fixture = Fixture::new();
+    let thin = Path::new(env!("CARGO_BIN_EXE_loongsuite-pilot-sdk-hook"));
+    fs::copy(
+        thin,
+        fixture
+            .candidate
+            .join("bin")
+            .join(thin.file_name().unwrap()),
+    )
+    .unwrap();
+    fixture.package_with(&[(
+        "agents.d/qwen-work-cn.json",
+        include_str!("../../agents.d/qwen-work-cn.json"),
+    )]);
+    let cache = fixture.root.path().join("cache");
+    let stage = fixture.helper(
+        "stage-package",
+        &fixture.runtime_options(&fixture.candidate),
+        true,
+    );
+    success(&stage);
+    let name = String::from_utf8(stage.stdout).unwrap();
+    let current = cache.join("versions").join(name.trim());
+    success(&fixture.helper("publish-package", &fixture.runtime_options(&current), true));
+    let settings = fixture.root.path().join(".qwenworkcn/settings.json");
+    fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let user_hook = json!({"type":"command","command":"keep-user-hook"});
+    let foreign = json!({"private":"keep","hooks":{
+        "Stop":[{"matcher":"user-scope","hooks":[user_hook]}]
+    }});
+    fs::write(&settings, foreign.to_string()).unwrap();
+    let binary = current
+        .join("bin")
+        .join(fixture.binary.file_name().unwrap());
+    let mut command = fixture.command(&binary);
+    command
+        .args(["hook", "install", "--agents", "qwen-work-cn", "--json"])
+        .env("LOONGSUITE_PILOT_RESOURCE_ROOT", &current)
+        .env(
+            "AGENT_DATA_COLLECTION_CONFIG",
+            fixture.data.join("config.json"),
+        );
+    let installed = bounded(command);
+    success(&installed);
+    let report: Value = serde_json::from_slice(&installed.stdout).unwrap();
+    assert_eq!(report["agents"][0]["status"], "ok", "{report}");
+    let original = fs::read(&settings).unwrap();
+    assert!(String::from_utf8_lossy(&original).contains("loongsuite-pilot-sdk-hook"));
+
+    let node = cache.join("versions/1.0.9_legacy");
+    legacy_tree(&node);
+    fs::create_dir_all(node.join("agents.d")).unwrap();
+    fs::write(
+        node.join("agents.d/qoder.json"),
+        include_str!("../../agents.d/qoder.json"),
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.sh"),
+        "#!/bin/sh\n# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(
+        node.join("scripts/loongsuite-pilot.ps1"),
+        "# legacy fixture\n",
+    )
+    .unwrap();
+    fs::write(cache.join("previous"), b"1.0.9_legacy\n").unwrap();
+    let service = fixture.root.path().join(if cfg!(windows) {
+        ".local/bin/loongsuite-pilot-service.ps1"
+    } else {
+        ".local/bin/loongsuite-pilot"
+    });
+    let original_service = fs::read(&service).unwrap();
+    let mode = fs::metadata(&service).unwrap().permissions();
+    let mut read_only = mode.clone();
+    read_only.set_readonly(true);
+    fs::set_permissions(&service, read_only).unwrap();
+    let mut edited: Value = serde_json::from_slice(&original).unwrap();
+    edited["private"] = json!("edited during repair");
+    let edited_bytes = edited.to_string();
+    let added_settings = fixture.root.path().join(".qwenworkcn/other-settings.json");
+    let mut added = edited;
+    added["private"] = json!("created during repair");
+    let added_bytes = added.to_string();
+    let rollback_while_repairing = |repair: &dyn Fn()| {
+        std::thread::scope(|scope| {
+            let asset_lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(fixture.data.join(".hook-assets.lock"))
+                .unwrap();
+            fs2::FileExt::try_lock_exclusive(&asset_lock).unwrap();
+            let rollback = scope.spawn(|| {
+                fixture.helper("rollback-package", &fixture.runtime_options(&node), true)
+            });
+            // The installer has opened its activation transaction while repair holds the lock.
+            let journal = cache.join("update-recovery.json");
+            let started = Instant::now();
+            while !journal.exists() && started.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                journal.exists(),
+                "rollback did not open its activation transaction"
+            );
+            repair();
+            drop(asset_lock);
+            rollback.join().unwrap()
+        })
+    };
+    let output = rollback_while_repairing(&|| {
+        fs::write(&settings, &edited_bytes).unwrap();
+    });
+    fs::set_permissions(&service, mode).unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("只读") && error.contains("service"),
+        "{error}"
+    );
+    assert_eq!(fs::read_to_string(&settings).unwrap(), edited_bytes);
+    assert_eq!(fs::read(&service).unwrap(), original_service);
+    assert_eq!(
+        fs::read_to_string(cache.join("current")).unwrap().trim(),
+        name.trim()
+    );
+    assert_eq!(fs::read(cache.join("previous")).unwrap(), b"1.0.9_legacy\n");
+    assert!(!cache.join("update-recovery.json").exists());
+
+    success(&rollback_while_repairing(&|| {
+        fs::write(&added_settings, &added_bytes).unwrap();
+        let state_path = fixture.data.join("deployed-agents.json");
+        let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+        state["qwen-work-cn"]["hookSettingsPaths"] = json!([&settings, &added_settings]);
+        fs::write(state_path, state.to_string()).unwrap();
+    }));
+    for (settings, private) in [
+        (&settings, "edited during repair"),
+        (&added_settings, "created during repair"),
+    ] {
+        let cleaned: Value = serde_json::from_slice(&fs::read(settings).unwrap()).unwrap();
+        let mut expected = foreign.clone();
+        expected["private"] = json!(private);
+        assert_eq!(cleaned, expected);
+    }
+    assert_eq!(fs::read(cache.join("current")).unwrap(), b"1.0.9_legacy\n");
+    assert_eq!(
+        fs::read_to_string(cache.join("previous")).unwrap().trim(),
+        name.trim()
+    );
+}

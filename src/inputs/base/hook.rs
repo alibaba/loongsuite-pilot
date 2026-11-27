@@ -39,6 +39,15 @@ pub trait HookBody: Send + Sync + 'static {
         String::new()
     }
     fn before_stop(&self) {}
+    async fn on_start(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn on_stop(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn before_collect(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 pub struct HookAdapter<T: HookBody> {
@@ -81,12 +90,17 @@ impl<T: HookBody> InputBody for HookAdapter<T> {
         self.inner.before_stop();
     }
 
-    async fn on_start(&self, _rt: &InputRuntime) -> anyhow::Result<()> {
+    async fn on_start(&self, rt: &InputRuntime) -> anyhow::Result<()> {
         ensure_dir(&self.inner.paths().log_dir).await;
-        Ok(())
+        self.inner.on_start(rt).await
+    }
+
+    async fn on_stop(&self, rt: &InputRuntime) -> anyhow::Result<()> {
+        self.inner.on_stop(rt).await
     }
 
     async fn collect(&self, rt: &InputRuntime) -> anyhow::Result<Vec<AgentActivityEntry>> {
+        self.inner.before_collect(rt).await?;
         collect_hook(&self.inner, rt).await
     }
 }

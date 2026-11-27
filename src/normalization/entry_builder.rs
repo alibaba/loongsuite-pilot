@@ -117,6 +117,24 @@ pub fn build_agent_activity_entry(opts: &Value) -> AgentActivityEntry {
     }
 }
 
+pub(crate) fn build_shared_hook_activity_entry(
+    options: Map<String, Value>,
+    record: &Map<String, Value>,
+) -> AgentActivityEntry {
+    if is_legacy_options(&options) {
+        return build_from_legacy(&options);
+    }
+    normalize_standard_entry(options, |_, canonical, legacy| {
+        // Shared hooks accept both historical keys for a tool result.
+        let keys = if canonical == "gen_ai.tool.call.result" {
+            &[canonical, "tool.result", legacy][..]
+        } else {
+            &[canonical, legacy][..]
+        };
+        first_present(record, keys).cloned()
+    })
+}
+
 pub fn build_from_code_generation_event(
     event: &CodeGenerationEvent,
     user_id: &str,

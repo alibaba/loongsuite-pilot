@@ -106,6 +106,9 @@ pub struct AgentPlan {
     pub poll_interval_ms: u64,
     pub mask: crate::types::MaskConfig,
     pub pilot_host: Option<PilotHostState>,
+    pub capture_message_content: Option<bool>,
+    pub exclude_workspaces: Vec<String>,
+    pub include_conversation_ids: Option<Vec<String>>,
     #[serde(skip)]
     pub(super) codex_recovery_wakeup_namespace: Option<String>,
 }
@@ -118,33 +121,76 @@ pub struct PilotHostState {
     pub capture_message_content: Option<bool>,
     #[serde(default)]
     pub exclude_workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_link_ttl_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask_rule_manifest: Option<Value>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub codex_rollout_owns_interrupted_turns: bool,
 }
 impl AgentPlan {
     pub(super) fn checkpoint_key(&self) -> &'static str {
+        if let Some(profile) = super::hook_history::find(&self.agent) {
+            return profile.listener;
+        }
         match self.profile.as_str() {
             "codex_rollout_v1" => "codex-transcript",
             "codex_aborted_turn_v1" => "codex-aborted-turn",
+            "qwen_work_cn_trace_v1" => "qwen-work-cn-trace",
+            "qwen_work_cn_collaboration_v1" => "qwen-work-cn-collaboration",
             _ => "qoder-trace",
         }
     }
 
     pub fn namespace(&self) -> String {
         use sha2::{Digest, Sha256};
-        let mut bytes = serde_json::to_vec(&(
-            &self.agent,
-            &self.profile,
-            &self.sources,
-            &self.allowed_roots,
-        ))
-        .expect("source plan JSON");
+        // Standalone Qwen still checkpoints the same shared Hook history.
+        // Authorizing the canonical Flash Stop source only adds a way to
+        // produce rows in that history, not another independently read cursor.
+        // Keep the preceding package's namespace and any unacknowledged rows.
+        let flash_stop = self.standalone_qwen_flash_stop();
+        let sources: Vec<_> = self
+            .sources
+            .iter()
+            .filter(|source| Some(*source) != flash_stop)
+            .collect();
+        let roots: Vec<_> = self
+            .allowed_roots
+            .iter()
+            .filter(|root| flash_stop.is_none_or(|source| source.path != **root))
+            .collect();
+        let mut bytes = serde_json::to_vec(&(&self.agent, &self.profile, sources, roots))
+            .expect("source plan JSON");
         if let Some(state) = &self.pilot_host {
             bytes.extend_from_slice(b"standalone-");
             bytes.extend_from_slice(self.agent.as_bytes());
             bytes.extend(serde_json::to_vec(&state.data_dir).expect("Pilot state directory"));
         }
         hex::encode(Sha256::digest(bytes))
+    }
+
+    fn standalone_qwen_flash_stop(&self) -> Option<&Source> {
+        if self.agent != "qwen-work-cn" || self.profile != "qwen_work_cn_trace_v1" {
+            return None;
+        }
+        let host = self.pilot_host.as_ref()?;
+        let shared_history = host.data_dir.join("logs/qwen-work-cn/history");
+        if !self
+            .sources
+            .iter()
+            .any(|s| s.kind == "hook_jsonl" && s.path == shared_history)
+        {
+            return None;
+        }
+        let projects = self.sources.iter().find(|s| {
+            s.kind == "transcript"
+                && s.id == "transcript"
+                && s.path.ends_with(".qwenworkcn/projects")
+        })?;
+        let flash = projects.path.parent()?.join("logs/hooks");
+        self.sources
+            .iter()
+            .find(|s| s.kind == "transcript" && s.id == "flash-transcript" && s.path == flash)
     }
 }
 #[derive(Clone)]
@@ -378,7 +424,8 @@ impl Policy {
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("agent name must be a string"))?;
             anyhow::ensure!(
-                matches!(agent, "qoder" | "codex" | "qoder-cn"),
+                matches!(agent, "qoder" | "codex" | "qoder-cn" | "qwen-work-cn")
+                    || super::hook_history::find(agent).is_some(),
                 "unsupported SDK agent: {agent}"
             );
             anyhow::ensure!(seen.insert(agent), "duplicate agent");
@@ -414,6 +461,9 @@ impl Policy {
                             | "output"
                             | "pilot_qoder"
                             | "pilot_host"
+                            | "capture_message_content"
+                            | "exclude_workspaces"
+                            | "include_conversation_ids"
                             | "codex_recovery"
                     ))),
                 "unsupported collection option"
@@ -427,9 +477,49 @@ impl Policy {
                     (agent, profile),
                     ("qoder", "qoder_trace_v1")
                         | ("codex", "codex_rollout_v1" | "codex_aborted_turn_v1")
-                ),
+                        | (
+                            "qwen-work-cn",
+                            "qwen_work_cn_trace_v1" | "qwen_work_cn_collaboration_v1"
+                        )
+                ) || super::hook_history::find(agent).is_some_and(|item| item.profile == profile),
                 "unsupported agent/profile: {agent}/{profile}"
             );
+            anyhow::ensure!(
+                (agent == "qwen-work-cn" || collection.get("include_conversation_ids").is_none())
+                    && (!matches!(agent, "qoder" | "codex")
+                        || (collection.get("capture_message_content").is_none()
+                            && collection.get("exclude_workspaces").is_none())),
+                "unsupported content, workspace, or conversation options for this profile"
+            );
+            let capture_message_content = collection
+                .get("capture_message_content")
+                .map(|value| {
+                    value
+                        .as_bool()
+                        .ok_or_else(|| anyhow::anyhow!("capture_message_content must be boolean"))
+                })
+                .transpose()?;
+            let exclude_workspaces = crate::inputs::base::validate_excluded_workspaces(
+                collection.get("exclude_workspaces"),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let include_conversation_ids = collection
+                .get("include_conversation_ids")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .filter(|values| values.len() <= 1024)
+                        .ok_or_else(|| anyhow::anyhow!("invalid conversation allowlist"))?
+                        .iter()
+                        .map(|id| {
+                            id.as_str()
+                                .filter(|id| !id.is_empty() && id.len() <= 1024)
+                                .map(str::to_owned)
+                                .ok_or_else(|| anyhow::anyhow!("invalid conversation ID"))
+                        })
+                        .collect::<anyhow::Result<Vec<_>>>()
+                })
+                .transpose()?;
             let roots = collection
                 .get("allowed_roots")
                 .and_then(Value::as_array)
@@ -503,10 +593,22 @@ impl Policy {
                 }
                 let kind = source.get("type").and_then(Value::as_str).unwrap_or("");
                 anyhow::ensure!(
-                    matches!(
-                        kind,
-                        "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
-                    ) || (pilot_host.is_some() && kind == "sqlite_root"),
+                    if agent == "qwen-work-cn" {
+                        matches!(
+                            kind,
+                            "hook_jsonl"
+                                | "transcript"
+                                | "segments"
+                                | "collaboration"
+                                | "desktop_database"
+                                | "flash_database"
+                        )
+                    } else {
+                        matches!(
+                            kind,
+                            "hook_jsonl" | "transcript" | "sqlite" | "segments" | "intercept"
+                        ) || (pilot_host.is_some() && kind == "sqlite_root")
+                    },
                     "unsupported source type"
                 );
                 if let Some(mode) = source.get("read_mode") {
@@ -523,6 +625,12 @@ impl Policy {
                     kind: kind.into(),
                     path: resolved,
                 });
+            }
+            if super::hook_history::find(agent).is_some() {
+                anyhow::ensure!(
+                    parsed.len() == 1 && parsed[0].kind == "hook_jsonl",
+                    "this profile requires exactly one hook_jsonl source"
+                );
             }
             if agent == "codex" {
                 anyhow::ensure!(
@@ -562,12 +670,46 @@ impl Policy {
                 }
             }
             anyhow::ensure!(
-                parsed.iter().filter(|s| s.kind == "hook_jsonl").count() <= 1
-                    && parsed
-                        .iter()
-                        .any(|s| matches!(s.kind.as_str(), "hook_jsonl" | "transcript")),
-                "profile requires exactly one primary source"
+                include_conversation_ids.is_none()
+                    || parsed.iter().any(|source| source.kind == "collaboration"),
+                "conversation allowlist requires a collaboration source"
             );
+            let source_count = |kind| parsed.iter().filter(|source| source.kind == kind).count();
+            let valid_sources = match profile {
+                "qwen_work_cn_collaboration_v1" => {
+                    parsed.len() == 1 && parsed[0].kind == "collaboration"
+                }
+                "qwen_work_cn_trace_v1" => {
+                    let transcript_count = source_count("transcript");
+                    let history_only = source_count("hook_jsonl") == 1 && transcript_count == 0;
+                    let transcripts_only =
+                        source_count("hook_jsonl") == 0 && (1..=2).contains(&transcript_count);
+                    let host_upgrade = pilot_host.as_ref().is_some_and(|host| {
+                        source_count("hook_jsonl") == 1
+                            && (1..=2).contains(&transcript_count)
+                            && parsed.iter().any(|source| {
+                                source.kind == "hook_jsonl"
+                                    && source.path
+                                        == host.data_dir.join("logs/qwen-work-cn/history")
+                            })
+                    });
+                    (history_only || transcripts_only || host_upgrade)
+                        && source_count("segments") <= 1
+                        && source_count("collaboration") <= 1
+                        && matches!(
+                            (
+                                source_count("desktop_database"),
+                                source_count("flash_database")
+                            ),
+                            (0, 0) | (1, 1)
+                        )
+                }
+                _ => {
+                    source_count("hook_jsonl") <= 1
+                        && (source_count("hook_jsonl") + source_count("transcript")) > 0
+                }
+            };
+            anyhow::ensure!(valid_sources, "profile requires exactly one primary source");
             let limits = collection
                 .get("limits")
                 .cloned()
@@ -601,18 +743,46 @@ impl Policy {
             if let Some(schema) = collection.pointer("/output/schema") {
                 anyhow::ensure!(schema == "aah.activity.v2", "unsupported output schema");
             }
-            let plan = AgentPlan {
+            let mut plan = AgentPlan {
                 mask: mask.clone(),
                 pilot_host,
+                capture_message_content,
+                exclude_workspaces,
+                include_conversation_ids,
                 agent: agent.into(),
                 profile: profile.into(),
                 sources: parsed,
                 allowed_roots,
                 max_files: limit("max_files", 512, 16384)?,
                 max_read_bytes: limit("max_read_bytes", 8 * 1024 * 1024, 64 * 1024 * 1024)?,
-                poll_interval_ms: limit("poll_interval_ms", 1000, 300000)? as u64,
+                poll_interval_ms: limit(
+                    "poll_interval_ms",
+                    1000,
+                    if super::hook_history::find(agent).is_some()
+                        && collection.get("pilot_host").is_some()
+                    {
+                        usize::MAX
+                    } else {
+                        300000
+                    },
+                )? as u64,
                 codex_recovery_wakeup_namespace: None,
             };
+            // Collaboration has its own transaction and checkpoint. One
+            // embedded Qwen policy can activate both independent sources.
+            if profile == "qwen_work_cn_trace_v1" {
+                if let Some(index) = plan
+                    .sources
+                    .iter()
+                    .position(|source| source.kind == "collaboration")
+                {
+                    let collaboration = plan.sources.remove(index);
+                    let mut child = plan.clone();
+                    child.profile = "qwen_work_cn_collaboration_v1".into();
+                    child.sources = vec![collaboration];
+                    agents.insert("qwen-work-cn-collaboration".into(), child);
+                }
+            }
             if enable_codex_recovery {
                 let mut recovery = plan.clone();
                 recovery.profile = "codex_aborted_turn_v1".into();
@@ -679,10 +849,16 @@ impl Policy {
         } else {
             hooks["relay_host_verdicts"] = Value::Bool(false);
         }
+        let standalone_managed_hook = hooks["agents"].as_array().is_some_and(|agents| {
+            agents
+                .iter()
+                .any(|agent| matches!(agent.as_str(), Some("openclaw" | "qwen-work-cn")))
+        });
         hooks["managed_host_rules"] = Value::Bool(
-            ["qoder", "codex", "qoder-cn"]
-                .into_iter()
-                .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object())
+            (standalone_managed_hook
+                || ["qoder", "codex", "qoder-cn"]
+                    .into_iter()
+                    .any(|agent| hooks["collector_plans"][agent]["pilot_host"].is_object()))
                 && hooks.pointer("/local/mode").and_then(Value::as_str) == Some("all"),
         );
         hooks["embedded_codex"] = serde_json::json!(init.codex_home.is_some());

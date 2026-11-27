@@ -36,16 +36,10 @@ collector 进程内 interceptor HTTP（127.0.0.1）
 QwenWorkCN 桌面（本地 settings.json）
         │ stdin hook JSON
         ▼
-interceptor-qwenworkcn-hook.sh / .ps1
+loongsuite-pilot-sdk-hook sdk-hook --agent qwen-work-cn --channel local
         │
         ▼
-dist/interceptor/cli.cjs  hook --agent qwen-work-cn
-        │ loopback HTTP（4s）
-        ▼
-collector 进程内 interceptor HTTP（127.0.0.1）
-        │
-        │ 企业 HTTP：POST /v1/hooks/qwenwork
-        │ （始终 HTTP 200；fail-open 为 {}）
+Pilot SDK 本地裁决回调
         ▼
 顺序规则引擎（首个 block 短路）
 ```
@@ -112,7 +106,7 @@ Qoder hook timeout：`UserPromptSubmit` 15 秒，`PreToolUse` / `PostToolUse` 10
 
 [千问办公企业 Hooks](https://help.aliyun.com/zh/qwenwork/hooks)
 
-三个拦截点与 Qoder 相同：`UserPromptSubmit`、`PreToolUse`、`PostToolUse`。采集仍只装 `Stop`（`qwenworkcn-loongsuite-pilot-hook`）。拦截是 `agents.d/qwen-work-cn.json` 里独立的 `hook.interceptor`，写入 `~/.qwenworkcn/settings.json` 的 nested `type:command`（本机已验证可用）。
+三个拦截点与 Qoder 相同：`UserPromptSubmit`、`PreToolUse`、`PostToolUse`。Rust 安装以共用原生 Hook 写入 `~/.qwenworkcn/settings.json` 的 nested `type:command`。`Stop` 走观察通道唤醒采集；未开启本地裁决时 `UserPromptSubmit` 保留无操作的注册，开启后只替换该受管注册，不重复安装。旧脚本名仍作为升级识别和清理标记，脚本本身由对应旧版安装包提供。
 
 官方企业控制台只接受 `type:http`。本机部署**不**把 HTTP hook 写进 settings；企业管理员若要把控制台 URL 指到本机 daemon，使用 `POST http://127.0.0.1:<port>/v1/hooks/qwenwork`（默认端口 18791，以 `runtime.json` 为准）。
 
