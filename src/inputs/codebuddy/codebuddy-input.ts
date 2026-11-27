@@ -16,7 +16,18 @@ const INITIALIZED_KEY = 'codebuddyHookInitialized';
 const BOUNDARIES_KEY = 'boundaries';
 const MAX_STOPS_PER_SESSION = 64;
 const ORPHAN_GRACE_MS = 60 * 60 * 1_000;
-const STABILITY_RETRY_MS = 5_000;
+/**
+ * How long a session's boundary timeline is kept after its last observation.
+ * Bounds the `boundaries` state map without losing seal evidence in practice:
+ * a session that resumes after the window simply re-creates its entry with the
+ * next prompt — which is exactly the boundary needed to seal the turn it had
+ * left open. 30d is deliberately generous: the only loss case is a turn left
+ * open with zero hook events for the whole window.
+ */
+const BOUNDARY_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
+
+/** Legacy StateStore keys from the offset-tracking design (pre consume-and-delete). */
+const LEGACY_STATE_KEYS = [OFFSET_MAP_KEY, INITIALIZED_KEY] as const;
 
 /** Record shape written by assets/hooks/codebuddy-hook-event-writer.mjs. */
 interface CodeBuddyHookEventRecord {
@@ -57,7 +68,6 @@ export class CodeBuddyInput extends BaseInput {
 
   private readonly hookEventDir: string;
   private watchers: fsSync.FSWatcher[] = [];
-  private stabilityRetry: ReturnType<typeof setTimeout> | null = null;
 
   constructor(opts: InputOptions & { hookEventDir?: string }) {
     super(opts);
@@ -86,17 +96,10 @@ export class CodeBuddyInput extends BaseInput {
   protected override async onStop(): Promise<void> {
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
-    if (this.stabilityRetry) {
-      clearTimeout(this.stabilityRetry);
-      this.stabilityRetry = null;
-    }
   }
 
   protected async collect(): Promise<AgentActivityEntry[]> {
     const state = this.getState();
-    const initialized = state.extra?.[INITIALIZED_KEY] === true;
-    const prevOffsets = normalizeOffsetMap(state.extra?.[OFFSET_MAP_KEY]);
-    const nextOffsets: Record<string, number> = { ...prevOffsets };
     const boundaries = normalizeBoundaries(state.extra?.[BOUNDARIES_KEY]);
 
     const sessionEntries = await this.listSessionDirs();
@@ -111,30 +114,35 @@ export class CodeBuddyInput extends BaseInput {
         }
         if (!name.endsWith('.json')) continue;
 
-        const offset = initialized ? (prevOffsets[eventFile] ?? 0) : 0;
         let content: string;
         try {
-          const stat = await fs.stat(eventFile);
-          if (stat.size <= offset) continue;
           content = await fs.readFile(eventFile, 'utf8');
         } catch {
           // A concurrent writer may have removed it.
           continue;
         }
-        nextOffsets[eventFile] = Buffer.byteLength(content, 'utf8');
         const record = this.parseRecord(content);
         if (record) recordStopBoundary(boundaries, record);
+        // Consume-and-delete, mirroring WorkBuddyInput: the writer publishes
+        // each record via tmp+rename, so a visible file is complete and invalid
+        // JSON can never become valid later — every read event file is removed.
+        // Without this the state dir, an offset map keyed by every file ever
+        // seen, and the boundary map would all grow without bound. The crash
+        // window (deleted here, state persisted at the end of this pass) is the
+        // same best-effort trade WorkBuddyInput makes.
+        await fs.unlink(eventFile).catch(() => undefined);
       }
+      // Only succeeds when the directory is empty; a freshly written .tmp file
+      // (within the orphan grace window) keeps it alive until the next pass.
+      await fs.rmdir(sessionDir).catch(() => undefined);
     }
 
-    this.setState({
-      extra: {
-        ...state.extra,
-        [INITIALIZED_KEY]: true,
-        [OFFSET_MAP_KEY]: nextOffsets,
-        [BOUNDARIES_KEY]: boundaries,
-      },
-    });
+    const nextExtra: Record<string, unknown> = { ...state.extra, [BOUNDARIES_KEY]: pruneStaleBoundaries(boundaries) };
+    // StateStore.update merges extra keys, so legacy keys are retired by
+    // explicitly writing undefined (JSON.stringify drops them on the next
+    // persist) — a plain delete here would be resurrected by the merge.
+    for (const key of LEGACY_STATE_KEYS) nextExtra[key] = undefined;
+    this.setState({ extra: nextExtra });
     // No entries: this input only feeds the Stop-boundary timeline consumed by
     // CodeBuddyHistoryInput (see class doc).
     return [];
@@ -177,14 +185,6 @@ export class CodeBuddyInput extends BaseInput {
     } catch {
       // Polling remains active when the path is absent or recursive watch is unsupported.
     }
-  }
-
-  private scheduleStabilityRetry(): void {
-    if (!this.running || this.stabilityRetry) return;
-    this.stabilityRetry = setTimeout(() => {
-      this.stabilityRetry = null;
-      this.requestCollection();
-    }, STABILITY_RETRY_MS);
   }
 }
 
@@ -235,11 +235,20 @@ function recordStopBoundary(
   }
 }
 
-function normalizeOffsetMap(raw: unknown): Record<string, number> {
-  if (!raw || typeof raw !== 'object') return {};
-  const result: Record<string, number> = {};
-  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof value === 'number' && Number.isFinite(value)) result[key] = value;
+/**
+ * Drop sessions whose last boundary observation is older than the retention
+ * window. Bounded growth without losing live seal evidence: a resumed session
+ * re-creates its entry with the next prompt (see BOUNDARY_RETENTION_MS).
+ */
+function pruneStaleBoundaries(
+  boundaries: Record<string, { stops: number[]; prompts: number[] }>,
+  nowMs: number = Date.now(),
+): Record<string, { stops: number[]; prompts: number[] }> {
+  const oldest = nowMs - BOUNDARY_RETENTION_MS;
+  const out: Record<string, { stops: number[]; prompts: number[] }> = {};
+  for (const [sessionId, entry] of Object.entries(boundaries)) {
+    const latest = Math.max(...entry.stops, ...entry.prompts);
+    if (Number.isFinite(latest) && latest >= oldest) out[sessionId] = entry;
   }
-  return result;
+  return out;
 }

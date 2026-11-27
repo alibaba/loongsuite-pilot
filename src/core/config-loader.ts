@@ -836,6 +836,7 @@ function buildListenersConfig(
     doubao: { enabled: resolveDoubaoAppEnabled(file?.listeners, file?.agents), pollInterval: DEFAULT_POLL_INTERVAL_MS },
     codebuddy: { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'codebuddy-history': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
+    'codebuddy-rollout': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     'hermes-agent-log': { enabled: true, pollInterval: DEFAULT_POLL_INTERVAL_MS },
     antigravity: { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
     'antigravity-cli': { enabled: true, pollInterval: DEFAULT_ANTIGRAVITY_POLL_INTERVAL_MS },
