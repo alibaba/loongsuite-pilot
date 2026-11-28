@@ -6,7 +6,7 @@ import type { Dirent, FSWatcher } from 'node:fs';
 import type { AgentActivityEntry } from '../../types/index.js';
 import { ClientType, CollectionMethod } from '../../types/index.js';
 import { BaseInput, type InputOptions } from '../base/base-input.js';
-import { buildWorkBuddyEvents } from './workbuddy-event-builder.js';
+import { buildWorkBuddyEvents, isInternalRecord, isWorkBuddyAssistantBoundary } from './workbuddy-event-builder.js';
 import type { WorkBuddyHookEvent, WorkBuddyRecord } from './workbuddy-types.js';
 
 const OFFSET_MAP_KEY = 'workbuddyTranscriptBytes';
@@ -155,11 +155,17 @@ export class WorkBuddyInput extends BaseInput {
             transcriptPath,
             sessionId,
             priorMeta?.handledStopAtMs ?? 0,
-            latestStopAtMs,
           );
-          const built = await buildWorkBuddyEvents(parsed.records, { sessionId, hookEvents });
+          const firstOpenRecord = findFirstUnsealedUser(parsed.records, hookEvents, latestStopAtMs);
+          const records = firstOpenRecord === undefined ? parsed.records : parsed.records.slice(0, firstOpenRecord);
+          const built = await buildWorkBuddyEvents(records, {
+            sessionId,
+            hookEvents: hookEvents.filter(hook => hook.observedAtMs <= latestStopAtMs),
+          });
           entries.push(...built);
-          nextOffsets[transcriptPath] = parsed.nextOffset;
+          nextOffsets[transcriptPath] = firstOpenRecord === undefined
+            ? parsed.nextOffset
+            : parsed.recordOffsets[firstOpenRecord];
           handledStopAtMs = latestStopAtMs;
         } else {
           this.scheduleStabilityRetry();
@@ -465,6 +471,7 @@ export class WorkBuddyInput extends BaseInput {
         continue;
       }
       if (!isPathWithin(realRoot, realCandidate)) continue;
+      if (hint.sessionId && hint.sessionId !== path.basename(realCandidate, '.jsonl')) continue;
       stops.set(realCandidate, Math.max(stops.get(realCandidate) ?? 0, hint.observedAtMs));
     }
     return stops;
@@ -475,7 +482,6 @@ export class WorkBuddyInput extends BaseInput {
     transcriptPath: string,
     sessionId: string,
     afterMs: number,
-    throughMs: number,
   ): Promise<WorkBuddyHookEvent[]> {
     const events: WorkBuddyHookEvent[] = [];
     for (const hint of hints) {
@@ -483,7 +489,7 @@ export class WorkBuddyInput extends BaseInput {
       if (!['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Stop'].includes(hint.eventName)) {
         continue;
       }
-      if (hint.observedAtMs <= afterMs || hint.observedAtMs > throughMs) continue;
+      if (hint.observedAtMs <= afterMs) continue;
       if (hint.sessionId && hint.sessionId !== sessionId) continue;
       let realCandidate: string;
       try {
@@ -504,12 +510,120 @@ export class WorkBuddyInput extends BaseInput {
   }
 }
 
+function findFirstUnsealedUser(
+  records: WorkBuddyRecord[],
+  hookEvents: WorkBuddyHookEvent[],
+  stopAtMs: number,
+): number | undefined {
+  const promptTimes = hookEvents.filter(hook => hook.eventName === 'UserPromptSubmit')
+    .map(hook => hook.observedAtMs);
+  const hasLaterPrompt = promptTimes.some(atMs => atMs > stopAtMs);
+  // A Stop can be observed before a later turn reaches the same transcript.
+  // Keep the first source row of that later turn for its own Stop.
+  let currentUser: number | undefined;
+  let currentUserAtMs: number | undefined;
+  let unconfirmedUser: number | undefined;
+  let needsOwnStop = false;
+  let currentTerminal: { atMs?: number; cancelled: boolean } | undefined;
+  let currentActivityAtMs: number | undefined;
+  let terminalReasoningAtMs: number | undefined;
+  let previousTerminalAtMs: number | undefined;
+  let previousCancelledActivityAtMs: number | undefined;
+  let previousCancellationHadPrompt = false;
+  let earlierCompletedTurns = 0;
+  const stopCount = new Set(hookEvents.filter(hook =>
+    hook.eventName === 'Stop' && hook.observedAtMs <= stopAtMs).map(hook => hook.observedAtMs)).size;
+  const hasStopForCurrentTurn = () => {
+    if (earlierCompletedTurns < stopCount) return true;
+    const lowerBound = previousTerminalAtMs ?? previousCancelledActivityAtMs;
+    if (lowerBound === undefined || (currentUserAtMs !== undefined && currentUserAtMs <= lowerBound)) return false;
+    // An untimed prompt after earlier activity needs an established
+    // earlier prompt. Native timing can establish it even if its Hook is missing.
+    if (previousTerminalAtMs === undefined && currentUserAtMs === undefined && !previousCancellationHadPrompt) {
+      return false;
+    }
+    const earliestPromptAt = currentUserAtMs ?? Number.NEGATIVE_INFINITY;
+    return promptTimes.some(atMs => atMs > lowerBound && atMs >= earliestPromptAt && atMs <= stopAtMs);
+  };
+  const currentCutoff = () => {
+    const activityAfterStop = currentActivityAtMs !== undefined && currentActivityAtMs > stopAtMs;
+    const hasOwnStop = hasStopForCurrentTurn();
+    if (activityAfterStop && needsOwnStop && (!currentTerminal || !hasOwnStop)) {
+      return unconfirmedUser ?? currentUser;
+    }
+    if (unconfirmedUser === undefined) return undefined;
+    if (activityAfterStop && earlierCompletedTurns === 0) {
+      const terminalAt = currentTerminal?.atMs;
+      // An older prompt hook and a native terminal before the later prompt
+      // distinguish a late first response from the next queued turn.
+      if (terminalAt === undefined) return unconfirmedUser;
+      if (hasLaterPrompt && (!promptTimes.some(atMs => atMs <= stopAtMs)
+        || promptTimes.some(atMs => atMs > stopAtMs && atMs <= terminalAt))) return unconfirmedUser;
+    }
+    if ((!currentTerminal && (hasLaterPrompt || needsOwnStop)) || !hasOwnStop) return unconfirmedUser;
+    return undefined;
+  };
+  for (const [index, record] of records.entries()) {
+    const assistantBoundary = isWorkBuddyAssistantBoundary(records, index);
+    // The event builder has to recognize the row before its timestamp can close a boundary.
+    if (!assistantBoundary && isInternalRecord(record)) continue;
+    const timestamp = typeof record.timestamp === 'number' && Number.isFinite(record.timestamp)
+      ? record.timestamp : undefined;
+    if (record.type === 'message' && record.role === 'user') {
+      if (currentTerminal || needsOwnStop || (currentActivityAtMs ?? 0) > stopAtMs) {
+        const cutoff = currentCutoff();
+        if (cutoff !== undefined) return cutoff;
+      }
+      if (currentTerminal) {
+        const lastActivityAt = currentTerminal.cancelled ? currentActivityAtMs : undefined;
+        const priorBoundaryAt = previousTerminalAtMs ?? previousCancelledActivityAtMs ?? 0;
+        const nativePrompt = currentUserAtMs;
+        previousCancellationHadPrompt = lastActivityAt !== undefined
+          && ((nativePrompt !== undefined && nativePrompt > priorBoundaryAt && nativePrompt <= lastActivityAt)
+            || promptTimes.some(atMs => atMs > priorBoundaryAt && atMs <= lastActivityAt));
+        previousCancelledActivityAtMs = lastActivityAt;
+        previousTerminalAtMs = currentTerminal.atMs;
+        earlierCompletedTurns++;
+        unconfirmedUser = undefined;
+      }
+      if (timestamp !== undefined && timestamp > stopAtMs) return unconfirmedUser ?? index;
+      needsOwnStop = earlierCompletedTurns > 0 && earlierCompletedTurns >= stopCount;
+      const untimedPrompt = timestamp === undefined && (currentUser !== undefined || hasLaterPrompt);
+      unconfirmedUser = untimedPrompt || needsOwnStop ? unconfirmedUser ?? index : undefined;
+      currentUser = index;
+      currentUserAtMs = timestamp;
+      currentTerminal = undefined;
+      currentActivityAtMs = undefined;
+      terminalReasoningAtMs = undefined;
+      continue;
+    }
+    // An ordinary native response can be timed by reasoning in the same
+    // model step. Reasoning before a tool wave does not time the final step.
+    if (record.type === 'function_call' || record.type === 'function_call_result') terminalReasoningAtMs = undefined;
+    if (record.type === 'reasoning' && timestamp !== undefined) {
+      terminalReasoningAtMs = Math.max(terminalReasoningAtMs ?? timestamp, timestamp);
+    }
+    if (currentUser !== undefined && assistantBoundary) {
+      const cancelled = record.status === 'incomplete';
+      currentTerminal = { atMs: timestamp ?? (cancelled ? undefined : terminalReasoningAtMs), cancelled };
+      terminalReasoningAtMs = undefined;
+    }
+    if (currentUser === undefined || timestamp === undefined
+      || !['message', 'reasoning', 'function_call', 'function_call_result'].includes(record.type ?? '')) continue;
+    // Inspect the entire turn. A native response can arrive after its Stop,
+    // while an unfinished earlier step says nothing about ownership.
+    currentActivityAtMs = Math.max(currentActivityAtMs ?? timestamp, timestamp);
+    if (timestamp <= stopAtMs && (assistantBoundary || !needsOwnStop)) unconfirmedUser = undefined;
+  }
+  return currentCutoff();
+}
+
 async function readJsonlRange(
   filePath: string,
   startOffset: number,
   endOffset: number,
-): Promise<{ records: WorkBuddyRecord[]; nextOffset: number } | null> {
-  if (startOffset >= endOffset) return { records: [], nextOffset: startOffset };
+): Promise<{ records: WorkBuddyRecord[]; recordOffsets: number[]; nextOffset: number } | null> {
+  if (startOffset >= endOffset) return { records: [], recordOffsets: [], nextOffset: startOffset };
   let handle: Awaited<ReturnType<typeof fs.open>> | undefined;
   let content: Buffer;
   try {
@@ -524,34 +638,30 @@ async function readJsonlRange(
   }
 
   const records: WorkBuddyRecord[] = [];
+  const recordOffsets: number[] = [];
   let lineStart = 0;
   let nextOffset = startOffset;
+  const parseLine = (lineEnd: number) => {
+    const text = content.subarray(lineStart, lineEnd).toString('utf8').trim();
+    if (!text) return true;
+    try {
+      records.push(JSON.parse(text) as WorkBuddyRecord);
+      recordOffsets.push(startOffset + lineStart);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   for (let index = 0; index < content.length; index++) {
     if (content[index] !== 0x0a) continue;
-    if (!parseJsonlLine(content.subarray(lineStart, index), records)) {
-      return { records, nextOffset };
-    }
+    if (!parseLine(index)) return { records, recordOffsets, nextOffset };
     lineStart = index + 1;
     nextOffset = startOffset + lineStart;
   }
-  if (lineStart < content.length) {
-    const trailing = content.subarray(lineStart);
-    if (parseJsonlLine(trailing, records)) {
-      nextOffset = startOffset + content.length;
-    }
+  if (lineStart < content.length && parseLine(content.length)) {
+    nextOffset = startOffset + content.length;
   }
-  return { records, nextOffset };
-}
-
-function parseJsonlLine(line: Buffer, records: WorkBuddyRecord[]): boolean {
-  const text = line.toString('utf8').replace(/\r$/, '').trim();
-  if (!text) return true;
-  try {
-    records.push(JSON.parse(text) as WorkBuddyRecord);
-    return true;
-  } catch {
-    return false;
-  }
+  return { records, recordOffsets, nextOffset };
 }
 
 function isPathWithin(root: string, candidate: string): boolean {
